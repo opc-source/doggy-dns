@@ -1,7 +1,7 @@
 [package]
 name = "dns-filter-plugin"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
 license = "Apache-2.0"
 
 [dependencies]
@@ -17,3 +17,11 @@ arc-swap = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true }
+dns-filter-nacos = { path = "../dns-filter-nacos" }
+dashmap = { workspace = true }
+hickory-proto = { workspace = true }
+criterion = { workspace = true }
+
+[[bench]]
+name = "chain_bench"
+harness = false
