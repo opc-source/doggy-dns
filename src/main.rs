@@ -53,26 +53,31 @@ async fn main() -> Result<()> {
 
     tracing::info!("dns-filter is ready");
 
-    // Wait for shutdown signal
+    // Run server until shutdown signal
     let shutdown_timeout = Duration::from_secs(config.server.shutdown_timeout);
     let shutdown_token = server.shutdown_token().clone();
-    tokio::spawn(async move {
-        let ctrl_c = signal::ctrl_c();
-        let mut sigterm = signal::unix::signal(signal::unix::SignalKind::terminate())
-            .expect("failed to register SIGTERM handler");
 
-        tokio::select! {
-            _ = ctrl_c => tracing::info!("received SIGINT, shutting down..."),
-            _ = sigterm.recv() => tracing::info!("received SIGTERM, shutting down..."),
+    // Wait for SIGINT or SIGTERM, then cancel the server
+    let mut sigterm = signal::unix::signal(signal::unix::SignalKind::terminate())
+        .expect("failed to register SIGTERM handler");
+
+    tokio::select! {
+        _ = signal::ctrl_c() => tracing::info!("received SIGINT, shutting down..."),
+        _ = sigterm.recv() => tracing::info!("received SIGTERM, shutting down..."),
+        result = server.block_until_done() => {
+            // Server stopped on its own (socket error, etc.)
+            result?;
+            tracing::info!("server stopped");
+            return Ok(());
         }
-        shutdown_token.cancel();
-    });
+    }
 
-    // Drain in-flight requests with timeout
+    // Signal received — cancel listeners and drain with timeout
+    shutdown_token.cancel();
     match tokio::time::timeout(shutdown_timeout, server.block_until_done()).await {
         Ok(result) => result?,
         Err(_) => tracing::warn!(
-            "shutdown timed out after {}s, forcing exit",
+            "shutdown drain timed out after {}s, forcing exit",
             config.server.shutdown_timeout
         ),
     }

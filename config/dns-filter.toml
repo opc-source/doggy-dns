@@ -1,7 +1,8 @@
 [server]
 listen_addr = "0.0.0.0"
-port = 53
-tcp_timeout = 10
+port = 15353
+tcp_timeout = 30
+shutdown_timeout = 30
 
 #[server.tls]
 #enabled = false
@@ -21,7 +22,7 @@ metrics = false
 
 [[plugins]]
 kind = "nacos"
-enabled = true
+enabled = false
 server_addr = "127.0.0.1:8848"
 namespace = "public"
 group = "DEFAULT_GROUP"
