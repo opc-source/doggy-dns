@@ -270,7 +270,7 @@ git commit -m "feat: initialize cargo workspace with core, plugin, and nacos cra
 
 `crates/dns-filter-core/tests/config_test.rs`:
 ```rust
-use dns_filter_core::config::{DnsFilterConfig, PluginConfig, PluginKind};
+use dns_filter_core::config::{DnsFilterConfig, PluginKind};
 
 #[test]
 fn parse_full_config() {
@@ -350,13 +350,13 @@ data_id = "dns-filter.toml"
     assert_eq!(nacos.kind, PluginKind::Nacos);
     assert!(nacos.enabled);
     assert_eq!(nacos.server_addr.as_deref(), Some("127.0.0.1:8848"));
-    assert_eq!(nacos.ttl, Some(6));
+    assert_eq!(nacos.ttl, 6);
 
     let system_dns = &config.plugins[1];
     assert_eq!(system_dns.kind, PluginKind::SystemDns);
-    assert_eq!(system_dns.cache_size, Some(256));
-    assert_eq!(system_dns.min_ttl, Some(10));
-    assert_eq!(system_dns.max_ttl, Some(300));
+    assert_eq!(system_dns.cache_size, 256);
+    assert_eq!(system_dns.min_ttl, 10);
+    assert_eq!(system_dns.max_ttl, 300);
 
     let forward = &config.plugins[2];
     assert_eq!(forward.kind, PluginKind::Forward);
@@ -499,35 +499,30 @@ pub enum PluginKind {
     Forward,
 }
 
+/// Flat plugin config. Each field is optional; only the fields relevant
+/// to the plugin's `kind` are used. Unknown fields for a given kind
+/// are simply ignored at runtime.
 #[derive(Debug, Clone, Deserialize)]
 pub struct PluginConfig {
     pub kind: PluginKind,
     #[serde(default = "default_enabled")]
     pub enabled: bool,
-    #[serde(flatten)]
-    pub settings: PluginSettings,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(untagged)]
-pub enum PluginSettings {
-    Nacos {
-        server_addr: Option<String>,
-        namespace: Option<String>,
-        group: Option<String>,
-        dns_zone: Option<String>,
-        #[serde(default = "default_ttl")]
-        ttl: u32,
-    },
-    Resolver {
-        #[serde(default = "default_cache_size")]
-        cache_size: u32,
-        #[serde(default = "default_min_ttl")]
-        min_ttl: u32,
-        #[serde(default = "default_max_ttl")]
-        max_ttl: u32,
-        upstream: Option<Vec<String>>,
-    },
+    // Nacos-specific
+    pub server_addr: Option<String>,
+    pub namespace: Option<String>,
+    pub group: Option<String>,
+    pub dns_zone: Option<String>,
+    #[serde(default = "default_ttl")]
+    pub ttl: u32,
+    // Resolver-specific (system_dns / forward)
+    #[serde(default = "default_cache_size")]
+    pub cache_size: u32,
+    #[serde(default = "default_min_ttl")]
+    pub min_ttl: u32,
+    #[serde(default = "default_max_ttl")]
+    pub max_ttl: u32,
+    // Forward-specific
+    pub upstream: Option<Vec<String>>,
 }
 
 fn default_enabled() -> bool { true }
@@ -2324,6 +2319,7 @@ async fn main() -> Result<()> {
     tracing::info!("dns-filter is ready");
 
     // Wait for shutdown signal
+    let shutdown_timeout = Duration::from_secs(config.server.shutdown_timeout);
     let shutdown_token = server.shutdown_token().clone();
     tokio::spawn(async move {
         let ctrl_c = signal::ctrl_c();
@@ -2337,7 +2333,11 @@ async fn main() -> Result<()> {
         shutdown_token.cancel();
     });
 
-    server.block_until_done().await?;
+    // Drain in-flight requests with timeout
+    match tokio::time::timeout(shutdown_timeout, server.block_until_done()).await {
+        Ok(result) => result?,
+        Err(_) => tracing::warn!("shutdown timed out after {}s, forcing exit", config.server.shutdown_timeout),
+    }
     tracing::info!("dns-filter shut down gracefully");
 
     Ok(())
@@ -2360,61 +2360,50 @@ async fn build_authority_chain(config: &DnsFilterConfig) -> Result<AuthorityChai
         return Ok(AuthorityChain::new(handlers));
     }
 
+    // Keep watchers alive for their subscriptions
+    let mut _watchers: Vec<NacosServiceWatcher> = Vec::new();
+
     for plugin in &config.plugins {
         if !plugin.enabled {
             continue;
         }
 
-        match (&plugin.kind, &plugin.settings) {
-            (PluginKind::Nacos, PluginSettings::Nacos {
-                server_addr, namespace, group, dns_zone, ttl,
-            }) => {
-                let addr = server_addr.as_deref().unwrap_or("127.0.0.1:8848");
-                let ns = namespace.as_deref().unwrap_or("public");
-                let grp = group.as_deref().unwrap_or("DEFAULT_GROUP");
-                let zone = dns_zone.as_deref().unwrap_or("nacos.local");
+        match plugin.kind {
+            PluginKind::Nacos => {
+                let addr = plugin.server_addr.as_deref().unwrap_or("127.0.0.1:8848");
+                let ns = plugin.namespace.as_deref().unwrap_or("public");
+                let grp = plugin.group.as_deref().unwrap_or("DEFAULT_GROUP");
+                let zone = plugin.dns_zone.as_deref().unwrap_or("nacos.local");
 
                 let watcher = NacosServiceWatcher::new(addr, ns, grp).await?;
-                // Fetch existing service list and subscribe to each
                 watcher.subscribe_all().await;
                 let cache = watcher.cache();
 
-                let authority = NacosAuthority::new(cache, zone, *ttl);
+                let authority = NacosAuthority::new(cache, zone, plugin.ttl);
                 handlers.push(Arc::new(authority));
+                _watchers.push(watcher);
                 tracing::info!("loaded nacos plugin: zone={}", zone);
-
-                // Keep watcher alive (its subscriptions push updates)
-                // In production, store watcher in a shared state holder
-                std::mem::forget(watcher);
             }
-            (PluginKind::SystemDns, PluginSettings::Resolver {
-                cache_size, min_ttl, max_ttl, ..
-            }) => {
+            PluginKind::SystemDns => {
                 let authority = SystemAuthority::new(
-                    *cache_size as u64,
-                    Duration::from_secs(*min_ttl as u64),
-                    Duration::from_secs(*max_ttl as u64),
+                    plugin.cache_size as u64,
+                    Duration::from_secs(plugin.min_ttl as u64),
+                    Duration::from_secs(plugin.max_ttl as u64),
                 ).await?;
                 handlers.push(Arc::new(authority));
                 tracing::info!("loaded system_dns plugin");
             }
-            (PluginKind::Forward, PluginSettings::Resolver {
-                cache_size, min_ttl, max_ttl, upstream,
-            }) => {
-                let addrs = upstream
-                    .clone()
+            PluginKind::Forward => {
+                let addrs = plugin.upstream.clone()
                     .unwrap_or_else(|| vec!["8.8.8.8:53".to_string(), "1.1.1.1:53".to_string()]);
                 let authority = ForwardAuthority::new(
                     addrs,
-                    *cache_size as u64,
-                    Duration::from_secs(*min_ttl as u64),
-                    Duration::from_secs(*max_ttl as u64),
+                    plugin.cache_size as u64,
+                    Duration::from_secs(plugin.min_ttl as u64),
+                    Duration::from_secs(plugin.max_ttl as u64),
                 ).await?;
                 handlers.push(Arc::new(authority));
                 tracing::info!("loaded forward plugin");
-            }
-            _ => {
-                anyhow::bail!("mismatched plugin kind and settings");
             }
         }
     }
