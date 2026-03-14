@@ -15,8 +15,8 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::signal;
 
-#[tokio::main]
-async fn main() -> Result<()> {
+fn main() -> Result<()> {
+    // Init tracing (sync, no runtime needed)
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -26,13 +26,29 @@ async fn main() -> Result<()> {
 
     tracing::info!("dns-filter starting...");
 
-    // Load config
+    // Load config (sync — std::fs::read_to_string)
     let config_path = std::env::args()
         .nth(1)
         .unwrap_or_else(|| "config/dns-filter.toml".to_string());
     let config = load_config(&config_path)
         .context(format!("failed to load config from {}", config_path))?;
 
+    // Build runtime with configured worker threads
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .thread_name("dns-filter-runtime")
+        .worker_threads(config.server.worker_threads)
+        .build()?;
+
+    tracing::info!(
+        worker_threads = config.server.worker_threads,
+        "tokio runtime built"
+    );
+
+    runtime.block_on(async_main(config))
+}
+
+async fn async_main(config: DnsFilterConfig) -> Result<()> {
     // Build middleware chain
     let mut middlewares: Vec<Arc<dyn Middleware>> = Vec::new();
     if config.middleware.logging {

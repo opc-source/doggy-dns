@@ -3,6 +3,7 @@ listen_addr = "0.0.0.0"
 port = 15353
 tcp_timeout = 30
 shutdown_timeout = 30
+worker_threads = 1    # defaults to 1 (runs as DaemonSet, one per node)
 
 #[server.tls]
 #enabled = false

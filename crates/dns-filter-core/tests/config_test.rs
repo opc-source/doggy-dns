@@ -1,4 +1,4 @@
-use dns_filter_core::config::{DnsFilterConfig, PluginKind};
+use dns_filter_core::config::{validate_config, DnsFilterConfig, PluginKind};
 
 #[test]
 fn parse_full_config() {
@@ -136,4 +136,49 @@ enabled = true
 
     let result: Result<DnsFilterConfig, _> = toml::from_str(toml_str);
     assert!(result.is_err());
+}
+
+#[test]
+fn worker_threads_parses_when_specified() {
+    let toml_str = r#"
+[server]
+listen_addr = "0.0.0.0"
+port = 53
+worker_threads = 4
+"#;
+
+    let config: DnsFilterConfig = toml::from_str(toml_str).unwrap();
+    assert_eq!(config.server.worker_threads, 4);
+}
+
+#[test]
+fn worker_threads_defaults_to_one() {
+    let toml_str = r#"
+[server]
+listen_addr = "0.0.0.0"
+port = 53
+"#;
+
+    let config: DnsFilterConfig = toml::from_str(toml_str).unwrap();
+    assert_eq!(config.server.worker_threads, 1);
+}
+
+#[test]
+fn worker_threads_zero_fails_validation() {
+    let toml_str = r#"
+[server]
+listen_addr = "0.0.0.0"
+port = 53
+worker_threads = 0
+"#;
+
+    let config: DnsFilterConfig = toml::from_str(toml_str).unwrap();
+    let result = validate_config(&config);
+    assert!(result.is_err());
+    assert!(
+        result
+            .unwrap_err()
+            .to_string()
+            .contains("worker_threads must be greater than 0")
+    );
 }

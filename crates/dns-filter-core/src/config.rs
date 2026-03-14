@@ -19,6 +19,8 @@ pub struct ServerConfig {
     pub tcp_timeout: u64,
     #[serde(default = "default_shutdown_timeout")]
     pub shutdown_timeout: u64,
+    #[serde(default = "default_worker_threads")]
+    pub worker_threads: usize,
     pub tls: Option<TlsConfig>,
     pub https: Option<HttpsConfig>,
 }
@@ -29,6 +31,10 @@ fn default_tcp_timeout() -> u64 {
 
 fn default_shutdown_timeout() -> u64 {
     5
+}
+
+fn default_worker_threads() -> usize {
+    1
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -146,7 +152,11 @@ pub fn load_config(path: &str) -> anyhow::Result<DnsFilterConfig> {
     Ok(config)
 }
 
-fn validate_config(config: &DnsFilterConfig) -> anyhow::Result<()> {
+pub fn validate_config(config: &DnsFilterConfig) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        config.server.worker_threads > 0,
+        "server.worker_threads must be greater than 0"
+    );
     if let Some(tls) = &config.server.tls {
         if tls.enabled {
             anyhow::ensure!(
