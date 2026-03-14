@@ -10,3 +10,10 @@
 .vscode
 .history
 .DS_Store
+
+/.claude/*.local.*
+
+# Coverage artifacts
+cobertura.xml
+tarpaulin-report.html
+lcov.info
