@@ -7,11 +7,17 @@ pub struct MetricsMiddleware {
     queries_total: AtomicU64,
 }
 
-impl MetricsMiddleware {
-    pub fn new() -> Self {
+impl Default for MetricsMiddleware {
+    fn default() -> Self {
         Self {
             queries_total: AtomicU64::new(0),
         }
+    }
+}
+
+impl MetricsMiddleware {
+    pub fn new() -> Self {
+        Self::default()
     }
 
     pub fn total_queries(&self) -> u64 {

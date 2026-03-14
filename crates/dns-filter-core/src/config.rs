@@ -123,7 +123,7 @@ fn default_max_ttl() -> u32 {
     300
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 pub struct RemoteConfig {
     #[serde(default)]
     pub enabled: bool,
@@ -137,17 +137,6 @@ pub struct RemoteConfig {
     pub data_id: String,
 }
 
-impl Default for RemoteConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            server_addr: String::new(),
-            namespace: String::new(),
-            group: String::new(),
-            data_id: String::new(),
-        }
-    }
-}
 
 /// Load and validate config from a TOML file path.
 pub fn load_config(path: &str) -> anyhow::Result<DnsFilterConfig> {
