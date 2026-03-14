@@ -23,6 +23,10 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 anyhow = "1"
 
+[dev-dependencies]
+dashmap = { workspace = true }
+hickory-proto = { workspace = true }
+
 [workspace.dependencies]
 hickory-server = { version = "0.26.0-beta.1", features = ["tls-ring", "https-ring", "resolver"] }
 hickory-proto = "0.26.0-beta.1"
