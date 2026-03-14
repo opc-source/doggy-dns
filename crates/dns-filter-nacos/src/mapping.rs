@@ -1,5 +1,5 @@
 use hickory_proto::rr::rdata::{A, AAAA};
-use hickory_proto::rr::{Name, RData, Record, RecordType};
+use hickory_proto::rr::{Name, RData, Record};
 use std::net::IpAddr;
 use std::str::FromStr;
 
