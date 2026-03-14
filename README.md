@@ -200,13 +200,51 @@ dig @127.0.0.1 -p 15353 user-service.DEFAULT_GROUP.public.nacos.local A
 
 ### Benchmarks
 
-```bash
-# Run benchmarks
-cargo bench
+Benchmarks use [criterion](https://crates.io/crates/criterion) and parameterize over `worker_threads` 1..4.
 
-# Compile-only check
-cargo bench --no-run
+```bash
+# Run all benchmarks (nacos, authority chain, handler pipeline)
+cargo bench --workspace
+
+# Run a single crate's benchmarks
+cargo bench -p dns-filter-core       # handler pipeline benchmarks
+cargo bench -p dns-filter-nacos      # nacos authority lookup benchmarks
+cargo bench -p dns-filter-plugin     # authority chain benchmarks
+
+# Run a single benchmark by name
+cargo bench --bench handler_bench
+cargo bench --bench nacos_bench
+cargo bench --bench chain_bench
+
+# Filter to a specific benchmark function
+cargo bench --bench handler_bench -- handler_pipeline_nacos_hit
+
+# Compile-only check (used in CI)
+cargo bench --no-run --workspace
 ```
+
+> **Note:** `cargo bench` output starts with "running 0 tests" lines from the default test harness for each crate. This is normal -- the actual criterion results follow immediately after.
+
+### Coverage
+
+Uses [cargo-tarpaulin](https://github.com/xd009642/tarpaulin) with config in `tarpaulin.toml`.
+
+```bash
+# Install tarpaulin
+cargo install cargo-tarpaulin
+
+# Run coverage with project config (outputs XML + HTML reports)
+cargo tarpaulin --config tarpaulin.toml
+
+# Quick terminal summary
+cargo tarpaulin --workspace --out Stdout
+
+# Generate HTML report only
+cargo tarpaulin --workspace --out Html
+# Open tarpaulin-report.html in browser
+```
+
+Reports: `cobertura.xml` (for CI/Codecov) and `tarpaulin-report.html` (for local viewing).
 
 ## Development Rules
 
@@ -255,14 +293,24 @@ All jobs use dependency caching (`Swatinem/rust-cache@v2`).
 
 | Test File | Tests | Description |
 |-----------|-------|-------------|
-| `crates/dns-filter-core/tests/config_test.rs` | 7 | Config parsing, defaults, validation |
-| `crates/dns-filter-core/tests/middleware_test.rs` | 1 | Metrics counter initialization |
+| `crates/dns-filter-core/tests/config_test.rs` | 13 | Config parsing, defaults, validation (TLS/HTTPS/remote_config) |
+| `crates/dns-filter-core/tests/handler_test.rs` | 7 | Handler pipeline: NoError, NXDomain, ServFail, Refused, middleware callbacks |
+| `crates/dns-filter-core/tests/middleware_test.rs` | 6 | Metrics counter, logging middleware, return values |
 | `crates/dns-filter-nacos/tests/authority_test.rs` | 3 | Nacos authority lookup hit/miss/wrong-zone |
 | `crates/dns-filter-nacos/tests/mapping_test.rs` | 6 | DNS name parsing, record creation |
-| `crates/dns-filter-plugin/tests/authority_chain_test.rs` | 5 | Chain resolution: empty, hit, miss, fallthrough, all-skip |
+| `crates/dns-filter-nacos/tests/watcher_test.rs` | 6 | Instance cache: insert, filter, remove, replace, lowercase keys |
+| `crates/dns-filter-plugin/tests/authority_chain_test.rs` | 9 | Chain resolution: empty, hit, miss, fallthrough, all-skip, Break, error, is_empty |
 | `crates/dns-filter-plugin/tests/forward_test.rs` | 1 | Forward resolver (requires network) |
 | `crates/dns-filter-plugin/tests/system_dns_test.rs` | 1 | System resolver (requires network) |
 | `tests/integration_test.rs` | 2 | End-to-end chain: Nacos hit, Nacos miss -> Forward |
+
+### Benchmark Structure
+
+| Bench File | Benchmarks | Description |
+|------------|------------|-------------|
+| `crates/dns-filter-core/benches/handler_bench.rs` | 2 x 4 | Handler pipeline (nacos hit, nxdomain) x worker_threads 1..4 |
+| `crates/dns-filter-nacos/benches/nacos_bench.rs` | 2 x 4 + 3 | Authority lookup (hit, miss) x worker_threads 1..4 + sync benchmarks |
+| `crates/dns-filter-plugin/benches/chain_bench.rs` | 2 x 4 | Authority chain (empty, nacos hit) x worker_threads 1..4 |
 
 ### Key Dependencies
 

@@ -184,3 +184,142 @@ worker_threads = 0
             .contains("worker_threads must be greater than 0")
     );
 }
+
+#[test]
+fn tls_enabled_nonexistent_cert_fails_validation() {
+    let toml_str = r#"
+[server]
+listen_addr = "0.0.0.0"
+port = 53
+
+[server.tls]
+enabled = true
+cert_path = "/nonexistent/cert.pem"
+key_path = "/nonexistent/key.pem"
+"#;
+
+    let config: DnsFilterConfig = toml::from_str(toml_str).unwrap();
+    let result = validate_config(&config);
+    assert!(result.is_err());
+    assert!(
+        result
+            .unwrap_err()
+            .to_string()
+            .contains("TLS cert_path does not exist")
+    );
+}
+
+#[test]
+fn tls_enabled_nonexistent_key_fails_validation() {
+    // Use Cargo.toml as a file that actually exists for the cert
+    let toml_str = r#"
+[server]
+listen_addr = "0.0.0.0"
+port = 53
+
+[server.tls]
+enabled = true
+cert_path = "Cargo.toml"
+key_path = "/nonexistent/key.pem"
+"#;
+
+    let config: DnsFilterConfig = toml::from_str(toml_str).unwrap();
+    let result = validate_config(&config);
+    assert!(result.is_err());
+    assert!(
+        result
+            .unwrap_err()
+            .to_string()
+            .contains("TLS key_path does not exist")
+    );
+}
+
+#[test]
+fn https_enabled_nonexistent_cert_fails_validation() {
+    let toml_str = r#"
+[server]
+listen_addr = "0.0.0.0"
+port = 53
+
+[server.https]
+enabled = true
+cert_path = "/nonexistent/cert.pem"
+key_path = "/nonexistent/key.pem"
+"#;
+
+    let config: DnsFilterConfig = toml::from_str(toml_str).unwrap();
+    let result = validate_config(&config);
+    assert!(result.is_err());
+    assert!(
+        result
+            .unwrap_err()
+            .to_string()
+            .contains("HTTPS cert_path does not exist")
+    );
+}
+
+#[test]
+fn remote_config_enabled_empty_server_addr_fails() {
+    let toml_str = r#"
+[server]
+listen_addr = "0.0.0.0"
+port = 53
+
+[remote_config]
+enabled = true
+server_addr = ""
+data_id = "dns-filter.toml"
+"#;
+
+    let config: DnsFilterConfig = toml::from_str(toml_str).unwrap();
+    let result = validate_config(&config);
+    assert!(result.is_err());
+    assert!(
+        result
+            .unwrap_err()
+            .to_string()
+            .contains("remote_config.server_addr is required")
+    );
+}
+
+#[test]
+fn remote_config_enabled_empty_data_id_fails() {
+    let toml_str = r#"
+[server]
+listen_addr = "0.0.0.0"
+port = 53
+
+[remote_config]
+enabled = true
+server_addr = "127.0.0.1:8848"
+data_id = ""
+"#;
+
+    let config: DnsFilterConfig = toml::from_str(toml_str).unwrap();
+    let result = validate_config(&config);
+    assert!(result.is_err());
+    assert!(
+        result
+            .unwrap_err()
+            .to_string()
+            .contains("remote_config.data_id is required")
+    );
+}
+
+#[test]
+fn tls_disabled_nonexistent_cert_passes_validation() {
+    let toml_str = r#"
+[server]
+listen_addr = "0.0.0.0"
+port = 53
+
+[server.tls]
+enabled = false
+cert_path = "/nonexistent/cert.pem"
+key_path = "/nonexistent/key.pem"
+"#;
+
+    let config: DnsFilterConfig = toml::from_str(toml_str).unwrap();
+    let result = validate_config(&config);
+    assert!(result.is_ok());
+}

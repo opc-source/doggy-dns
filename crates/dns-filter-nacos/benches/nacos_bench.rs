@@ -1,4 +1,4 @@
-use criterion::{Criterion, criterion_group, criterion_main};
+use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use dashmap::DashMap;
 use dns_filter_nacos::authority::NacosAuthority;
 use dns_filter_nacos::mapping::{parse_dns_name, to_dns_records};
@@ -28,39 +28,55 @@ fn make_populated_cache(count: usize) -> Arc<DashMap<ServiceKey, Vec<CachedInsta
 }
 
 fn bench_nacos_authority_lookup_hit(c: &mut Criterion) {
-    let rt = tokio::runtime::Runtime::new().unwrap();
     let cache = make_populated_cache(100);
     let authority = NacosAuthority::new(cache, "nacos.local", 6);
     let name =
         LowerName::from(Name::from_str("service-50.default_group.public.nacos.local.").unwrap());
 
-    c.bench_function("nacos_authority_lookup_hit", |b| {
-        b.to_async(&rt).iter(|| async {
-            black_box(
-                authority
-                    .lookup(&name, RecordType::A, None, LookupOptions::default())
-                    .await,
-            )
+    let mut group = c.benchmark_group("nacos_authority_lookup_hit");
+    for threads in 1..=4 {
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(threads)
+            .enable_all()
+            .build()
+            .unwrap();
+        group.bench_with_input(BenchmarkId::new("threads", threads), &threads, |b, _| {
+            b.to_async(&rt).iter(|| async {
+                black_box(
+                    authority
+                        .lookup(&name, RecordType::A, None, LookupOptions::default())
+                        .await,
+                )
+            });
         });
-    });
+    }
+    group.finish();
 }
 
 fn bench_nacos_authority_lookup_miss(c: &mut Criterion) {
-    let rt = tokio::runtime::Runtime::new().unwrap();
     let cache = make_populated_cache(100);
     let authority = NacosAuthority::new(cache, "nacos.local", 6);
     let name =
         LowerName::from(Name::from_str("unknown-svc.default_group.public.nacos.local.").unwrap());
 
-    c.bench_function("nacos_authority_lookup_miss", |b| {
-        b.to_async(&rt).iter(|| async {
-            black_box(
-                authority
-                    .lookup(&name, RecordType::A, None, LookupOptions::default())
-                    .await,
-            )
+    let mut group = c.benchmark_group("nacos_authority_lookup_miss");
+    for threads in 1..=4 {
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(threads)
+            .enable_all()
+            .build()
+            .unwrap();
+        group.bench_with_input(BenchmarkId::new("threads", threads), &threads, |b, _| {
+            b.to_async(&rt).iter(|| async {
+                black_box(
+                    authority
+                        .lookup(&name, RecordType::A, None, LookupOptions::default())
+                        .await,
+                )
+            });
         });
-    });
+    }
+    group.finish();
 }
 
 fn bench_parse_dns_name_hit(c: &mut Criterion) {

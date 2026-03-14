@@ -13,7 +13,12 @@ cargo test -p dns-filter-core --test config_test -- parse_full_config  # Run a s
 cargo clippy --all-features --all-targets -- -D warnings    # Lint (CI uses -D, not -W)
 cargo fmt --all -- --check                     # Format check
 cargo bench --no-run --workspace               # Verify benchmarks compile
-cargo bench                                    # Run benchmarks
+cargo bench --workspace                        # Run all benchmarks
+cargo bench -p dns-filter-core                 # Run handler pipeline benchmarks only
+cargo bench --bench nacos_bench                # Run a single benchmark file
+cargo bench --bench handler_bench -- handler_pipeline_nacos_hit  # Filter by name
+cargo tarpaulin --config tarpaulin.toml        # Coverage (XML + HTML reports)
+cargo tarpaulin --workspace --out Stdout       # Coverage quick summary
 ```
 
 ## Architecture
@@ -88,4 +93,5 @@ TOML config at `config/dns-filter.toml`. Key structs in `core/config.rs`: `DnsFi
 - Integration tests in `tests/` and `crates/*/tests/` (not inline `#[cfg(test)]` modules)
 - Forward/system_dns tests make real network calls
 - Nacos tests use mock DashMap caches (no Nacos server needed)
-- Benchmarks in `crates/*/benches/` using criterion 0.8
+- Benchmarks in `crates/*/benches/` using criterion 0.8, parameterized over worker_threads 1..4
+- Benchmark output starts with "running 0 tests" (from default harness) — this is normal, criterion results follow

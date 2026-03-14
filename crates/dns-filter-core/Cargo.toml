@@ -20,3 +20,14 @@ arc-swap = { workspace = true }
 
 [dev-dependencies]
 tracing-subscriber = { workspace = true }
+dns-filter-nacos = { path = "../dns-filter-nacos" }
+dashmap = { workspace = true }
+hickory-proto = { workspace = true }
+hickory-server = { workspace = true }
+tokio = { workspace = true }
+async-trait = { workspace = true }
+criterion = { workspace = true }
+
+[[bench]]
+name = "handler_bench"
+harness = false

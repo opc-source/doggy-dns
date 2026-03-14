@@ -31,10 +31,10 @@ impl From<&ServiceInstance> for CachedInstance {
     }
 }
 
-struct InstanceChangeListener {
-    cache: Arc<DashMap<ServiceKey, Vec<CachedInstance>>>,
-    group: String,
-    namespace: String,
+pub struct InstanceChangeListener {
+    pub cache: Arc<DashMap<ServiceKey, Vec<CachedInstance>>>,
+    pub group: String,
+    pub namespace: String,
 }
 
 impl NamingEventListener for InstanceChangeListener {

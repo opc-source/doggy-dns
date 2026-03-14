@@ -1,9 +1,119 @@
 #![allow(clippy::disallowed_methods)]
 
+use async_trait::async_trait;
 use dns_filter_plugin::authority_chain::AuthorityChain;
-use hickory_proto::rr::{Name, RecordType};
-use hickory_server::zone_handler::LookupControlFlow;
+use hickory_proto::rr::{LowerName, Name, RecordType};
+use hickory_server::server::{Request, RequestInfo};
+use hickory_server::zone_handler::{
+    AuthLookup, AxfrPolicy, LookupControlFlow, LookupOptions, LookupRecords, ZoneHandler, ZoneType,
+};
 use std::str::FromStr;
+use std::sync::Arc;
+
+/// A ZoneHandler that always returns Break(Ok(...)) with an empty record set.
+struct BreakZoneHandler;
+
+#[async_trait]
+impl ZoneHandler for BreakZoneHandler {
+    fn zone_type(&self) -> ZoneType {
+        ZoneType::Primary
+    }
+
+    fn axfr_policy(&self) -> AxfrPolicy {
+        AxfrPolicy::Deny
+    }
+
+    fn origin(&self) -> &LowerName {
+        static ORIGIN: std::sync::LazyLock<LowerName> =
+            std::sync::LazyLock::new(|| LowerName::from(Name::from_str("break.local.").unwrap()));
+        &ORIGIN
+    }
+
+    async fn lookup(
+        &self,
+        _name: &LowerName,
+        _rtype: RecordType,
+        _request_info: Option<&RequestInfo<'_>>,
+        _lookup_options: LookupOptions,
+    ) -> LookupControlFlow<AuthLookup> {
+        LookupControlFlow::Break(Ok(AuthLookup::answers(
+            LookupRecords::Section(vec![]),
+            None,
+        )))
+    }
+
+    async fn search(
+        &self,
+        _request: &Request,
+        _lookup_options: LookupOptions,
+    ) -> (
+        LookupControlFlow<AuthLookup>,
+        Option<hickory_proto::rr::TSigResponseContext>,
+    ) {
+        (LookupControlFlow::Skip, None)
+    }
+
+    async fn nsec_records(
+        &self,
+        _name: &LowerName,
+        _lookup_options: LookupOptions,
+    ) -> LookupControlFlow<AuthLookup> {
+        LookupControlFlow::Skip
+    }
+}
+
+/// A ZoneHandler that always returns Continue(Err(...)).
+struct ErrorZoneHandler;
+
+#[async_trait]
+impl ZoneHandler for ErrorZoneHandler {
+    fn zone_type(&self) -> ZoneType {
+        ZoneType::Primary
+    }
+
+    fn axfr_policy(&self) -> AxfrPolicy {
+        AxfrPolicy::Deny
+    }
+
+    fn origin(&self) -> &LowerName {
+        static ORIGIN: std::sync::LazyLock<LowerName> =
+            std::sync::LazyLock::new(|| LowerName::from(Name::from_str("error.local.").unwrap()));
+        &ORIGIN
+    }
+
+    async fn lookup(
+        &self,
+        _name: &LowerName,
+        _rtype: RecordType,
+        _request_info: Option<&RequestInfo<'_>>,
+        _lookup_options: LookupOptions,
+    ) -> LookupControlFlow<AuthLookup> {
+        LookupControlFlow::Continue(Err(
+            hickory_server::zone_handler::LookupError::ResponseCode(
+                hickory_proto::op::ResponseCode::ServFail,
+            ),
+        ))
+    }
+
+    async fn search(
+        &self,
+        _request: &Request,
+        _lookup_options: LookupOptions,
+    ) -> (
+        LookupControlFlow<AuthLookup>,
+        Option<hickory_proto::rr::TSigResponseContext>,
+    ) {
+        (LookupControlFlow::Skip, None)
+    }
+
+    async fn nsec_records(
+        &self,
+        _name: &LowerName,
+        _lookup_options: LookupOptions,
+    ) -> LookupControlFlow<AuthLookup> {
+        LookupControlFlow::Skip
+    }
+}
 
 #[tokio::test]
 async fn empty_chain_returns_skip() {
@@ -119,4 +229,48 @@ async fn all_handlers_skip_returns_skip() {
     let result = chain.resolve(&name, RecordType::A, None).await;
     assert!(matches!(result.outcome, LookupControlFlow::Skip));
     assert!(result.handler_name.is_none());
+}
+
+#[test]
+fn is_empty_true_for_empty_chain() {
+    let chain = AuthorityChain::new(vec![]);
+    assert!(chain.is_empty());
+}
+
+#[test]
+fn is_empty_false_for_non_empty_chain() {
+    let chain = AuthorityChain::new(vec![("break".to_string(), Arc::new(BreakZoneHandler))]);
+    assert!(!chain.is_empty());
+}
+
+#[tokio::test]
+async fn break_result_stops_chain_and_returns_handler_name() {
+    let chain = AuthorityChain::new(vec![
+        ("breaker".to_string(), Arc::new(BreakZoneHandler)),
+        ("should-not-reach".to_string(), Arc::new(ErrorZoneHandler)),
+    ]);
+
+    let name = Name::from_str("anything.example.com.").unwrap();
+    let result = chain.resolve(&name, RecordType::A, None).await;
+
+    // BreakZoneHandler returns Break(Ok(...)), so chain stops at first handler
+    assert!(matches!(result.outcome, LookupControlFlow::Break(Ok(_))));
+    assert_eq!(result.handler_name.as_deref(), Some("breaker"));
+}
+
+#[tokio::test]
+async fn continue_error_propagated_with_handler_name() {
+    let chain = AuthorityChain::new(vec![(
+        "error-handler".to_string(),
+        Arc::new(ErrorZoneHandler),
+    )]);
+
+    let name = Name::from_str("anything.example.com.").unwrap();
+    let result = chain.resolve(&name, RecordType::A, None).await;
+
+    assert!(matches!(
+        result.outcome,
+        LookupControlFlow::Continue(Err(_))
+    ));
+    assert_eq!(result.handler_name.as_deref(), Some("error-handler"));
 }
