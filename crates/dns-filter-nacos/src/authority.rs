@@ -5,8 +5,7 @@ use dashmap::DashMap;
 use hickory_proto::rr::{LowerName, Name, RecordType, TSigResponseContext};
 use hickory_server::server::{Request, RequestInfo};
 use hickory_server::zone_handler::{
-    AuthLookup, AxfrPolicy, LookupControlFlow, LookupOptions, LookupRecords, ZoneHandler,
-    ZoneType,
+    AuthLookup, AxfrPolicy, LookupControlFlow, LookupOptions, LookupRecords, ZoneHandler, ZoneType,
 };
 use std::sync::Arc;
 

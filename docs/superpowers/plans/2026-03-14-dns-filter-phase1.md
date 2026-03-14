@@ -77,7 +77,7 @@ members = [
 [package]
 name = "dns-filter"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
 license = "Apache-2.0"
 description = "A Rust-based service discovery DNS server built on hickory-dns"
 
@@ -113,7 +113,7 @@ rustls = "0.23"
 [package]
 name = "dns-filter-plugin"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
 license = "Apache-2.0"
 
 [dependencies]
@@ -137,7 +137,7 @@ tokio = { workspace = true }
 [package]
 name = "dns-filter-core"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
 license = "Apache-2.0"
 
 [dependencies]
@@ -163,7 +163,7 @@ tracing-subscriber = { workspace = true }
 [package]
 name = "dns-filter-nacos"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
 license = "Apache-2.0"
 
 [dependencies]

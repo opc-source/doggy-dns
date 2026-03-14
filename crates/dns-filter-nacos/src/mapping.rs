@@ -22,8 +22,7 @@ pub fn parse_dns_name(name: &Name, zone_suffix: &str) -> Option<DnsNameParts> {
         return None;
     }
 
-    let prefix = name_str[..name_str.len() - suffix.len()]
-        .trim_end_matches('.');
+    let prefix = name_str[..name_str.len() - suffix.len()].trim_end_matches('.');
 
     let parts: Vec<&str> = prefix.split('.').collect();
     if parts.len() != 3 {
@@ -42,12 +41,12 @@ pub fn parse_dns_name(name: &Name, zone_suffix: &str) -> Option<DnsNameParts> {
 pub fn to_dns_records(name: &Name, ips: &[String], ttl: u32) -> Vec<Record> {
     ips.iter()
         .filter_map(|ip_str| match IpAddr::from_str(ip_str) {
-            Ok(IpAddr::V4(ipv4)) => {
-                Some(Record::from_rdata(name.clone(), ttl, RData::A(A(ipv4))))
-            }
-            Ok(IpAddr::V6(ipv6)) => {
-                Some(Record::from_rdata(name.clone(), ttl, RData::AAAA(AAAA(ipv6))))
-            }
+            Ok(IpAddr::V4(ipv4)) => Some(Record::from_rdata(name.clone(), ttl, RData::A(A(ipv4)))),
+            Ok(IpAddr::V6(ipv6)) => Some(Record::from_rdata(
+                name.clone(),
+                ttl,
+                RData::AAAA(AAAA(ipv6)),
+            )),
             Err(e) => {
                 tracing::warn!("skipping invalid IP '{}': {}", ip_str, e);
                 None

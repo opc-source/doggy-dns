@@ -1,8 +1,8 @@
 use anyhow::Result;
 use async_trait::async_trait;
 use hickory_proto::rr::{LowerName, Name, RecordType, TSigResponseContext};
-use hickory_resolver::net::runtime::TokioRuntimeProvider;
 use hickory_resolver::Resolver;
+use hickory_resolver::net::runtime::TokioRuntimeProvider;
 use hickory_server::server::{Request, RequestInfo};
 use hickory_server::zone_handler::{
     AuthLookup, AxfrPolicy, LookupControlFlow, LookupOptions, ZoneHandler, ZoneType,
@@ -15,11 +15,7 @@ pub struct SystemAuthority {
 }
 
 impl SystemAuthority {
-    pub async fn new(
-        cache_size: u64,
-        min_ttl: Duration,
-        max_ttl: Duration,
-    ) -> Result<Self> {
+    pub async fn new(cache_size: u64, min_ttl: Duration, max_ttl: Duration) -> Result<Self> {
         let mut builder = Resolver::builder_tokio()?;
         let opts = builder.options_mut();
         opts.cache_size = cache_size;

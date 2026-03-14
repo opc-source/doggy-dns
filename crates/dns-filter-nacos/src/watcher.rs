@@ -74,11 +74,7 @@ pub struct NacosServiceWatcher {
 }
 
 impl NacosServiceWatcher {
-    pub async fn new(
-        server_addr: &str,
-        namespace: &str,
-        group: &str,
-    ) -> anyhow::Result<Self> {
+    pub async fn new(server_addr: &str, namespace: &str, group: &str) -> anyhow::Result<Self> {
         let props = ClientProps::new()
             .server_addr(server_addr)
             .namespace(namespace)
@@ -131,17 +127,10 @@ impl NacosServiceWatcher {
             Ok((service_names, _total)) => {
                 for service_name in &service_names {
                     if let Err(e) = self.subscribe(service_name).await {
-                        tracing::warn!(
-                            "failed to subscribe to service '{}': {}",
-                            service_name,
-                            e
-                        );
+                        tracing::warn!("failed to subscribe to service '{}': {}", service_name, e);
                     }
                 }
-                tracing::info!(
-                    "subscribed to {} nacos services",
-                    service_names.len()
-                );
+                tracing::info!("subscribed to {} nacos services", service_names.len());
             }
             Err(e) => {
                 tracing::warn!(

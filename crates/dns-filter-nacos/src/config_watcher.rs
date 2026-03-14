@@ -55,11 +55,7 @@ impl NacosConfigWatcher {
         let listener = ConfigReloadListener { callback };
 
         self.config_service
-            .add_listener(
-                self.data_id.clone(),
-                self.group.clone(),
-                Arc::new(listener),
-            )
+            .add_listener(self.data_id.clone(), self.group.clone(), Arc::new(listener))
             .await?;
 
         tracing::info!(

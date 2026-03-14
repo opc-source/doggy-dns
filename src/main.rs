@@ -1,15 +1,15 @@
 use anyhow::{Context, Result};
-use dns_filter_core::config::{load_config, DnsFilterConfig, PluginKind};
+use dns_filter_core::config::{DnsFilterConfig, PluginKind, load_config};
 use dns_filter_core::handler::DnsFilterHandler;
 use dns_filter_core::middleware::logging::LoggingMiddleware;
 use dns_filter_core::middleware::metrics::MetricsMiddleware;
 use dns_filter_core::server::build_server;
 use dns_filter_nacos::authority::NacosAuthority;
 use dns_filter_nacos::watcher::NacosServiceWatcher;
+use dns_filter_plugin::Middleware;
 use dns_filter_plugin::authority_chain::AuthorityChain;
 use dns_filter_plugin::builtin::forward::ForwardAuthority;
 use dns_filter_plugin::builtin::system_dns::SystemAuthority;
-use dns_filter_plugin::Middleware;
 use hickory_server::zone_handler::ZoneHandler;
 use std::sync::Arc;
 use std::time::Duration;
@@ -30,8 +30,32 @@ fn main() -> Result<()> {
     let config_path = std::env::args()
         .nth(1)
         .unwrap_or_else(|| "config/dns-filter.toml".to_string());
-    let config = load_config(&config_path)
-        .context(format!("failed to load config from {}", config_path))?;
+    let config =
+        load_config(&config_path).context(format!("failed to load config from {}", config_path))?;
+
+    tracing::info!(
+        listen_addr = %config.server.listen_addr,
+        port = config.server.port,
+        worker_threads = config.server.worker_threads,
+        tcp_timeout = config.server.tcp_timeout,
+        shutdown_timeout = config.server.shutdown_timeout,
+        tls_enabled = config.server.tls.as_ref().is_some_and(|t| t.enabled),
+        https_enabled = config.server.https.as_ref().is_some_and(|h| h.enabled),
+        logging = config.middleware.logging,
+        metrics = config.middleware.metrics,
+        plugin_count = config.plugins.len(),
+        remote_config_enabled = config.remote_config.enabled,
+        "loaded configuration"
+    );
+
+    for (i, plugin) in config.plugins.iter().enumerate() {
+        tracing::info!(
+            index = i,
+            kind = ?plugin.kind,
+            enabled = plugin.enabled,
+            "plugin configured"
+        );
+    }
 
     // Build runtime with configured worker threads
     let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -105,7 +129,7 @@ async fn async_main(config: DnsFilterConfig) -> Result<()> {
 async fn build_authority_chain(
     config: &DnsFilterConfig,
 ) -> Result<(Vec<NacosServiceWatcher>, AuthorityChain)> {
-    let mut handlers: Vec<Arc<dyn ZoneHandler>> = Vec::new();
+    let mut handlers: Vec<(String, Arc<dyn ZoneHandler>)> = Vec::new();
     let mut watchers: Vec<NacosServiceWatcher> = Vec::new();
 
     if config.plugins.is_empty() {
@@ -118,12 +142,13 @@ async fn build_authority_chain(
             Duration::from_secs(600),
         )
         .await?;
-        handlers.push(Arc::new(forward));
+        handlers.push(("forward[default]".to_string(), Arc::new(forward)));
         return Ok((watchers, AuthorityChain::new(handlers)));
     }
 
-    for plugin in &config.plugins {
+    for (i, plugin) in config.plugins.iter().enumerate() {
         if !plugin.enabled {
+            tracing::info!(index = i, kind = ?plugin.kind, "skipping disabled plugin");
             continue;
         }
 
@@ -138,10 +163,11 @@ async fn build_authority_chain(
                 watcher.subscribe_all().await;
                 let cache = watcher.cache();
 
+                let name = format!("nacos[{}]", zone);
                 let authority = NacosAuthority::new(cache, zone, plugin.ttl);
-                handlers.push(Arc::new(authority));
+                handlers.push((name.clone(), Arc::new(authority)));
                 watchers.push(watcher);
-                tracing::info!("loaded nacos plugin: zone={}", zone);
+                tracing::info!(plugin = %name, zone = zone, addr = addr, "loaded plugin");
             }
             PluginKind::SystemDns => {
                 let authority = SystemAuthority::new(
@@ -150,14 +176,16 @@ async fn build_authority_chain(
                     Duration::from_secs(plugin.max_ttl as u64),
                 )
                 .await?;
-                handlers.push(Arc::new(authority));
-                tracing::info!("loaded system_dns plugin");
+                let name = "system_dns".to_string();
+                handlers.push((name.clone(), Arc::new(authority)));
+                tracing::info!(plugin = %name, "loaded plugin");
             }
             PluginKind::Forward => {
                 let addrs = plugin
                     .upstream
                     .clone()
                     .unwrap_or_else(|| vec!["8.8.8.8:53".to_string(), "1.1.1.1:53".to_string()]);
+                let name = format!("forward[{}]", addrs.join(","));
                 let authority = ForwardAuthority::new(
                     addrs,
                     plugin.cache_size as u64,
@@ -165,11 +193,12 @@ async fn build_authority_chain(
                     Duration::from_secs(plugin.max_ttl as u64),
                 )
                 .await?;
-                handlers.push(Arc::new(authority));
-                tracing::info!("loaded forward plugin");
+                handlers.push((name.clone(), Arc::new(authority)));
+                tracing::info!(plugin = %name, "loaded plugin");
             }
         }
     }
 
+    tracing::info!(chain_length = handlers.len(), "authority chain built");
     Ok((watchers, AuthorityChain::new(handlers)))
 }
