@@ -21,6 +21,8 @@ dns-filter is a Rust-based service discovery DNS server built on `hickory-dns` (
 - DNSSEC signing
 - Web UI / dashboard
 - DNS zone file hosting
+- Rate limiting middleware (future phase)
+- Prometheus/HTTP metrics export endpoint (future phase)
 
 ## Architecture
 
@@ -31,8 +33,10 @@ The server uses a hybrid architecture with two distinct layers:
 **Layer 1 -- DnsFilterHandler (implements `RequestHandler`):**
 The outer layer owns cross-cutting middleware concerns. Each middleware can inspect/modify the request, short-circuit (e.g., rate limiter denies), or pass through to the next layer.
 
-**Layer 2 -- Authority Chain (using hickory's `Catalog` + `LookupControlFlow`):**
-The inner layer is a chain of Authority implementations. Each authority either resolves the query and returns records, or declines via `LookupControlFlow` to pass the query to the next authority.
+**Layer 2 -- Authority Chain (using `LookupControlFlow`):**
+The inner layer is a chain of Authority implementations. Each authority either resolves the query and returns records, or declines via `LookupControlFlow` to pass the query to the next authority. The chain is managed by a custom `AuthorityChain` struct (not hickory's `Catalog`) that holds a `Vec<Box<dyn Authority>>` and iterates through them in order, stopping at the first non-decline response.
+
+**Handoff between layers:** `DnsFilterHandler.handle_request()` runs the outer middleware chain. If no middleware short-circuits, it calls `self.authority_chain.resolve(request)`, which iterates through the authorities. The authority chain converts the hickory `Request` into a zone lookup, calling each authority's `search()` method until one returns `LookupControlFlow::Continue` (with records) or all decline.
 
 ```
 Incoming DNS Query (UDP / TCP / DoT / DoH)
@@ -41,12 +45,12 @@ Incoming DNS Query (UDP / TCP / DoT / DoH)
   DnsFilterHandler (RequestHandler)
   +--------------------------------------+
   | Outer Middleware Chain               |
-  |   Logger -> Metrics -> RateLimiter   |
+  |   Logger -> Metrics                  |
   +-------------------|------------------+
                       |
                       v
   +--------------------------------------+
-  | Inner Authority Chain                |
+  | Inner: AuthorityChain                |
   |   NacosAuthority                     |
   |     -> SystemAuthority               |
   |       -> ForwardAuthority            |
@@ -77,13 +81,18 @@ dns-filter/
           logging.rs          # Request/response logging
           metrics.rs          # Query metrics collection
 
-    dns-filter-plugin/        # Plugin trait definitions & registry
+    dns-filter-plugin/        # Plugin trait definitions, registry, built-in authorities
       Cargo.toml
       src/
         lib.rs
         plugin.rs             # Plugin trait (cross-cutting middleware)
-        authority.rs          # Authority plugin trait (data-source)
+        authority.rs          # AuthorityPlugin trait (data-source factory)
+        authority_chain.rs    # AuthorityChain: iterates Vec<Box<dyn Authority>>
         registry.rs           # Plugin discovery & instantiation from config
+        builtin/
+          mod.rs
+          system_dns.rs       # SystemAuthority (wraps AsyncResolver + /etc/resolv.conf)
+          forward.rs          # ForwardAuthority (wraps AsyncResolver + upstream IPs)
 
     dns-filter-nacos/         # Nacos service discovery plugin
       Cargo.toml
@@ -92,6 +101,7 @@ dns-filter/
         authority.rs          # NacosAuthority implementing hickory Authority
         watcher.rs            # Nacos service subscription & cache sync
         mapping.rs            # Service instance -> DNS record mapping
+        config_watcher.rs     # Nacos config listener for remote hot-reload
 
   src/
     main.rs                   # Binary: parse config, build chain, start server
@@ -104,7 +114,14 @@ dns-filter/
 
 **dns-filter-core**: Owns `DnsFilterHandler`, the outer middleware chain, server lifecycle (bind sockets, register listeners), TOML config parsing, and TLS setup. Depends on hickory-server and hickory-proto.
 
-**dns-filter-plugin**: Defines the `Plugin` trait for cross-cutting middleware and the `AuthorityPlugin` trait for data-source plugins. Contains the plugin registry that instantiates plugins from config. Has no heavy dependencies -- only hickory-proto types.
+**dns-filter-plugin**: Defines the `Plugin` trait for cross-cutting middleware and the `AuthorityPlugin` trait for data-source plugins. Contains the plugin registry that instantiates plugins from config, plus built-in authorities (`SystemAuthority`, `ForwardAuthority`) that have no external backend dependencies. Has no heavy dependencies -- only hickory-proto and hickory-resolver.
+
+The `AuthorityPlugin` trait is a factory interface: given a plugin config section, it produces a `Box<dyn Authority>`. Each backend crate (e.g., `dns-filter-nacos`) implements `AuthorityPlugin` to create its authority. The `Plugin` trait is for outer middleware (logging, metrics) and wraps the request processing with before/after hooks.
+
+**Built-in authorities in dns-filter-plugin:**
+
+- `SystemAuthority`: Wraps `hickory_resolver::AsyncResolver` configured from `/etc/resolv.conf`. The resolver has its own internal cache (sized by the `cache_size` config parameter). When a query arrives, it delegates to the async resolver. If the resolver returns NXDOMAIN or times out, it declines via `LookupControlFlow`.
+- `ForwardAuthority`: Wraps `hickory_resolver::AsyncResolver` configured with explicit upstream server IPs from config. Similar to SystemAuthority but uses hardcoded upstreams instead of system resolv.conf. Has its own cache. Acts as the last-resort fallback.
 
 **dns-filter-nacos**: Implements `NacosAuthority` backed by `nacos-sdk`. Maintains an in-memory cache (`DashMap`) of service instances, synced via Nacos push notifications. Also provides `NacosConfigWatcher` for remote config hot-reload.
 
@@ -204,7 +221,7 @@ group = "DNS_FILTER_GROUP"
 data_id = "dns-filter.toml"
 ```
 
-All sections have sensible defaults. Only `[server]` is required for a minimal setup.
+All sections have sensible defaults. `[server]` is required. If no `[[plugins]]` are configured, the server defaults to a single `forward` plugin with upstream `["8.8.8.8:53", "1.1.1.1:53"]` so it can still resolve queries.
 
 ## Error Handling
 
@@ -213,6 +230,25 @@ All sections have sensible defaults. Only `[server]` is required for a minimal s
 - **Nacos connection failures**: Serve from cached data, log warnings, retry connection in background with exponential backoff
 - **Config parse errors**: Fail fast at startup with clear error messages pointing to the problematic field
 - **Remote config errors**: Log warning, keep current config, retry on next push
+
+## Graceful Shutdown
+
+The server listens for SIGTERM and SIGINT (via `tokio::signal`). On signal:
+1. Stop accepting new connections
+2. Drain in-flight DNS requests (with a configurable timeout, default 5s)
+3. Close Nacos client connections and unsubscribe from service/config watchers
+4. Log shutdown completion and exit
+
+## Observability
+
+**Logging**: Uses `tracing` with `tracing-subscriber`. Configured via `RUST_LOG` env var (e.g., `RUST_LOG=dns_filter=info`). Default format is human-readable for development; structured JSON output can be enabled via config (`[middleware] log_format = "json"`).
+
+**Metrics** (Phase 1 scope: internal counters only, no export endpoint):
+- `dns_queries_total` -- counter by query type (A, AAAA, etc.)
+- `dns_query_duration_seconds` -- histogram of query processing time
+- `dns_responses_by_rcode` -- counter by response code
+- `plugin_hits` -- counter per plugin (which authority resolved the query)
+- Metrics are logged periodically at INFO level. A Prometheus/HTTP export endpoint is deferred to a later phase.
 
 ## Dependencies
 
