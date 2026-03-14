@@ -1,3 +1,5 @@
+#![allow(clippy::disallowed_methods)]
+
 use dashmap::DashMap;
 use dns_filter_nacos::authority::NacosAuthority;
 use dns_filter_nacos::watcher::{CachedInstance, ServiceKey};
@@ -41,12 +43,16 @@ async fn chain_nacos_hit() {
         .unwrap(),
     );
 
-    let chain = AuthorityChain::new(vec![nacos, forward]);
+    let chain = AuthorityChain::new(vec![
+        ("nacos".to_string(), nacos),
+        ("forward".to_string(), forward),
+    ]);
 
     let name = Name::from_str("web-app.DEFAULT_GROUP.public.nacos.local.").unwrap();
     let result = chain.resolve(&name, RecordType::A, None).await;
 
-    assert!(matches!(result, LookupControlFlow::Continue(Ok(_))));
+    assert!(matches!(result.outcome, LookupControlFlow::Continue(Ok(_))));
+    assert_eq!(result.handler_name.as_deref(), Some("nacos"));
 }
 
 #[tokio::test]
@@ -64,13 +70,17 @@ async fn chain_nacos_miss_falls_to_forward() {
         .unwrap(),
     );
 
-    let chain = AuthorityChain::new(vec![nacos, forward]);
+    let chain = AuthorityChain::new(vec![
+        ("nacos".to_string(), nacos),
+        ("forward".to_string(), forward),
+    ]);
 
     let name = Name::from_str("www.google.com.").unwrap();
     let result = chain.resolve(&name, RecordType::A, None).await;
 
     assert!(matches!(
-        result,
+        result.outcome,
         LookupControlFlow::Continue(Ok(_)) | LookupControlFlow::Break(Ok(_))
     ));
+    assert_eq!(result.handler_name.as_deref(), Some("forward"));
 }

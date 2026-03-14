@@ -1,3 +1,5 @@
+#![allow(clippy::disallowed_methods)]
+
 use dashmap::DashMap;
 use dns_filter_nacos::authority::NacosAuthority;
 use dns_filter_nacos::watcher::{CachedInstance, ServiceKey};
@@ -36,9 +38,8 @@ async fn resolves_known_service() {
     let cache = make_test_cache();
     let authority = NacosAuthority::new(cache, "nacos.local", 6);
 
-    let name = LowerName::from(
-        Name::from_str("user-service.DEFAULT_GROUP.public.nacos.local.").unwrap(),
-    );
+    let name =
+        LowerName::from(Name::from_str("user-service.DEFAULT_GROUP.public.nacos.local.").unwrap());
 
     let result = authority
         .lookup(&name, RecordType::A, None, LookupOptions::default())
@@ -58,9 +59,8 @@ async fn skips_unknown_service() {
     let cache = make_test_cache();
     let authority = NacosAuthority::new(cache, "nacos.local", 6);
 
-    let name = LowerName::from(
-        Name::from_str("unknown.default_group.public.nacos.local.").unwrap(),
-    );
+    let name =
+        LowerName::from(Name::from_str("unknown.default_group.public.nacos.local.").unwrap());
 
     let result = authority
         .lookup(&name, RecordType::A, None, LookupOptions::default())

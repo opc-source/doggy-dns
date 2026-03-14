@@ -1,4 +1,6 @@
-use dns_filter_core::config::{validate_config, DnsFilterConfig, PluginKind};
+#![allow(clippy::disallowed_methods)]
+
+use dns_filter_core::config::{DnsFilterConfig, PluginKind, validate_config};
 
 #[test]
 fn parse_full_config() {

@@ -1,9 +1,9 @@
 use anyhow::Result;
 use async_trait::async_trait;
 use hickory_proto::rr::{LowerName, Name, RecordType, TSigResponseContext};
+use hickory_resolver::Resolver;
 use hickory_resolver::config::{NameServerConfig, ResolverConfig, ResolverOpts};
 use hickory_resolver::net::runtime::TokioRuntimeProvider;
-use hickory_resolver::Resolver;
 use hickory_server::server::{Request, RequestInfo};
 use hickory_server::zone_handler::{
     AuthLookup, AxfrPolicy, LookupControlFlow, LookupOptions, ZoneHandler, ZoneType,
@@ -28,10 +28,11 @@ impl ForwardAuthority {
             .map(|addr| {
                 let socket_addr: SocketAddr = addr
                     .parse()
-                    .unwrap_or_else(|_| format!("{}:53", addr).parse().unwrap());
-                NameServerConfig::udp_and_tcp(socket_addr.ip())
+                    .or_else(|_| format!("{}:53", addr).parse())
+                    .map_err(|e| anyhow::anyhow!("invalid upstream address '{}': {}", addr, e))?;
+                Ok(NameServerConfig::udp_and_tcp(socket_addr.ip()))
             })
-            .collect();
+            .collect::<Result<Vec<_>>>()?;
 
         let config = ResolverConfig::from_parts(None, vec![], name_servers);
 
@@ -40,10 +41,9 @@ impl ForwardAuthority {
         opts.positive_min_ttl = Some(min_ttl);
         opts.positive_max_ttl = Some(max_ttl);
 
-        let resolver =
-            Resolver::builder_with_config(config, TokioRuntimeProvider::default())
-                .with_options(opts)
-                .build()?;
+        let resolver = Resolver::builder_with_config(config, TokioRuntimeProvider::default())
+            .with_options(opts)
+            .build()?;
 
         let origin = LowerName::from(Name::root());
         Ok(Self { resolver, origin })

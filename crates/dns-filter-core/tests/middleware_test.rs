@@ -1,3 +1,5 @@
+#![allow(clippy::disallowed_methods)]
+
 use dns_filter_core::middleware::metrics::MetricsMiddleware;
 
 #[test]

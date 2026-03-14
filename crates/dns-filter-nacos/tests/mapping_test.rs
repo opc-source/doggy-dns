@@ -1,3 +1,5 @@
+#![allow(clippy::disallowed_methods)]
+
 use dns_filter_nacos::mapping::{parse_dns_name, to_dns_records};
 use hickory_proto::rr::{Name, RecordType};
 use std::str::FromStr;

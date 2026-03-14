@@ -33,17 +33,17 @@ pub async fn build_server<H: RequestHandler>(
     tracing::info!("listening on TCP {}", addr);
 
     // TLS (DoT)
-    if let Some(tls_config) = &config.server.tls {
-        if tls_config.enabled {
-            register_tls(&mut server, config, tls_config).await?;
-        }
+    if let Some(tls_config) = &config.server.tls
+        && tls_config.enabled
+    {
+        register_tls(&mut server, config, tls_config).await?;
     }
 
     // HTTPS (DoH)
-    if let Some(https_config) = &config.server.https {
-        if https_config.enabled {
-            register_https(&mut server, config, https_config).await?;
-        }
+    if let Some(https_config) = &config.server.https
+        && https_config.enabled
+    {
+        register_https(&mut server, config, https_config).await?;
     }
 
     Ok(server)
@@ -57,10 +57,8 @@ async fn register_tls<H: RequestHandler>(
     let tls_addr: SocketAddr =
         format!("{}:{}", config.server.listen_addr, tls_config.port).parse()?;
 
-    let cert_pem = fs::read(&tls_config.cert_path)
-        .context("failed to read TLS certificate")?;
-    let key_pem = fs::read(&tls_config.key_path)
-        .context("failed to read TLS private key")?;
+    let cert_pem = fs::read(&tls_config.cert_path).context("failed to read TLS certificate")?;
+    let key_pem = fs::read(&tls_config.key_path).context("failed to read TLS private key")?;
 
     let certs = rustls_pemfile::certs(&mut &cert_pem[..])
         .collect::<std::result::Result<Vec<_>, _>>()
@@ -77,11 +75,7 @@ async fn register_tls<H: RequestHandler>(
     let listener = TcpListener::bind(tls_addr).await?;
     let timeout = Duration::from_secs(config.server.tcp_timeout);
 
-    server.register_tls_listener_with_tls_config(
-        listener,
-        timeout,
-        Arc::new(tls_server_config),
-    )?;
+    server.register_tls_listener_with_tls_config(listener, timeout, Arc::new(tls_server_config))?;
 
     tracing::info!("listening on TLS {}", tls_addr);
     Ok(())
@@ -95,10 +89,8 @@ async fn register_https<H: RequestHandler>(
     let https_addr: SocketAddr =
         format!("{}:{}", config.server.listen_addr, https_config.port).parse()?;
 
-    let cert_pem = fs::read(&https_config.cert_path)
-        .context("failed to read HTTPS certificate")?;
-    let key_pem = fs::read(&https_config.key_path)
-        .context("failed to read HTTPS private key")?;
+    let cert_pem = fs::read(&https_config.cert_path).context("failed to read HTTPS certificate")?;
+    let key_pem = fs::read(&https_config.key_path).context("failed to read HTTPS private key")?;
 
     let certs = rustls_pemfile::certs(&mut &cert_pem[..])
         .collect::<std::result::Result<Vec<_>, _>>()

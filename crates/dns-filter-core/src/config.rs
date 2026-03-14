@@ -143,7 +143,6 @@ pub struct RemoteConfig {
     pub data_id: String,
 }
 
-
 /// Load and validate config from a TOML file path.
 pub fn load_config(path: &str) -> anyhow::Result<DnsFilterConfig> {
     let content = std::fs::read_to_string(path)?;
@@ -157,33 +156,33 @@ pub fn validate_config(config: &DnsFilterConfig) -> anyhow::Result<()> {
         config.server.worker_threads > 0,
         "server.worker_threads must be greater than 0"
     );
-    if let Some(tls) = &config.server.tls {
-        if tls.enabled {
-            anyhow::ensure!(
-                std::path::Path::new(&tls.cert_path).exists(),
-                "TLS cert_path does not exist: {}",
-                tls.cert_path
-            );
-            anyhow::ensure!(
-                std::path::Path::new(&tls.key_path).exists(),
-                "TLS key_path does not exist: {}",
-                tls.key_path
-            );
-        }
+    if let Some(tls) = &config.server.tls
+        && tls.enabled
+    {
+        anyhow::ensure!(
+            std::path::Path::new(&tls.cert_path).exists(),
+            "TLS cert_path does not exist: {}",
+            tls.cert_path
+        );
+        anyhow::ensure!(
+            std::path::Path::new(&tls.key_path).exists(),
+            "TLS key_path does not exist: {}",
+            tls.key_path
+        );
     }
-    if let Some(https) = &config.server.https {
-        if https.enabled {
-            anyhow::ensure!(
-                std::path::Path::new(&https.cert_path).exists(),
-                "HTTPS cert_path does not exist: {}",
-                https.cert_path
-            );
-            anyhow::ensure!(
-                std::path::Path::new(&https.key_path).exists(),
-                "HTTPS key_path does not exist: {}",
-                https.key_path
-            );
-        }
+    if let Some(https) = &config.server.https
+        && https.enabled
+    {
+        anyhow::ensure!(
+            std::path::Path::new(&https.cert_path).exists(),
+            "HTTPS cert_path does not exist: {}",
+            https.cert_path
+        );
+        anyhow::ensure!(
+            std::path::Path::new(&https.key_path).exists(),
+            "HTTPS key_path does not exist: {}",
+            https.key_path
+        );
     }
     if config.remote_config.enabled {
         anyhow::ensure!(
