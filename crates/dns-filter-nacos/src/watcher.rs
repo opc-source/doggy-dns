@@ -43,9 +43,9 @@ impl NamingEventListener for InstanceChangeListener {
         tracing::info!("nacos service changed: {}", service_name);
 
         let key = ServiceKey {
-            service_name,
-            group: self.group.clone(),
-            namespace: self.namespace.clone(),
+            service_name: service_name.to_lowercase(),
+            group: self.group.to_lowercase(),
+            namespace: self.namespace.to_lowercase(),
         };
 
         match &event.instances {
