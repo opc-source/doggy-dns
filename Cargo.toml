@@ -17,6 +17,7 @@ description = "A Rust-based service discovery DNS server built on hickory-dns"
 dns-filter-core = { path = "crates/dns-filter-core" }
 dns-filter-plugin = { path = "crates/dns-filter-plugin" }
 dns-filter-nacos = { path = "crates/dns-filter-nacos" }
+hickory-server = { workspace = true }
 tokio = { version = "1", features = ["full"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
