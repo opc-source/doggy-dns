@@ -67,6 +67,7 @@ impl RequestHandler for DnsFilterHandler {
                 header.set_message_type(MessageType::Response);
                 header.set_op_code(OpCode::Query);
                 header.set_response_code(ResponseCode::NoError);
+                header.set_recursion_available(true);
 
                 let records: Vec<_> = lookup.iter().cloned().collect();
                 let response = builder.build(header, records.iter(), &[], &[], &[]);
