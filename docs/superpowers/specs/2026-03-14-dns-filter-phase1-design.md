@@ -149,7 +149,7 @@ Example: `user-service.DEFAULT_GROUP.public.nacos.local` resolves to `10.0.1.5, 
 - On startup: connect to Nacos server, subscribe to all services in the configured namespace/group
 - Cache: `DashMap<ServiceKey, Vec<ServiceInstance>>` where `ServiceKey = (service_name, group, namespace)`
 - Updates: `nacos-sdk` pushes service change events; the watcher updates the cache immutably (replace entire Vec for a key, never mutate in place)
-- TTL: configurable per-record TTL (default 30s) applied to generated DNS records
+- TTL: configurable per-record TTL (default 6s) applied to generated DNS records
 
 ### Remote Config
 
@@ -194,14 +194,14 @@ server_addr = "127.0.0.1:8848"
 namespace = "public"
 group = "DEFAULT_GROUP"
 dns_zone = "nacos.local"
-ttl = 30
+ttl = 6
 
 [[plugins]]
 kind = "system_dns"
 enabled = true
 cache_size = 256
-min_ttl = 30
-max_ttl = 86400
+min_ttl = 10
+max_ttl = 300
 
 [[plugins]]
 kind = "forward"
@@ -209,7 +209,7 @@ enabled = true
 upstream = ["8.8.8.8:53", "1.1.1.1:53"]
 cache_size = 1024
 min_ttl = 30
-max_ttl = 86400
+max_ttl = 600
 
 # Remote config: listen for config changes from Nacos.
 # Local config is the initial/fallback config.

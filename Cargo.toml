@@ -1,0 +1,40 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/dns-filter-core",
+    "crates/dns-filter-plugin",
+    "crates/dns-filter-nacos",
+]
+
+[package]
+name = "dns-filter"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "A Rust-based service discovery DNS server built on hickory-dns"
+
+[dependencies]
+dns-filter-core = { path = "crates/dns-filter-core" }
+dns-filter-plugin = { path = "crates/dns-filter-plugin" }
+dns-filter-nacos = { path = "crates/dns-filter-nacos" }
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+anyhow = "1"
+
+[workspace.dependencies]
+hickory-server = { version = "0.26.0-beta.1", features = ["tls-ring", "https-ring", "resolver"] }
+hickory-proto = "0.26.0-beta.1"
+hickory-resolver = { version = "0.26.0-beta.1", features = ["tokio", "system-config"] }
+nacos-sdk = "0.6"
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+toml = "1.0"
+dashmap = "6"
+arc-swap = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+anyhow = "1"
+async-trait = "0.1"
+rustls = "0.23"
+rustls-pemfile = "2"
