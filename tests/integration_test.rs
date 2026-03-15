@@ -1,10 +1,10 @@
 #![allow(clippy::disallowed_methods)]
 
 use dashmap::DashMap;
-use dns_filter_nacos::authority::NacosAuthority;
-use dns_filter_nacos::watcher::{CachedInstance, ServiceKey};
-use dns_filter_plugin::authority_chain::AuthorityChain;
-use dns_filter_plugin::builtin::forward::ForwardAuthority;
+use doggy_dns_nacos::authority::NacosAuthority;
+use doggy_dns_nacos::watcher::{CachedInstance, ServiceKey};
+use doggy_dns_plugin::authority_chain::AuthorityChain;
+use doggy_dns_plugin::builtin::forward::ForwardAuthority;
 use hickory_proto::rr::{Name, RecordType};
 use hickory_server::zone_handler::LookupControlFlow;
 use std::str::FromStr;

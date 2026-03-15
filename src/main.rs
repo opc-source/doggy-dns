@@ -1,15 +1,15 @@
 use anyhow::{Context, Result};
-use dns_filter_core::config::{DnsFilterConfig, PluginKind, load_config};
-use dns_filter_core::handler::DnsFilterHandler;
-use dns_filter_core::middleware::logging::LoggingMiddleware;
-use dns_filter_core::middleware::metrics::MetricsMiddleware;
-use dns_filter_core::server::build_server;
-use dns_filter_nacos::authority::NacosAuthority;
-use dns_filter_nacos::watcher::NacosServiceWatcher;
-use dns_filter_plugin::Middleware;
-use dns_filter_plugin::authority_chain::AuthorityChain;
-use dns_filter_plugin::builtin::forward::ForwardAuthority;
-use dns_filter_plugin::builtin::system_dns::SystemAuthority;
+use doggy_dns_core::config::{DoggyDnsConfig, PluginKind, load_config};
+use doggy_dns_core::handler::DoggyDnsHandler;
+use doggy_dns_core::middleware::logging::LoggingMiddleware;
+use doggy_dns_core::middleware::metrics::MetricsMiddleware;
+use doggy_dns_core::server::build_server;
+use doggy_dns_nacos::authority::NacosAuthority;
+use doggy_dns_nacos::watcher::NacosServiceWatcher;
+use doggy_dns_plugin::Middleware;
+use doggy_dns_plugin::authority_chain::AuthorityChain;
+use doggy_dns_plugin::builtin::forward::ForwardAuthority;
+use doggy_dns_plugin::builtin::native::NativeAuthority;
 use hickory_server::zone_handler::ZoneHandler;
 use std::sync::Arc;
 use std::time::Duration;
@@ -20,16 +20,16 @@ fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "dns_filter=info".into()),
+                .unwrap_or_else(|_| "doggy_dns=info".into()),
         )
         .init();
 
-    tracing::info!("dns-filter starting...");
+    tracing::info!("doggy-dns starting...");
 
     // Load config (sync — std::fs::read_to_string)
     let config_path = std::env::args()
         .nth(1)
-        .unwrap_or_else(|| "config/dns-filter.toml".to_string());
+        .unwrap_or_else(|| "config/doggy-dns.toml".to_string());
     let config =
         load_config(&config_path).context(format!("failed to load config from {}", config_path))?;
 
@@ -60,7 +60,7 @@ fn main() -> Result<()> {
     // Build runtime with configured worker threads
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
-        .thread_name("dns-filter-runtime")
+        .thread_name("doggy-dns-runtime")
         .worker_threads(config.server.worker_threads)
         .build()?;
 
@@ -72,7 +72,7 @@ fn main() -> Result<()> {
     runtime.block_on(async_main(config))
 }
 
-async fn async_main(config: DnsFilterConfig) -> Result<()> {
+async fn async_main(config: DoggyDnsConfig) -> Result<()> {
     // Build middleware chain
     let mut middlewares: Vec<Arc<dyn Middleware>> = Vec::new();
     if config.middleware.logging {
@@ -86,12 +86,12 @@ async fn async_main(config: DnsFilterConfig) -> Result<()> {
     let (_watchers, authority_chain) = build_authority_chain(&config).await?;
 
     // Create handler
-    let handler = DnsFilterHandler::new(middlewares, Arc::new(authority_chain));
+    let handler = DoggyDnsHandler::new(middlewares, Arc::new(authority_chain));
 
     // Build and start server
     let mut server = build_server(&config, handler).await?;
 
-    tracing::info!("dns-filter is ready");
+    tracing::info!("doggy-dns is ready");
 
     // Run server until shutdown signal
     let shutdown_timeout = Duration::from_secs(config.server.shutdown_timeout);
@@ -121,13 +121,13 @@ async fn async_main(config: DnsFilterConfig) -> Result<()> {
             config.server.shutdown_timeout
         ),
     }
-    tracing::info!("dns-filter shut down gracefully");
+    tracing::info!("doggy-dns shut down gracefully");
 
     Ok(())
 }
 
 async fn build_authority_chain(
-    config: &DnsFilterConfig,
+    config: &DoggyDnsConfig,
 ) -> Result<(Vec<NacosServiceWatcher>, AuthorityChain)> {
     let mut handlers: Vec<(String, Arc<dyn ZoneHandler>)> = Vec::new();
     let mut watchers: Vec<NacosServiceWatcher> = Vec::new();
@@ -169,14 +169,14 @@ async fn build_authority_chain(
                 watchers.push(watcher);
                 tracing::info!(plugin = %name, zone = zone, addr = addr, "loaded plugin");
             }
-            PluginKind::SystemDns => {
-                let authority = SystemAuthority::new(
+            PluginKind::Native => {
+                let authority = NativeAuthority::new(
                     plugin.cache_size as u64,
                     Duration::from_secs(plugin.min_ttl as u64),
                     Duration::from_secs(plugin.max_ttl as u64),
                 )
                 .await?;
-                let name = "system_dns".to_string();
+                let name = "native".to_string();
                 handlers.push((name.clone(), Arc::new(authority)));
                 tracing::info!(plugin = %name, "loaded plugin");
             }

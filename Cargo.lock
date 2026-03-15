@@ -487,14 +487,14 @@ dependencies = [
 ]
 
 [[package]]
-name = "dns-filter"
+name = "doggy-dns"
 version = "0.1.0"
 dependencies = [
  "anyhow",
  "dashmap 6.1.0",
- "dns-filter-core",
- "dns-filter-nacos",
- "dns-filter-plugin",
+ "doggy-dns-core",
+ "doggy-dns-nacos",
+ "doggy-dns-plugin",
  "hickory-proto",
  "hickory-server",
  "tokio",
@@ -503,7 +503,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "dns-filter-core"
+name = "doggy-dns-core"
 version = "0.1.0"
 dependencies = [
  "anyhow",
@@ -511,8 +511,8 @@ dependencies = [
  "async-trait",
  "criterion",
  "dashmap 6.1.0",
- "dns-filter-nacos",
- "dns-filter-plugin",
+ "doggy-dns-nacos",
+ "doggy-dns-plugin",
  "hickory-proto",
  "hickory-server",
  "rustls",
@@ -525,7 +525,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "dns-filter-nacos"
+name = "doggy-dns-nacos"
 version = "0.1.0"
 dependencies = [
  "anyhow",
@@ -533,7 +533,7 @@ dependencies = [
  "async-trait",
  "criterion",
  "dashmap 6.1.0",
- "dns-filter-plugin",
+ "doggy-dns-plugin",
  "hickory-proto",
  "hickory-server",
  "nacos-sdk",
@@ -544,7 +544,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "dns-filter-plugin"
+name = "doggy-dns-plugin"
 version = "0.1.0"
 dependencies = [
  "anyhow",
@@ -552,7 +552,7 @@ dependencies = [
  "async-trait",
  "criterion",
  "dashmap 6.1.0",
- "dns-filter-nacos",
+ "doggy-dns-nacos",
  "hickory-proto",
  "hickory-resolver",
  "hickory-server",
@@ -2246,9 +2246,9 @@ dependencies = [
 
 [[package]]
 name = "tinyvec"
-version = "1.10.0"
+version = "1.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bfa5fdc3bce6191a1dbc8c02d5c8bffcf557bafa17c124c5264a458f1b0613fa"
+checksum = "3e61e67053d25a4e82c844e8424039d9745781b3fc4f32b8d55ed50f5f667ef3"
 dependencies = [
  "tinyvec_macros",
 ]

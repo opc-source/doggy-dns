@@ -1,0 +1,33 @@
+[package]
+name = "doggy-dns-core"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+
+[dependencies]
+doggy-dns-plugin = { path = "../doggy-dns-plugin" }
+hickory-server = { workspace = true }
+hickory-proto = { workspace = true }
+serde = { workspace = true }
+toml = { workspace = true }
+tokio = { workspace = true }
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+tracing = { workspace = true }
+rustls = { workspace = true }
+rustls-pemfile = { workspace = true }
+arc-swap = { workspace = true }
+
+[dev-dependencies]
+tracing-subscriber = { workspace = true }
+doggy-dns-nacos = { path = "../doggy-dns-nacos" }
+dashmap = { workspace = true }
+hickory-proto = { workspace = true }
+hickory-server = { workspace = true }
+tokio = { workspace = true }
+async-trait = { workspace = true }
+criterion = { workspace = true }
+
+[[bench]]
+name = "handler_bench"
+harness = false

@@ -3,14 +3,12 @@ name: Code Coverage
 on:
   push:
     branches:
-      - init
       - main
       - release-*
     tags:
       - v*
   pull_request:
     branches:
-      - init
       - main
       - release-*
 

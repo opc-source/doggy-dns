@@ -1,4 +1,6 @@
-# dns-filter
+# Doggy-DNS
+
+狗狗 DNS, 可以 DaemonSet 或中心化权威部署？暂时不完善，但作为本地代理完全可用。想试试 AI Coding 有多强，是真的强一天做了以前作者应该需要一两个月的事，主要是作者水平不够而它能拔高了所有技术能力，几乎所有代码都是 AI 生成的！！！
 
 A Rust-based service discovery DNS server built on [hickory-dns](https://github.com/hickory-dns/hickory-dns), inspired by CoreDNS's plugin architecture. Resolves service names from registries like Nacos to IP addresses via standard DNS queries.
 
@@ -9,7 +11,7 @@ A Rust-based service discovery DNS server built on [hickory-dns](https://github.
                                       |
                                       v
                            +--------------------+
-                           |  DnsFilterHandler   |
+                           |  DoggyDnsHandler   |
                            +--------------------+
                                       |
                     +-----------------+-----------------+
@@ -21,26 +23,26 @@ A Rust-based service discovery DNS server built on [hickory-dns](https://github.
           +---------+---------+           +-------------+-------------+
           |                   |           |             |             |
           v                   v           v             v             v
-      Logging            Metrics      Nacos       SystemDns       Forward
-    Middleware          Middleware   Authority     Authority      Authority
+      Logging            Metrics        Nacos         Native       Forward
+    Middleware          Middleware    Authority     Authority      Authority
 ```
 
 ### Crate Structure
 
 ```
-dns-filter/                    # Binary entrypoint
+doggy-dns/                    # Binary entrypoint
   crates/
-    dns-filter-plugin/         # Plugin traits, authority chain, built-in authorities
-    dns-filter-core/           # Server runtime, config, handler, middleware
-    dns-filter-nacos/          # Nacos service discovery backend
+    doggy-dns-plugin/         # Plugin traits, authority chain, built-in authorities
+    doggy-dns-core/           # Server runtime, config, handler, middleware
+    doggy-dns-nacos/          # Nacos service discovery backend
 ```
 
 **Dependency graph:**
 
-- `dns-filter` (binary) -> `dns-filter-core`, `dns-filter-plugin`, `dns-filter-nacos`
-- `dns-filter-core` -> `dns-filter-plugin`
-- `dns-filter-nacos` -> `dns-filter-plugin`
-- `dns-filter-plugin` is the leaf crate (no internal deps)
+- `doggy-dns` (binary) -> `doggy-dns-core`, `doggy-dns-plugin`, `doggy-dns-nacos`
+- `doggy-dns-core` -> `doggy-dns-plugin`
+- `doggy-dns-nacos` -> `doggy-dns-plugin`
+- `doggy-dns-plugin` is the leaf crate (no internal deps)
 
 ### Request Flow
 
@@ -52,21 +54,21 @@ dns-filter/                    # Binary entrypoint
 3. If all handlers skip, the response is `NXDOMAIN`.
 4. Middleware chain runs `after_request()` with elapsed time.
 
-### Plugin System
+### Plugin Native
 
 Two plugin axes:
 
 | Layer | Trait | Purpose | Implementations |
 |-------|-------|---------|-----------------|
 | Middleware | `Middleware` | Cross-cutting concerns | `LoggingMiddleware`, `MetricsMiddleware` |
-| Authority | `ZoneHandler` | DNS data sources | `NacosAuthority`, `SystemAuthority`, `ForwardAuthority` |
+| Authority | `ZoneHandler` | DNS data sources | `NacosAuthority`, `NativeAuthority`, `ForwardAuthority` |
 
 **Authority plugins:**
 
 | Kind | Description |
 |------|-------------|
 | `nacos` | Resolves service names from Nacos registry via DashMap cache. Format: `<service>.<group>.<namespace>.<zone>.` |
-| `system_dns` | Resolves using the OS system resolver (`/etc/resolv.conf`) |
+| `native` | Resolves using the OS system resolver (`/etc/resolv.conf`) |
 | `forward` | Resolves using explicit upstream DNS servers (e.g., `8.8.8.8:53`) |
 
 Plugins are evaluated in the order defined in the `[[plugins]]` config array. The first handler that returns a non-Skip result wins.
@@ -105,14 +107,14 @@ Control log level via the `RUST_LOG` environment variable.
 
 ## Configuration
 
-TOML-based. Default path: `config/dns-filter.toml` (or pass as CLI arg).
+TOML-based. Default path: `config/doggy-dns.toml` (or pass as CLI arg).
 
 ```toml
 [server]
 listen_addr = "0.0.0.0"
 port = 15353
-tcp_timeout = 30          # seconds, default 10
-shutdown_timeout = 30     # seconds, default 5
+tcp_timeout = 10          # seconds, default 10
+shutdown_timeout = 5      # seconds, default 5
 worker_threads = 1        # default 1 (suitable for DaemonSet, one per node)
 
 # Optional: DNS over TLS
@@ -144,9 +146,9 @@ dns_zone = "nacos.local"
 ttl = 6
 
 [[plugins]]
-kind = "system_dns"
+kind = "native"
 enabled = true
-cache_size = 256          # default 256
+cache_size = 4096         # default 4096
 min_ttl = 10              # seconds, default 10
 max_ttl = 300             # seconds, default 300
 
@@ -163,8 +165,8 @@ max_ttl = 600
 enabled = false
 server_addr = "127.0.0.1:8848"
 namespace = "public"
-group = "DNS_FILTER_GROUP"
-data_id = "dns-filter.toml"
+group = "DOGGY_DNS"
+data_id = "doggy-dns.toml"
 ```
 
 If no `[[plugins]]` are configured, defaults to forwarding to `8.8.8.8` and `1.1.1.1`.
@@ -181,10 +183,10 @@ cargo build --release
 
 ```bash
 # With default config
-./target/release/dns-filter config/dns-filter.toml
+./target/release/doggy-dns config/doggy-dns.toml
 
 # With debug logging
-RUST_LOG=dns_filter=debug ./target/release/dns-filter config/dns-filter.toml
+RUST_LOG=doggy_dns=debug ./target/release/doggy-dns config/doggy-dns.toml
 ```
 
 ### Test
@@ -207,9 +209,9 @@ Benchmarks use [criterion](https://crates.io/crates/criterion) and parameterize 
 cargo bench --workspace
 
 # Run a single crate's benchmarks
-cargo bench -p dns-filter-core       # handler pipeline benchmarks
-cargo bench -p dns-filter-nacos      # nacos authority lookup benchmarks
-cargo bench -p dns-filter-plugin     # authority chain benchmarks
+cargo bench -p doggy-dns-core       # handler pipeline benchmarks
+cargo bench -p doggy-dns-nacos      # nacos authority lookup benchmarks
+cargo bench -p doggy-dns-plugin     # authority chain benchmarks
 
 # Run a single benchmark by name
 cargo bench --bench handler_bench
@@ -293,24 +295,24 @@ All jobs use dependency caching (`Swatinem/rust-cache@v2`).
 
 | Test File | Tests | Description |
 |-----------|-------|-------------|
-| `crates/dns-filter-core/tests/config_test.rs` | 13 | Config parsing, defaults, validation (TLS/HTTPS/remote_config) |
-| `crates/dns-filter-core/tests/handler_test.rs` | 7 | Handler pipeline: NoError, NXDomain, ServFail, Refused, middleware callbacks |
-| `crates/dns-filter-core/tests/middleware_test.rs` | 6 | Metrics counter, logging middleware, return values |
-| `crates/dns-filter-nacos/tests/authority_test.rs` | 3 | Nacos authority lookup hit/miss/wrong-zone |
-| `crates/dns-filter-nacos/tests/mapping_test.rs` | 6 | DNS name parsing, record creation |
-| `crates/dns-filter-nacos/tests/watcher_test.rs` | 6 | Instance cache: insert, filter, remove, replace, lowercase keys |
-| `crates/dns-filter-plugin/tests/authority_chain_test.rs` | 9 | Chain resolution: empty, hit, miss, fallthrough, all-skip, Break, error, is_empty |
-| `crates/dns-filter-plugin/tests/forward_test.rs` | 1 | Forward resolver (requires network) |
-| `crates/dns-filter-plugin/tests/system_dns_test.rs` | 1 | System resolver (requires network) |
+| `crates/doggy-dns-core/tests/config_test.rs` | 13 | Config parsing, defaults, validation (TLS/HTTPS/remote_config) |
+| `crates/doggy-dns-core/tests/handler_test.rs` | 7 | Handler pipeline: NoError, NXDomain, ServFail, Refused, middleware callbacks |
+| `crates/doggy-dns-core/tests/middleware_test.rs` | 6 | Metrics counter, logging middleware, return values |
+| `crates/doggy-dns-nacos/tests/authority_test.rs` | 3 | Nacos authority lookup hit/miss/wrong-zone |
+| `crates/doggy-dns-nacos/tests/mapping_test.rs` | 6 | DNS name parsing, record creation |
+| `crates/doggy-dns-nacos/tests/watcher_test.rs` | 6 | Instance cache: insert, filter, remove, replace, lowercase keys |
+| `crates/doggy-dns-plugin/tests/authority_chain_test.rs` | 9 | Chain resolution: empty, hit, miss, fallthrough, all-skip, Break, error, is_empty |
+| `crates/doggy-dns-plugin/tests/forward_test.rs` | 1 | Forward resolver (requires network) |
+| `crates/doggy-dns-plugin/tests/native_test.rs` | 1 | Native resolver (requires network) |
 | `tests/integration_test.rs` | 2 | End-to-end chain: Nacos hit, Nacos miss -> Forward |
 
 ### Benchmark Structure
 
 | Bench File | Benchmarks | Description |
 |------------|------------|-------------|
-| `crates/dns-filter-core/benches/handler_bench.rs` | 2 x 4 | Handler pipeline (nacos hit, nxdomain) x worker_threads 1..4 |
-| `crates/dns-filter-nacos/benches/nacos_bench.rs` | 2 x 4 + 3 | Authority lookup (hit, miss) x worker_threads 1..4 + sync benchmarks |
-| `crates/dns-filter-plugin/benches/chain_bench.rs` | 2 x 4 | Authority chain (empty, nacos hit) x worker_threads 1..4 |
+| `crates/doggy-dns-core/benches/handler_bench.rs` | 2 x 4 | Handler pipeline (nacos hit, nxdomain) x worker_threads 1..4 |
+| `crates/doggy-dns-nacos/benches/nacos_bench.rs` | 2 x 4 + 3 | Authority lookup (hit, miss) x worker_threads 1..4 + sync benchmarks |
+| `crates/doggy-dns-plugin/benches/chain_bench.rs` | 2 x 4 | Authority chain (empty, nacos hit) x worker_threads 1..4 |
 
 ### Key Dependencies
 
