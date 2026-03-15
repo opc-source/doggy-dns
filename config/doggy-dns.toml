@@ -1,0 +1,53 @@
+[server]
+listen_addr = "0.0.0.0"
+port = 15353
+tcp_timeout = 10
+shutdown_timeout = 5
+worker_threads = 1    # defaults to 1 (runs as DaemonSet, one per node)
+
+#[server.tls]
+#enabled = false
+#port = 853
+#cert_path = "/path/to/cert.pem"
+#key_path = "/path/to/key.pem"
+
+#[server.https]
+#enabled = false
+#port = 443
+#cert_path = "/path/to/cert.pem"
+#key_path = "/path/to/key.pem"
+
+[middleware]
+logging = true
+metrics = false
+
+[[plugins]]
+kind = "nacos"
+enabled = false
+server_addr = "127.0.0.1:8848"
+namespace = "public"
+group = "DEFAULT_GROUP"
+dns_zone = "nacos.local"
+ttl = 6
+
+[[plugins]]
+kind = "native"
+enabled = true
+cache_size = 4096
+min_ttl = 10
+max_ttl = 300
+
+[[plugins]]
+kind = "forward"
+enabled = true
+upstream = ["8.8.8.8:53", "1.1.1.1:53"]
+cache_size = 1024
+min_ttl = 30
+max_ttl = 600
+
+[remote_config]
+enabled = false
+server_addr = "127.0.0.1:8848"
+namespace = "public"
+group = "DOGGY_DNS"
+data_id = "doggy-dns.toml"

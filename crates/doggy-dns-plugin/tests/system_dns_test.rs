@@ -1,0 +1,26 @@
+#![allow(clippy::disallowed_methods)]
+
+use doggy_dns_plugin::builtin::native::NativeAuthority;
+use hickory_proto::rr::{LowerName, Name, RecordType};
+use hickory_server::zone_handler::{LookupControlFlow, LookupOptions, ZoneHandler};
+use std::str::FromStr;
+use std::time::Duration;
+
+#[tokio::test]
+async fn native_resolves_known_domain() {
+    let authority = NativeAuthority::new(256, Duration::from_secs(10), Duration::from_secs(300))
+        .await
+        .expect("failed to create NativeAuthority");
+
+    let name = LowerName::from(Name::from_str("www.google.com.").unwrap());
+    let result = authority
+        .lookup(&name, RecordType::A, None, LookupOptions::default())
+        .await;
+
+    match result {
+        LookupControlFlow::Continue(Ok(_)) | LookupControlFlow::Break(Ok(_)) => {
+            // Success
+        }
+        _ => panic!("Expected successful lookup, got non-success result"),
+    }
+}

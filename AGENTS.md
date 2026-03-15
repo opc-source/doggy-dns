@@ -7,14 +7,14 @@ This file provides guidance to AI Coding when working with code in this reposito
 ```bash
 cargo build                                    # Build all crates
 cargo test --workspace                         # Run all tests (some need network)
-cargo test -p dns-filter-nacos                 # Test a single crate
-cargo test -p dns-filter-plugin --test authority_chain_test  # Run a single test file
-cargo test -p dns-filter-core --test config_test -- parse_full_config  # Run a single test
+cargo test -p doggy-dns-nacos                 # Test a single crate
+cargo test -p doggy-dns-plugin --test authority_chain_test  # Run a single test file
+cargo test -p doggy-dns-core --test config_test -- parse_full_config  # Run a single test
 cargo clippy --all-features --all-targets -- -D warnings    # Lint (CI uses -D, not -W)
 cargo fmt --all -- --check                     # Format check
 cargo bench --no-run --workspace               # Verify benchmarks compile
 cargo bench --workspace                        # Run all benchmarks
-cargo bench -p dns-filter-core                 # Run handler pipeline benchmarks only
+cargo bench -p doggy-dns-core                 # Run handler pipeline benchmarks only
 cargo bench --bench nacos_bench                # Run a single benchmark file
 cargo bench --bench handler_bench -- handler_pipeline_nacos_hit  # Filter by name
 cargo tarpaulin --config tarpaulin.toml        # Coverage (XML + HTML reports)
@@ -26,12 +26,12 @@ cargo tarpaulin --workspace --out Stdout       # Coverage quick summary
 ### Crate Dependency Graph
 
 ```
-dns-filter (binary)
-  ├── dns-filter-core     (server, config, handler, middleware)
-  │     └── dns-filter-plugin
-  ├── dns-filter-nacos    (Nacos service discovery backend)
-  │     └── dns-filter-plugin
-  └── dns-filter-plugin   (traits, authority chain, built-in authorities — leaf crate)
+doggy-dns (binary)
+  ├── doggy-dns-core     (server, config, handler, middleware)
+  │     └── doggy-dns-plugin
+  ├── doggy-dns-nacos    (Nacos service discovery backend)
+  │     └── doggy-dns-plugin
+  └── doggy-dns-plugin   (traits, authority chain, built-in authorities — leaf crate)
 ```
 
 ### Request Processing Pipeline
@@ -46,9 +46,9 @@ DNS query → **Middleware chain** (before_request) → **AuthorityChain** (sequ
 
 | Kind | Struct | Crate | What it does |
 |------|--------|-------|-------------|
-| `nacos` | `NacosAuthority` | dns-filter-nacos | Resolves `<svc>.<group>.<ns>.<zone>` from DashMap cache fed by Nacos push events |
-| `system_dns` | `SystemAuthority` | dns-filter-plugin | Forwards to OS system resolver (/etc/resolv.conf) |
-| `forward` | `ForwardAuthority` | dns-filter-plugin | Forwards to explicit upstream servers (e.g., 8.8.8.8) |
+| `nacos` | `NacosAuthority` | doggy-dns-nacos | Resolves `<svc>.<group>.<ns>.<zone>` from DashMap cache fed by Nacos push events |
+| `native` | `NativeAuthority` | doggy-dns-plugin | Forwards to OS system resolver (/etc/resolv.conf) |
+| `forward` | `ForwardAuthority` | doggy-dns-plugin | Forwards to explicit upstream servers (e.g., 8.8.8.8) |
 
 All implement hickory's `ZoneHandler` trait. Plugins are evaluated in `[[plugins]]` config order; first non-Skip wins.
 
@@ -84,14 +84,14 @@ Cache updates replace the entire Vec for a key (never mutate in place). Config s
 
 ## Configuration
 
-TOML config at `config/dns-filter.toml`. Key structs in `core/config.rs`: `DnsFilterConfig`, `ServerConfig`, `PluginConfig` (flat — fields per kind), `PluginKind` enum (`Nacos`, `SystemDns`, `Forward`).
+TOML config at `config/doggy-dns.toml`. Key structs in `core/config.rs`: `DoggyDnsConfig`, `ServerConfig`, `PluginConfig` (flat — fields per kind), `PluginKind` enum (`Nacos`, `Native`, `Forward`).
 
 `validate_config()` checks: worker_threads > 0, TLS/HTTPS cert files exist when enabled, remote_config fields non-empty when enabled.
 
 ## Test Conventions
 
 - Integration tests in `tests/` and `crates/*/tests/` (not inline `#[cfg(test)]` modules)
-- Forward/system_dns tests make real network calls
+- Forward/native tests make real network calls
 - Nacos tests use mock DashMap caches (no Nacos server needed)
 - Benchmarks in `crates/*/benches/` using criterion 0.8, parameterized over worker_threads 1..4
 - Benchmark output starts with "running 0 tests" (from default harness) — this is normal, criterion results follow
