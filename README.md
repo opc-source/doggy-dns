@@ -1,6 +1,6 @@
 # Doggy-DNS
 
-狗狗 DNS, 可以 DaemonSet 或中心化权威部署？暂时不完善，但作为本地代理完全可用。想试试 AI Coding 有多强，是真的强一天做了以前作者应该需要一两个月的事，主要是作者水平不够而它能拔高了所有技术能力，几乎所有代码都是 AI 生成的！！！
+狗狗 DNS，可以 DaemonSet 或中心化权威部署？暂时不完善，但作为本地代理完全冇问题。想试试 AI Coding 有多强，一天做了在以前应该需要一两个月的事，主要是作者水平不够而它拔高了所有技术能力。几乎所有代码由 AI 生成，只小改了些字符！！！
 
 A Rust-based service discovery DNS server built on [hickory-dns](https://github.com/hickory-dns/hickory-dns), inspired by CoreDNS's plugin architecture. Resolves service names from registries like Nacos to IP addresses via standard DNS queries.
 
@@ -17,8 +17,8 @@ A Rust-based service discovery DNS server built on [hickory-dns](https://github.
                     +-----------------+-----------------+
                     |                                   |
                     v                                   v
-          Middleware Chain                     Authority Chain
-        (before / after)                   (sequential lookup)
+             Middleware Chain                     Authority Chain
+             (before / after)                   (sequential lookup)
                     |                                   |
           +---------+---------+           +-------------+-------------+
           |                   |           |             |             |
