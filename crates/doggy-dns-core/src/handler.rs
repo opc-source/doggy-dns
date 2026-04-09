@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use doggy_dns_plugin::authority_chain::AuthorityChain;
 use doggy_dns_plugin::{Middleware, MiddlewareAction};
-use hickory_proto::op::{Header, MessageType, OpCode, ResponseCode};
+use hickory_proto::op::{Header, HeaderCounts, MessageType, Metadata, OpCode, ResponseCode};
 use hickory_server::server::{Request, RequestHandler, ResponseHandler, ResponseInfo};
 use hickory_server::zone_handler::{LookupControlFlow, MessageResponseBuilder};
 use std::sync::Arc;
@@ -72,15 +72,15 @@ impl RequestHandler for DoggyDnsHandler {
         let response_info = match resolve_result.outcome {
             LookupControlFlow::Continue(Ok(lookup)) | LookupControlFlow::Break(Ok(lookup)) => {
                 let builder = MessageResponseBuilder::from_message_request(request);
-                let mut header = Header::response_from_request(request.header());
-                header.set_message_type(MessageType::Response);
-                header.set_op_code(OpCode::Query);
-                header.set_response_code(ResponseCode::NoError);
-                header.set_recursion_available(true);
+                let mut metadata = Metadata::response_from_request(&request.metadata);
+                metadata.message_type = MessageType::Response;
+                metadata.op_code = OpCode::Query;
+                metadata.response_code = ResponseCode::NoError;
+                metadata.recursion_available = true;
 
                 let records: Vec<_> = lookup.iter().cloned().collect();
                 let answer_count = records.len();
-                let response = builder.build(header, records.iter(), &[], &[], &[]);
+                let response = builder.build(metadata, records.iter(), &[], &[], &[]);
 
                 match response_handle.send_response(response).await {
                     Ok(info) => {
@@ -145,7 +145,7 @@ async fn send_error<R: ResponseHandler>(
     response_code: ResponseCode,
 ) -> ResponseInfo {
     let builder = MessageResponseBuilder::from_message_request(request);
-    let response = builder.error_msg(request.header(), response_code);
+    let response = builder.error_msg(&request.metadata, response_code);
     match response_handle.send_response(response).await {
         Ok(info) => info,
         Err(e) => {
@@ -154,9 +154,13 @@ async fn send_error<R: ResponseHandler>(
                 error = %e,
                 "failed to send error response"
             );
-            let mut header = Header::response_from_request(request.header());
-            header.set_response_code(ResponseCode::ServFail);
-            header.into()
+            let mut metadata = Metadata::response_from_request(&request.metadata);
+            metadata.response_code = ResponseCode::ServFail;
+            Header {
+                metadata,
+                counts: HeaderCounts::default(),
+            }
+            .into()
         }
     }
 }

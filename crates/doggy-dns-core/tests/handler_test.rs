@@ -8,7 +8,7 @@ use doggy_dns_nacos::authority::NacosAuthority;
 use doggy_dns_nacos::watcher::{CachedInstance, ServiceKey};
 use doggy_dns_plugin::authority_chain::AuthorityChain;
 use doggy_dns_plugin::{Middleware, MiddlewareAction};
-use hickory_proto::op::{Message, MessageType, OpCode, Query, ResponseCode};
+use hickory_proto::op::{Header, HeaderCounts, Message, MessageType, OpCode, Query, ResponseCode};
 use hickory_proto::rr::{Name, Record, RecordType};
 use hickory_server::net::NetError;
 use hickory_server::net::runtime::TokioTime;
@@ -26,7 +26,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 fn make_dns_request(domain: &str, rtype: RecordType) -> Request {
     let mut message = Message::new(1234, MessageType::Query, OpCode::Query);
-    message.set_recursion_desired(true);
+    message.metadata.recursion_desired = true;
 
     let mut query = Query::new();
     query.set_name(Name::from_str(domain).unwrap());
@@ -69,9 +69,12 @@ impl ResponseHandler for MockResponseHandler {
             impl Iterator<Item = &'a Record> + Send + 'a,
         >,
     ) -> Result<ResponseInfo, NetError> {
-        let header = *response.header();
-        *self.last_response_code.lock().unwrap() = Some(header.response_code());
-        Ok(ResponseInfo::from(header))
+        let metadata = *response.metadata();
+        *self.last_response_code.lock().unwrap() = Some(metadata.response_code);
+        Ok(ResponseInfo::from(Header {
+            metadata,
+            counts: HeaderCounts::default(),
+        }))
     }
 }
 

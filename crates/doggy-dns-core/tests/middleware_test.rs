@@ -11,7 +11,7 @@ use std::str::FromStr;
 
 fn make_dns_request(domain: &str, rtype: RecordType) -> Request {
     let mut message = Message::new(1234, MessageType::Query, OpCode::Query);
-    message.set_recursion_desired(true);
+    message.metadata.recursion_desired = true;
 
     let mut query = Query::new();
     query.set_name(Name::from_str(domain).unwrap());

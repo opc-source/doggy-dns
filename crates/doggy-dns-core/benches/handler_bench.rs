@@ -7,7 +7,7 @@ use doggy_dns_nacos::authority::NacosAuthority;
 use doggy_dns_nacos::watcher::{CachedInstance, ServiceKey};
 use doggy_dns_plugin::Middleware;
 use doggy_dns_plugin::authority_chain::AuthorityChain;
-use hickory_proto::op::{Message, MessageType, OpCode, Query};
+use hickory_proto::op::{Header, HeaderCounts, Message, MessageType, OpCode, Query};
 use hickory_proto::rr::{Name, Record, RecordType};
 use hickory_server::net::NetError;
 use hickory_server::net::runtime::TokioTime;
@@ -35,14 +35,17 @@ impl ResponseHandler for NoOpResponseHandler {
             impl Iterator<Item = &'a Record> + Send + 'a,
         >,
     ) -> Result<ResponseInfo, NetError> {
-        let header = *response.header();
-        Ok(ResponseInfo::from(header))
+        let metadata = *response.metadata();
+        Ok(ResponseInfo::from(Header {
+            metadata,
+            counts: HeaderCounts::default(),
+        }))
     }
 }
 
 fn make_request(domain: &str) -> Request {
     let mut message = Message::new(1234, MessageType::Query, OpCode::Query);
-    message.set_recursion_desired(true);
+    message.metadata.recursion_desired = true;
     let mut query = Query::new();
     query.set_name(Name::from_str(domain).unwrap());
     query.set_query_type(RecordType::A);
