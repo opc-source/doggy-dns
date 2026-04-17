@@ -32,6 +32,7 @@ impl RequestHandler for DoggyDnsHandler {
         mut response_handle: R,
     ) -> ResponseInfo {
         let start = Instant::now();
+        let request_id = request.metadata.id;
 
         // Run before_request on all middlewares
         for mw in &self.middlewares {
@@ -41,6 +42,7 @@ impl RequestHandler for DoggyDnsHandler {
                     mw.after_request(request, duration_ms).await;
                 }
                 tracing::warn!(
+                    request_id = request_id,
                     duration_ms = duration_ms,
                     response_code = ?ResponseCode::Refused,
                     "request short-circuited by middleware"
@@ -53,7 +55,7 @@ impl RequestHandler for DoggyDnsHandler {
         let request_info = match request.request_info() {
             Ok(info) => info,
             Err(e) => {
-                tracing::warn!(error = %e, "failed to parse request info");
+                tracing::warn!(request_id = request_id, error = %e, "failed to parse request info");
                 return send_error(request, &mut response_handle, ResponseCode::FormErr).await;
             }
         };
@@ -85,6 +87,7 @@ impl RequestHandler for DoggyDnsHandler {
                 match response_handle.send_response(response).await {
                     Ok(info) => {
                         tracing::info!(
+                            request_id = request_id,
                             query = %query_display,
                             qtype = ?query_type,
                             authority = handler_name,
@@ -97,6 +100,7 @@ impl RequestHandler for DoggyDnsHandler {
                     }
                     Err(e) => {
                         tracing::error!(
+                            request_id = request_id,
                             query = %query_display,
                             qtype = ?query_type,
                             authority = handler_name,
@@ -109,6 +113,7 @@ impl RequestHandler for DoggyDnsHandler {
             }
             LookupControlFlow::Continue(Err(e)) | LookupControlFlow::Break(Err(e)) => {
                 tracing::warn!(
+                    request_id = request_id,
                     query = %query_display,
                     qtype = ?query_type,
                     authority = handler_name,
@@ -120,6 +125,7 @@ impl RequestHandler for DoggyDnsHandler {
             }
             LookupControlFlow::Skip => {
                 tracing::info!(
+                    request_id = request_id,
                     query = %query_display,
                     qtype = ?query_type,
                     response_code = ?ResponseCode::NXDomain,
