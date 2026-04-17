@@ -28,9 +28,9 @@ dashmap = { workspace = true }
 hickory-proto = { workspace = true }
 
 [workspace.dependencies]
-hickory-server = { version = "0.26.0-beta.3", features = ["tls-ring", "https-ring", "resolver"] }
-hickory-proto = "0.26.0-beta.3"
-hickory-resolver = { version = "0.26.0-beta.3", features = ["tokio", "system-config"] }
+hickory-server = { version = "0.26", features = ["tls-ring", "https-ring", "resolver"] }
+hickory-proto = "0.26"
+hickory-resolver = { version = "0.26", features = ["tokio", "system-config"] }
 nacos-sdk = "0.7"
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }

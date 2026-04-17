@@ -38,7 +38,7 @@ fn to_dns_records_creates_a_records() {
     assert_eq!(records.len(), 2);
     for record in &records {
         assert_eq!(record.record_type(), RecordType::A);
-        assert_eq!(record.ttl(), 6);
+        assert_eq!(record.ttl, 6);
     }
 }
 

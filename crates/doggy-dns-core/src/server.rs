@@ -29,7 +29,7 @@ pub async fn build_server<H: RequestHandler>(
         .await
         .context("failed to bind TCP listener")?;
     let tcp_timeout = Duration::from_secs(config.server.tcp_timeout);
-    server.register_listener(tcp_listener, tcp_timeout);
+    server.register_listener(tcp_listener, tcp_timeout, 32);
     tracing::info!("listening on TCP {}", addr);
 
     // TLS (DoT)
