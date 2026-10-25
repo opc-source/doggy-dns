@@ -3,7 +3,6 @@
 use async_trait::async_trait;
 use dashmap::DashMap;
 use doggy_dns_core::handler::DoggyDnsHandler;
-use doggy_dns_core::middleware::metrics::MetricsMiddleware;
 use doggy_dns_nacos::authority::NacosAuthority;
 use doggy_dns_nacos::watcher::{CachedInstance, ServiceKey};
 use doggy_dns_plugin::authority_chain::AuthorityChain;
@@ -234,27 +233,6 @@ async fn handler_middleware_short_circuit_returns_refused() {
         .await;
 
     assert_eq!(mock.response_code(), Some(ResponseCode::Refused));
-}
-
-#[tokio::test]
-async fn handler_after_request_called_on_all_middlewares() {
-    let authority = make_nacos_authority_with_hit();
-    let chain = AuthorityChain::new(vec![("nacos".to_string(), Arc::new(authority))]);
-
-    let metrics = Arc::new(MetricsMiddleware::new());
-    let handler = DoggyDnsHandler::new(
-        vec![metrics.clone() as Arc<dyn Middleware>],
-        Arc::new(chain),
-    );
-
-    let request = make_dns_request("my-svc.DEFAULT_GROUP.public.nacos.local.", RecordType::A);
-    let mock = MockResponseHandler::new();
-    let _info = handler
-        .handle_request::<_, TokioTime>(&request, mock.clone())
-        .await;
-
-    // before_request increments the counter
-    assert_eq!(metrics.total_queries(), 1);
 }
 
 #[tokio::test]

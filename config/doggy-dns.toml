@@ -19,7 +19,6 @@ worker_threads = 1    # defaults to 1 (runs as DaemonSet, one per node)
 
 [middleware]
 logging = true
-metrics = false
 
 # OTLP observability. Disabled by default.
 # OpenObserve is the default backend; OTel Collector and Vector work by

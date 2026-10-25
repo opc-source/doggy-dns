@@ -2,7 +2,6 @@ use anyhow::{Context, Result};
 use doggy_dns_core::config::{DoggyDnsConfig, PluginKind, load_config};
 use doggy_dns_core::handler::DoggyDnsHandler;
 use doggy_dns_core::middleware::logging::LoggingMiddleware;
-use doggy_dns_core::middleware::metrics::MetricsMiddleware;
 use doggy_dns_core::server::build_server;
 use doggy_dns_nacos::authority::NacosAuthority;
 use doggy_dns_nacos::watcher::NacosServiceWatcher;
@@ -42,7 +41,6 @@ fn main() -> Result<()> {
         tls_enabled = config.server.tls.as_ref().is_some_and(|t| t.enabled),
         https_enabled = config.server.https.as_ref().is_some_and(|h| h.enabled),
         logging = config.middleware.logging,
-        metrics = config.middleware.metrics,
         plugin_count = config.plugins.len(),
         remote_config_enabled = config.remote_config.enabled,
         observability_enabled = config.observability.enabled,
@@ -84,9 +82,6 @@ async fn async_main(config: DoggyDnsConfig, telemetry: &mut Observability) -> Re
     let mut middlewares: Vec<Arc<dyn Middleware>> = Vec::new();
     if config.middleware.logging {
         middlewares.push(Arc::new(LoggingMiddleware));
-    }
-    if config.middleware.metrics {
-        middlewares.push(Arc::new(MetricsMiddleware::new()));
     }
     if let Some(metrics) = telemetry.metrics_middleware() {
         middlewares.push(metrics);

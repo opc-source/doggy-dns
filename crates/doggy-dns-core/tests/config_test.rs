@@ -24,7 +24,6 @@ key_path = "/path/to/key.pem"
 
 [middleware]
 logging = true
-metrics = false
 
 [[plugins]]
 kind = "nacos"
@@ -72,7 +71,6 @@ data_id = "doggy-dns.toml"
     assert!(!https.enabled);
 
     assert!(config.middleware.logging);
-    assert!(!config.middleware.metrics);
 
     assert_eq!(config.plugins.len(), 3);
 

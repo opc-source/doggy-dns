@@ -4,10 +4,8 @@ use async_trait::async_trait;
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use dashmap::DashMap;
 use doggy_dns_core::handler::DoggyDnsHandler;
-use doggy_dns_core::middleware::metrics::MetricsMiddleware;
 use doggy_dns_nacos::authority::NacosAuthority;
 use doggy_dns_nacos::watcher::{CachedInstance, ServiceKey};
-use doggy_dns_plugin::Middleware;
 use doggy_dns_plugin::authority_chain::AuthorityChain;
 use hickory_proto::op::{Header, HeaderCounts, Message, MessageType, OpCode, Query};
 use hickory_proto::rr::{Name, Record, RecordType};
@@ -76,8 +74,7 @@ fn bench_handler_pipeline_nacos_hit(c: &mut Criterion) {
         "nacos".to_string(),
         Arc::new(authority),
     )]));
-    let metrics = Arc::new(MetricsMiddleware::new());
-    let handler = DoggyDnsHandler::new(vec![metrics as Arc<dyn Middleware>], chain);
+    let handler = DoggyDnsHandler::new(vec![], chain);
     let request = make_request("my-svc.DEFAULT_GROUP.public.nacos.local.");
 
     let mut group = c.benchmark_group("handler_pipeline_nacos_hit");

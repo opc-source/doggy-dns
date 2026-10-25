@@ -62,7 +62,7 @@ Two plugin axes:
 
 | Layer | Trait | Purpose | Implementations |
 |-------|-------|---------|-----------------|
-| Middleware | `Middleware` | Cross-cutting concerns | `LoggingMiddleware`, `MetricsMiddleware` |
+| Middleware | `Middleware` | Cross-cutting concerns | `LoggingMiddleware`, OTel metrics in `doggy-dns-observability` |
 | Authority | `ZoneHandler` | DNS data sources | `NacosAuthority`, `NativeAuthority`, `ForwardAuthority` |
 
 **Authority plugins:**
@@ -178,7 +178,6 @@ worker_threads = 1        # default 1 (suitable for DaemonSet, one per node)
 
 [middleware]
 logging = true
-metrics = false
 
 # Optional OTLP export (disabled by default).
 [observability]
