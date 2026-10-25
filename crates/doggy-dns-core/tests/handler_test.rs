@@ -6,7 +6,7 @@ use doggy_dns_core::handler::DoggyDnsHandler;
 use doggy_dns_nacos::authority::NacosAuthority;
 use doggy_dns_nacos::watcher::{CachedInstance, ServiceKey};
 use doggy_dns_plugin::authority_chain::AuthorityChain;
-use doggy_dns_plugin::{Middleware, MiddlewareAction};
+use doggy_dns_plugin::{Middleware, MiddlewareAction, RequestOutcome};
 use hickory_proto::op::{Header, HeaderCounts, Message, MessageType, OpCode, Query, ResponseCode};
 use hickory_proto::rr::{Name, Record, RecordType};
 use hickory_server::net::NetError;
@@ -153,7 +153,12 @@ impl Middleware for ShortCircuitMiddleware {
         MiddlewareAction::ShortCircuit
     }
 
-    async fn after_request(&self, _request: &Request, _duration_ms: u64) {
+    async fn after_request(
+        &self,
+        _request: &Request,
+        _duration_ms: u64,
+        _outcome: &RequestOutcome,
+    ) {
         self.after_request_count.fetch_add(1, Ordering::Relaxed);
     }
 }

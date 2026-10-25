@@ -1,6 +1,6 @@
 #![allow(clippy::disallowed_methods)]
 
-use doggy_dns_plugin::{Middleware, MiddlewareAction};
+use doggy_dns_plugin::{Middleware, MiddlewareAction, RequestOutcome};
 use hickory_proto::op::{Message, MessageType, OpCode, Query};
 use hickory_proto::rr::{Name, RecordType};
 use hickory_server::net::xfer::Protocol;
@@ -36,5 +36,10 @@ async fn logging_after_request_completes_without_panic() {
     use doggy_dns_core::middleware::logging::LoggingMiddleware;
     let mw = LoggingMiddleware;
     let request = make_dns_request("example.com.", RecordType::A);
-    mw.after_request(&request, 42).await;
+    let outcome = RequestOutcome {
+        response_code: hickory_proto::op::ResponseCode::NoError,
+        authority: Some("native".to_string()),
+        answers: 1,
+    };
+    mw.after_request(&request, 42, &outcome).await;
 }

@@ -54,7 +54,7 @@ doggy-dns/                    # Binary entrypoint
    - `Continue(Ok(records))` -- resolved, return records
    - `Continue(Err(e))` / `Break(Err(e))` -- error, return SERVFAIL
 3. If all handlers skip, the response is `NXDOMAIN`.
-4. Middleware chain runs `after_request_with_outcome()` with elapsed time, response code, authority, and answer count.
+4. Middleware chain runs `after_request()` with elapsed time and the final outcome (response code, authority, answer count).
 
 ### Plugin Native
 

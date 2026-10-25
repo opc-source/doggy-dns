@@ -48,7 +48,7 @@ async fn exports_logs_metrics_and_traces_with_openobserve_headers() {
         .expect("metrics middleware should exist");
     metrics.before_request(&request).await;
     metrics
-        .after_request_with_outcome(
+        .after_request(
             &request,
             3,
             &RequestOutcome {

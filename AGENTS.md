@@ -39,11 +39,11 @@ doggy-dns (binary)
 
 ### Request Processing Pipeline
 
-DNS query → **Middleware chain** (before_request) → **AuthorityChain** (sequential lookup) → **Middleware chain** (after_request_with_outcome) → DNS response.
+DNS query → **Middleware chain** (before_request) → **AuthorityChain** (sequential lookup) → **Middleware chain** (after_request) → DNS response.
 
 **AuthorityChain** iterates `Vec<(String, Arc<dyn ZoneHandler>)>` in order. Each handler returns `Skip` (try next), `Continue(Ok/Err)`, or `Break(Ok/Err)` (stop). Returns a `ResolveResult` with `outcome` + `handler_name`. The handler maps outcomes to DNS response codes: `NoError`, `ServFail`, or `NXDomain` (all skipped).
 
-**Middleware** trait (`plugin.rs`): `before_request()` returns `Continue` or `ShortCircuit`; `after_request_with_outcome()` receives elapsed time, response code, authority and answer count (the legacy `after_request()` remains as a default-compatible hook).
+**Middleware** trait (`plugin.rs`): `before_request()` returns `Continue` or `ShortCircuit`; `after_request()` receives elapsed time plus the final outcome (response code, authority, answer count).
 
 ### Authority Plugin Types
 

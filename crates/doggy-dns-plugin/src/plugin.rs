@@ -11,7 +11,7 @@ pub enum MiddlewareAction {
     ShortCircuit,
 }
 
-/// Final outcome of a request, available to `after_request_with_outcome`.
+/// Final outcome of a request, available to `after_request`.
 ///
 /// This carries the response code, the authority that produced the answer and
 /// the number of answer records. It is intentionally lightweight: metric
@@ -35,18 +35,8 @@ pub trait Middleware: Send + Sync {
     async fn before_request(&self, request: &Request) -> MiddlewareAction;
 
     /// Called after the authority chain has processed the request.
-    async fn after_request(&self, request: &Request, duration_ms: u64);
-
-    /// Called after the request with the final response outcome.
     ///
-    /// The default implementation delegates to [`Middleware::after_request`] so
-    /// existing middleware implementations keep working unchanged.
-    async fn after_request_with_outcome(
-        &self,
-        request: &Request,
-        duration_ms: u64,
-        _outcome: &RequestOutcome,
-    ) {
-        self.after_request(request, duration_ms).await;
-    }
+    /// `outcome` carries the final response code, the authority that produced
+    /// the answer, and the number of answer records.
+    async fn after_request(&self, request: &Request, duration_ms: u64, outcome: &RequestOutcome);
 }

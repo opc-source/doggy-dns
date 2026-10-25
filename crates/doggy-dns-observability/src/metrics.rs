@@ -111,17 +111,7 @@ impl Middleware for DnsMetricsMiddleware {
         MiddlewareAction::Continue
     }
 
-    async fn after_request(&self, _request: &Request, _duration_ms: u64) {
-        // The handler always uses `after_request_with_outcome`; this impl keeps
-        // the trait's compatibility method a no-op to avoid double counting.
-    }
-
-    async fn after_request_with_outcome(
-        &self,
-        request: &Request,
-        duration_ms: u64,
-        outcome: &RequestOutcome,
-    ) {
+    async fn after_request(&self, request: &Request, duration_ms: u64, outcome: &RequestOutcome) {
         self.metrics.in_flight.add(-1, &[]);
         self.metrics.record(request, duration_ms, outcome);
     }

@@ -35,7 +35,7 @@ impl DoggyDnsHandler {
         record_outcome(span, outcome, duration_ms);
         for middleware in &self.middlewares {
             middleware
-                .after_request_with_outcome(request, duration_ms, outcome)
+                .after_request(request, duration_ms, outcome)
                 .await;
         }
     }
