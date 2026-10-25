@@ -267,7 +267,8 @@ forced span. OTel SDK internal ERROR logs are excluded to avoid an export
 feedback loop.
 
 > This is based on `tracing::error!` events, not DNS response codes. Authority
-> failures currently logged at `WARN` do not trigger it.
+> paths that log at `WARN` do not trigger it; the forward authority logs
+> upstream lookup failures at `ERROR`, so those do.
 
 ## Profiles
 

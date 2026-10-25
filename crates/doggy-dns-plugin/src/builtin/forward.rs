@@ -106,7 +106,7 @@ impl ZoneHandler for ForwardAuthority {
             }
             Err(e) => {
                 span.record("otel.status_code", "ERROR");
-                tracing::debug!(
+                tracing::error!(
                     query = %name_str,
                     qtype = ?rtype,
                     error = %e,
