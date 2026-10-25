@@ -4,6 +4,7 @@ members = [
     "crates/doggy-dns-core",
     "crates/doggy-dns-plugin",
     "crates/doggy-dns-nacos",
+    "crates/doggy-dns-observability",
 ]
 
 [package]
@@ -17,11 +18,12 @@ description = "A Rust-based service discovery DNS server built on hickory-dns"
 doggy-dns-core = { path = "crates/doggy-dns-core" }
 doggy-dns-plugin = { path = "crates/doggy-dns-plugin" }
 doggy-dns-nacos = { path = "crates/doggy-dns-nacos" }
+doggy-dns-observability = { path = "crates/doggy-dns-observability" }
 hickory-server = { workspace = true }
-tokio = { version = "1", features = ["full"] }
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-anyhow = "1"
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow = { workspace = true }
 
 [dev-dependencies]
 dashmap = { workspace = true }
@@ -31,16 +33,28 @@ hickory-proto = { workspace = true }
 hickory-server = { version = "0.26", features = ["tls-ring", "https-ring", "resolver"] }
 hickory-proto = "0.26"
 hickory-resolver = { version = "0.26", features = ["tokio", "system-config"] }
-nacos-sdk = "0.7"
+nacos-sdk = "0.8"
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }
 toml = "1.1"
 dashmap = "6"
 arc-swap = "1"
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 anyhow = "1"
 async-trait = "0.1"
 rustls = "0.23"
 rustls-pemfile = "2"
 criterion = { version = "0.8", features = ["html_reports", "async_tokio"] }
+
+# Observability (OTLP -> OpenObserve / OTel Collector / Vector)
+opentelemetry = { version = "0.33", default-features = false, features = ["trace", "metrics", "logs", "internal-logs"] }
+opentelemetry_sdk = { version = "0.33", default-features = false, features = ["trace", "metrics", "logs", "internal-logs"] }
+opentelemetry-otlp = { version = "0.33", default-features = false, features = ["http-proto", "reqwest-blocking-client", "trace", "metrics", "logs", "internal-logs"] }
+opentelemetry-proto = { version = "0.33", default-features = false, features = ["gen-tonic-messages", "profiles", "trace", "logs", "metrics"] }
+opentelemetry-appender-tracing = "0.33"
+tracing-opentelemetry = "0.34"
+pprof = "0.15"
+reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
+prost = "0.14"
+base64 = "0.23"

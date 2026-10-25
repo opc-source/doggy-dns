@@ -35,13 +35,15 @@ doggy-dns/                    # Binary entrypoint
     doggy-dns-plugin/         # Plugin traits, authority chain, built-in authorities
     doggy-dns-core/           # Server runtime, config, handler, middleware
     doggy-dns-nacos/          # Nacos service discovery backend
+    doggy-dns-observability/  # OTLP logs/metrics/traces/profiles export
 ```
 
 **Dependency graph:**
 
-- `doggy-dns` (binary) -> `doggy-dns-core`, `doggy-dns-plugin`, `doggy-dns-nacos`
+- `doggy-dns` (binary) -> `doggy-dns-core`, `doggy-dns-plugin`, `doggy-dns-nacos`, `doggy-dns-observability`
 - `doggy-dns-core` -> `doggy-dns-plugin`
 - `doggy-dns-nacos` -> `doggy-dns-plugin`
+- `doggy-dns-observability` -> `doggy-dns-core`, `doggy-dns-plugin`
 - `doggy-dns-plugin` is the leaf crate (no internal deps)
 
 ### Request Flow
@@ -52,7 +54,7 @@ doggy-dns/                    # Binary entrypoint
    - `Continue(Ok(records))` -- resolved, return records
    - `Continue(Err(e))` / `Break(Err(e))` -- error, return SERVFAIL
 3. If all handlers skip, the response is `NXDOMAIN`.
-4. Middleware chain runs `after_request()` with elapsed time.
+4. Middleware chain runs `after_request_with_outcome()` with elapsed time, response code, authority, and answer count.
 
 ### Plugin Native
 
@@ -105,6 +107,49 @@ Structured logging via `tracing`. Key log events:
 
 Control log level via the `RUST_LOG` environment variable.
 
+### OTLP Observability
+
+Optional OTLP/HTTP export to **OpenObserve** (default), OTel Collector, or
+Vector:
+
+| Signal | Default | Notes |
+|--------|---------|-------|
+| Logs | on, level `warn` | stdout logging stays independent |
+| Metrics | on, 15s | `dns.queries`, `dns.query.duration`, in-flight |
+| Traces | on, 5% sampling | `dns.request`, `dns.resolve`, `dns.forward`; `tracing::error!` spans are force-sampled |
+| Profiles | off | CPU only, Linux/macOS, OTLP Alpha; verified on OpenObserve v1.1.2 |
+
+Quick config (see [docs/observability.md](docs/observability.md) for the full
+reference and Collector/Vector examples):
+
+```toml
+[observability]
+enabled = true
+backend = "openobserve"
+endpoint = "http://127.0.0.1:5080/api/default"
+service_name = "doggy-dns"
+headers = { "stream-name" = "doggy-dns" }
+basic_auth = { username = "root@example.com", password = "${OPENOBSERVE_PASSWORD}" }
+
+[observability.logs]
+enabled = true
+level = "warn"
+
+[observability.metrics]
+enabled = true
+interval_secs = 15
+
+[observability.traces]
+enabled = true
+sample_ratio = 0.05   # normal traffic; tracing::error! spans are always captured
+
+[observability.profiles]
+enabled = false
+```
+
+The base endpoint is `<host>/api/<org>` for OpenObserve and `http://host:4318`
+for Collector/Vector; doggy-dns appends `/v1/<signal>`.
+
 ## Configuration
 
 TOML-based. Default path: `config/doggy-dns.toml` (or pass as CLI arg).
@@ -134,6 +179,34 @@ worker_threads = 1        # default 1 (suitable for DaemonSet, one per node)
 [middleware]
 logging = true
 metrics = false
+
+# Optional OTLP export (disabled by default).
+[observability]
+enabled = false
+backend = "openobserve"                  # openobserve | otel-collector | vector | custom
+endpoint = "http://127.0.0.1:5080/api/default"
+service_name = "doggy-dns"
+headers = { "stream-name" = "doggy-dns" }
+basic_auth = { username = "root@example.com", password = "${OPENOBSERVE_PASSWORD}" }
+
+[observability.logs]
+enabled = true
+level = "warn"
+stdout = true
+
+[observability.metrics]
+enabled = true
+interval_secs = 15
+
+[observability.traces]
+enabled = true
+sample_ratio = 0.05   # normal traffic; tracing::error! spans are always captured
+
+[observability.profiles]
+enabled = false
+interval_secs = 60
+duration_secs = 10
+frequency_hz = 99
 
 # Plugins are evaluated in order. First non-Skip result wins.
 [[plugins]]
@@ -324,6 +397,8 @@ All jobs use dependency caching (`Swatinem/rust-cache@v2`).
 | [dashmap](https://crates.io/crates/dashmap) | Concurrent hash map for service instance cache |
 | [rustls](https://crates.io/crates/rustls) | TLS implementation for DoT/DoH |
 | [tracing](https://crates.io/crates/tracing) | Structured logging |
+| [opentelemetry](https://crates.io/crates/opentelemetry) | OTLP logs, metrics, traces and profiling resource model |
+| [pprof](https://crates.io/crates/pprof) | In-process CPU profiling for OTLP profiles |
 | [criterion](https://crates.io/crates/criterion) | Benchmarking |
 
 ## Roadmap
@@ -334,7 +409,8 @@ All jobs use dependency caching (`Swatinem/rust-cache@v2`).
 - [ ] Database backend (`sqlx`)
 - [ ] Dynamic plugin registry (load plugins at runtime)
 - [ ] Config hot-reload via Nacos config service (watcher implemented, wiring pending)
-- [ ] Metrics histogram for query latencies
+- [x] OTLP/gRPC export (HTTP/protobuf is supported today)
+- [x] Multi-target OTLP fan-out (use a Collector/Vector today)
 
 ## License
 

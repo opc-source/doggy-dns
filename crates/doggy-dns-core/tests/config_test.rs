@@ -323,3 +323,285 @@ key_path = "/nonexistent/key.pem"
     let result = validate_config(&config);
     assert!(result.is_ok());
 }
+
+#[test]
+fn parse_observability_config() {
+    let toml_str = r#"
+[server]
+listen_addr = "0.0.0.0"
+port = 53
+
+[observability]
+enabled = true
+backend = "otel-collector"
+endpoint = "http://127.0.0.1:4318"
+service_name = "dns-edge"
+environment = "staging"
+headers = { "stream-name" = "edge" }
+basic_auth = { username = "user", password = "secret" }
+resource_attributes = { "service.namespace" = "dns" }
+
+[observability.logs]
+enabled = true
+level = "info"
+stdout = false
+
+[observability.metrics]
+enabled = true
+interval_secs = 30
+temporality = "delta"
+
+[observability.traces]
+enabled = true
+sample_ratio = 0.25
+max_queue_size = 4096
+max_export_batch_size = 256
+scheduled_delay_ms = 1000
+
+[observability.profiles]
+enabled = true
+interval_secs = 120
+duration_secs = 15
+frequency_hz = 199
+"#;
+
+    let config: DoggyDnsConfig = toml::from_str(toml_str).unwrap();
+    let observability = &config.observability;
+
+    assert!(observability.enabled);
+    assert_eq!(
+        observability.backend,
+        doggy_dns_core::config::ObservabilityBackend::OtelCollector
+    );
+    assert_eq!(observability.endpoint, "http://127.0.0.1:4318");
+    assert_eq!(observability.service_name.as_deref(), Some("dns-edge"));
+    assert_eq!(observability.environment.as_deref(), Some("staging"));
+    assert_eq!(observability.headers.get("stream-name").unwrap(), "edge");
+    assert_eq!(observability.basic_auth.as_ref().unwrap().username, "user");
+    assert_eq!(
+        observability
+            .resource_attributes
+            .get("service.namespace")
+            .unwrap(),
+        "dns"
+    );
+
+    assert!(observability.logs.enabled);
+    assert_eq!(observability.logs.level, "info");
+    assert!(!observability.logs.stdout);
+
+    assert_eq!(observability.metrics.interval_secs, 30);
+    assert_eq!(
+        observability.metrics.temporality,
+        doggy_dns_core::config::MetricsTemporality::Delta
+    );
+
+    assert!((observability.traces.sample_ratio - 0.25).abs() < f64::EPSILON);
+    assert_eq!(observability.traces.max_queue_size, 4096);
+    assert_eq!(observability.traces.max_export_batch_size, 256);
+    assert_eq!(observability.traces.scheduled_delay_ms, 1000);
+
+    assert!(observability.profiles.enabled);
+    assert_eq!(observability.profiles.interval_secs, 120);
+    assert_eq!(observability.profiles.duration_secs, 15);
+    assert_eq!(observability.profiles.frequency_hz, 199);
+
+    assert!(validate_config(&config).is_ok());
+}
+
+#[test]
+fn observability_defaults_are_disabled() {
+    let toml_str = r#"
+[server]
+listen_addr = "0.0.0.0"
+port = 53
+"#;
+
+    let config: DoggyDnsConfig = toml::from_str(toml_str).unwrap();
+    let observability = &config.observability;
+
+    assert!(!observability.enabled);
+    assert_eq!(
+        observability.backend,
+        doggy_dns_core::config::ObservabilityBackend::OpenObserve
+    );
+    assert_eq!(
+        observability.backend.default_endpoint(),
+        Some("http://127.0.0.1:5080/api/default")
+    );
+    assert!(observability.logs.enabled);
+    assert_eq!(observability.logs.level, "warn");
+    assert!(observability.logs.stdout);
+    assert_eq!(observability.metrics.interval_secs, 15);
+    assert!((observability.traces.sample_ratio - 0.05).abs() < f64::EPSILON);
+    assert_eq!(observability.traces.max_queue_size, 8192);
+    assert!(!observability.profiles.enabled);
+    assert_eq!(observability.profiles.frequency_hz, 99);
+}
+
+#[test]
+fn observability_without_any_signal_fails_validation() {
+    let toml_str = r#"
+[server]
+listen_addr = "0.0.0.0"
+port = 53
+
+[observability]
+enabled = true
+
+[observability.logs]
+enabled = false
+
+[observability.metrics]
+enabled = false
+
+[observability.traces]
+enabled = false
+"#;
+
+    let config: DoggyDnsConfig = toml::from_str(toml_str).unwrap();
+    let error = validate_config(&config).unwrap_err().to_string();
+    assert!(error.contains("no signal"), "unexpected error: {error}");
+}
+
+#[test]
+fn observability_invalid_sample_ratio_fails_validation() {
+    let toml_str = r#"
+[server]
+listen_addr = "0.0.0.0"
+port = 53
+
+[observability]
+enabled = true
+endpoint = "http://127.0.0.1:5080/api/default"
+
+[observability.traces]
+sample_ratio = 1.5
+"#;
+
+    let config: DoggyDnsConfig = toml::from_str(toml_str).unwrap();
+    let error = validate_config(&config).unwrap_err().to_string();
+    assert!(error.contains("sample_ratio"), "unexpected error: {error}");
+}
+
+#[test]
+fn observability_base_endpoint_with_signal_path_fails_validation() {
+    let toml_str = r#"
+[server]
+listen_addr = "0.0.0.0"
+port = 53
+
+[observability]
+enabled = true
+endpoint = "http://127.0.0.1:5080/api/default/v1/logs"
+"#;
+
+    let config: DoggyDnsConfig = toml::from_str(toml_str).unwrap();
+    let error = validate_config(&config).unwrap_err().to_string();
+    assert!(error.contains("base URL"), "unexpected error: {error}");
+}
+
+#[test]
+fn observability_invalid_log_level_fails_validation() {
+    let toml_str = r#"
+[server]
+listen_addr = "0.0.0.0"
+port = 53
+
+[observability]
+enabled = true
+endpoint = "http://127.0.0.1:5080/api/default"
+
+[observability.logs]
+level = "verbose"
+"#;
+
+    let config: DoggyDnsConfig = toml::from_str(toml_str).unwrap();
+    let error = validate_config(&config).unwrap_err().to_string();
+    assert!(error.contains("logs.level"), "unexpected error: {error}");
+}
+
+#[test]
+fn observability_profiles_duration_exceeding_interval_fails_validation() {
+    let toml_str = r#"
+[server]
+listen_addr = "0.0.0.0"
+port = 53
+
+[observability]
+enabled = true
+endpoint = "http://127.0.0.1:5080/api/default"
+
+[observability.profiles]
+enabled = true
+interval_secs = 10
+duration_secs = 20
+"#;
+
+    let config: DoggyDnsConfig = toml::from_str(toml_str).unwrap();
+    let error = validate_config(&config).unwrap_err().to_string();
+    assert!(error.contains("duration_secs"), "unexpected error: {error}");
+}
+
+#[test]
+fn observability_trace_batch_larger_than_queue_fails_validation() {
+    let toml_str = r#"
+[server]
+listen_addr = "0.0.0.0"
+port = 53
+
+[observability]
+enabled = true
+endpoint = "http://127.0.0.1:5080/api/default"
+
+[observability.traces]
+max_queue_size = 128
+max_export_batch_size = 256
+"#;
+
+    let config: DoggyDnsConfig = toml::from_str(toml_str).unwrap();
+    let error = validate_config(&config).unwrap_err().to_string();
+    assert!(
+        error.contains("max_export_batch_size"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn observability_debug_redacts_header_values_and_password() {
+    let toml_str = r#"
+[server]
+listen_addr = "0.0.0.0"
+port = 53
+
+[observability]
+enabled = true
+endpoint = "http://127.0.0.1:5080/api/default"
+headers = { "stream-name" = "top-secret-stream" }
+basic_auth = { username = "user", password = "top-secret-password" }
+"#;
+
+    let config: DoggyDnsConfig = toml::from_str(toml_str).unwrap();
+    let debug = format!("{:?}", config.observability);
+
+    assert!(!debug.contains("top-secret-stream"));
+    assert!(!debug.contains("top-secret-password"));
+    assert!(debug.contains("stream-name"));
+}
+
+#[test]
+fn observability_base_endpoint_with_query_fails_validation() {
+    let toml_str = r#"
+[server]
+listen_addr = "0.0.0.0"
+port = 53
+
+[observability]
+enabled = true
+endpoint = "http://127.0.0.1:5080/api/default?token=secret"
+"#;
+
+    let config: DoggyDnsConfig = toml::from_str(toml_str).unwrap();
+    let error = validate_config(&config).unwrap_err().to_string();
+    assert!(error.contains("query string"), "unexpected error: {error}");
+}

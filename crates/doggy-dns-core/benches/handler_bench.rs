@@ -1,3 +1,5 @@
+#![allow(clippy::disallowed_methods)]
+
 use async_trait::async_trait;
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use dashmap::DashMap;

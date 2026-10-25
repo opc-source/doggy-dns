@@ -5,4 +5,4 @@ pub mod plugin;
 pub mod registry;
 
 pub use authority::AuthorityPlugin;
-pub use plugin::{Middleware, MiddlewareAction};
+pub use plugin::{Middleware, MiddlewareAction, RequestOutcome};

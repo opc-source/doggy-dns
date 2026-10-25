@@ -1,4 +1,5 @@
 use async_trait::async_trait;
+use hickory_proto::op::ResponseCode;
 use hickory_server::server::Request;
 
 /// Result of middleware processing.
@@ -8,6 +9,21 @@ pub enum MiddlewareAction {
     /// Short-circuit: skip remaining middleware and authority chain.
     /// The middleware has already sent the DNS response.
     ShortCircuit,
+}
+
+/// Final outcome of a request, available to `after_request_with_outcome`.
+///
+/// This carries the response code, the authority that produced the answer and
+/// the number of answer records. It is intentionally lightweight: metric
+/// middleware must not inspect or serialize the DNS response itself.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RequestOutcome {
+    /// Response code sent to the client.
+    pub response_code: ResponseCode,
+    /// Authority that handled the query, e.g. `native` or `forward[8.8.8.8:53]`.
+    pub authority: Option<String>,
+    /// Number of answer records in the response.
+    pub answers: usize,
 }
 
 /// Cross-cutting middleware plugin (logging, metrics, etc.).
@@ -20,4 +36,17 @@ pub trait Middleware: Send + Sync {
 
     /// Called after the authority chain has processed the request.
     async fn after_request(&self, request: &Request, duration_ms: u64);
+
+    /// Called after the request with the final response outcome.
+    ///
+    /// The default implementation delegates to [`Middleware::after_request`] so
+    /// existing middleware implementations keep working unchanged.
+    async fn after_request_with_outcome(
+        &self,
+        request: &Request,
+        duration_ms: u64,
+        _outcome: &RequestOutcome,
+    ) {
+        self.after_request(request, duration_ms).await;
+    }
 }

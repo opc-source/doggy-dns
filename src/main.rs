@@ -6,6 +6,7 @@ use doggy_dns_core::middleware::metrics::MetricsMiddleware;
 use doggy_dns_core::server::build_server;
 use doggy_dns_nacos::authority::NacosAuthority;
 use doggy_dns_nacos::watcher::NacosServiceWatcher;
+use doggy_dns_observability::Observability;
 use doggy_dns_plugin::Middleware;
 use doggy_dns_plugin::authority_chain::AuthorityChain;
 use doggy_dns_plugin::builtin::forward::ForwardAuthority;
@@ -16,21 +17,21 @@ use std::time::Duration;
 use tokio::signal;
 
 fn main() -> Result<()> {
-    // Init tracing (sync, no runtime needed)
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
-        )
-        .init();
-
-    tracing::info!("doggy-dns starting...");
-
-    // Load config (sync — std::fs::read_to_string)
+    // Load config before initializing tracing so log format and OTLP settings
+    // are available to the subscriber.
     let config_path = std::env::args()
         .nth(1)
         .unwrap_or_else(|| "config/doggy-dns.toml".to_string());
     let config =
         load_config(&config_path).context(format!("failed to load config from {}", config_path))?;
+
+    let mut telemetry = Observability::init(
+        &config.observability,
+        config.middleware.log_format.as_deref(),
+    )
+    .context("failed to initialize observability")?;
+
+    tracing::info!("doggy-dns starting...");
 
     tracing::info!(
         listen_addr = %config.server.listen_addr,
@@ -44,6 +45,7 @@ fn main() -> Result<()> {
         metrics = config.middleware.metrics,
         plugin_count = config.plugins.len(),
         remote_config_enabled = config.remote_config.enabled,
+        observability_enabled = config.observability.enabled,
         "loaded configuration"
     );
 
@@ -68,10 +70,16 @@ fn main() -> Result<()> {
         "tokio runtime built"
     );
 
-    runtime.block_on(async_main(config))
+    runtime.block_on(async_main(config, &mut telemetry))?;
+
+    telemetry.shutdown();
+    Ok(())
 }
 
-async fn async_main(config: DoggyDnsConfig) -> Result<()> {
+async fn async_main(config: DoggyDnsConfig, telemetry: &mut Observability) -> Result<()> {
+    // Profiles need a Tokio runtime for their HTTP exporter.
+    telemetry.spawn_profiles();
+
     // Build middleware chain
     let mut middlewares: Vec<Arc<dyn Middleware>> = Vec::new();
     if config.middleware.logging {
@@ -79,6 +87,9 @@ async fn async_main(config: DoggyDnsConfig) -> Result<()> {
     }
     if config.middleware.metrics {
         middlewares.push(Arc::new(MetricsMiddleware::new()));
+    }
+    if let Some(metrics) = telemetry.metrics_middleware() {
+        middlewares.push(metrics);
     }
 
     // Build authority chain from plugins (watchers kept alive for subscriptions)
