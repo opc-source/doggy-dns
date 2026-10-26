@@ -28,7 +28,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Install bpf-linker
-        run: cargo install bpf-linker
+        run: |
+          sudo apt-get update && sudo apt-get install -y llvm
+          cargo install bpf-linker
       - name: Build eBPF program
         run: cd xdp && cargo build -Z build-std=core,alloc --release --target bpfel-unknown-none
       - name: Run XDP integration tests
@@ -52,7 +54,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Install bpf-linker
-        run: cargo install bpf-linker
+        run: |
+          sudo apt-get update && sudo apt-get install -y llvm
+          cargo install bpf-linker
       - name: Build eBPF program
         run: cd xdp && cargo build -Z build-std=core,alloc --release --target bpfel-unknown-none
       - name: Run benchmarks (PR)
@@ -90,8 +94,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Install dependencies
         run: |
+          sudo apt-get update && sudo apt-get install -y llvm dnsperf
           cargo install bpf-linker
-          sudo apt-get update && sudo apt-get install -y dnsperf
       - name: Build eBPF program
         run: cd xdp && cargo build -Z build-std=core,alloc --release --target bpfel-unknown-none
       - name: Build doggy-dns (with XDP)
