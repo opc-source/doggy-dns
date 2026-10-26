@@ -30,7 +30,7 @@ use doggy_dns_core::config::XdpConfig;
 pub struct XdpManager {
     _ebpf: aya::Ebpf,
     _link: Option<aya::programs::xdp::XdpLinkId>,
-    pub cache: DnsCacheMap,
+    cache: Option<DnsCacheMap>,
     pub interface: String,
 }
 
@@ -94,8 +94,16 @@ impl XdpManager {
         Ok(Self {
             _ebpf: ebpf,
             _link: link_id,
-            cache,
+            cache: Some(cache),
             interface: iface,
         })
+    }
+
+    /// Take ownership of the [`DnsCacheMap`] so it can be moved into the
+    /// middleware. Panics (via `expect`) if called more than once.
+    pub fn take_cache(&mut self) -> DnsCacheMap {
+        self.cache
+            .take()
+            .expect("XDP cache already taken or was never initialized")
     }
 }

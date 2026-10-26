@@ -15,6 +15,9 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::signal;
 
+#[cfg(all(feature = "xdp", target_os = "linux"))]
+use doggy_dns_xdp::{XdpCacheMiddleware, XdpManager};
+
 fn main() -> Result<()> {
     // Load config before initializing tracing so log format and OTLP settings
     // are available to the subscriber.
@@ -86,6 +89,35 @@ async fn async_main(config: DoggyDnsConfig, telemetry: &mut Observability) -> Re
     if let Some(metrics) = telemetry.metrics_middleware() {
         middlewares.push(metrics);
     }
+
+    // Initialize XDP fast-path middleware if enabled (Linux only).
+    // The manager must stay alive for the server lifetime — dropping it
+    // detaches the XDP program from the interface.
+    #[cfg(all(feature = "xdp", target_os = "linux"))]
+    let _xdp_manager = if config.xdp.enabled {
+        match XdpManager::new(&config.xdp) {
+            Ok(mut mgr) => {
+                let cache = mgr.take_cache();
+                let middleware = XdpCacheMiddleware::new(cache, &config.xdp);
+                middlewares.push(Arc::new(middleware));
+                tracing::info!(
+                    interface = %mgr.interface,
+                    attach_mode = %config.xdp.attach_mode,
+                    "XDP fast path enabled"
+                );
+                Some(mgr)
+            }
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "failed to initialize XDP fast path, continuing without it"
+                );
+                None
+            }
+        }
+    } else {
+        None
+    };
 
     // Build authority chain from plugins (watchers kept alive for subscriptions)
     let (_watchers, authority_chain) = build_authority_chain(&config).await?;
