@@ -29,7 +29,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Install bpf-linker
         run: |
-          sudo apt-get update && sudo apt-get install -y llvm
+          sudo apt-get update && sudo apt-get install -y llvm-dev
           cargo install bpf-linker
       - name: Build eBPF program
         run: cd xdp && cargo build -Z build-std=core,alloc --release --target bpfel-unknown-none
@@ -55,7 +55,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Install bpf-linker
         run: |
-          sudo apt-get update && sudo apt-get install -y llvm
+          sudo apt-get update && sudo apt-get install -y llvm-dev
           cargo install bpf-linker
       - name: Build eBPF program
         run: cd xdp && cargo build -Z build-std=core,alloc --release --target bpfel-unknown-none
@@ -94,7 +94,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Install dependencies
         run: |
-          sudo apt-get update && sudo apt-get install -y llvm dnsperf
+          sudo apt-get update && sudo apt-get install -y llvm-dev dnsperf
           cargo install bpf-linker
       - name: Build eBPF program
         run: cd xdp && cargo build -Z build-std=core,alloc --release --target bpfel-unknown-none
