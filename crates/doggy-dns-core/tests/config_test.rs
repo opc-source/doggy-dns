@@ -603,3 +603,124 @@ endpoint = "http://127.0.0.1:5080/api/default?token=secret"
     let error = validate_config(&config).unwrap_err().to_string();
     assert!(error.contains("query string"), "unexpected error: {error}");
 }
+
+#[test]
+fn parse_xdp_config_defaults() {
+    let toml = r#"
+[server]
+listen_addr = "0.0.0.0"
+port = 53
+
+[xdp]
+"#;
+    let config: DoggyDnsConfig = toml::from_str(toml).expect("parse failed");
+    assert!(!config.xdp.enabled);
+    assert_eq!(config.xdp.interface, "");
+    assert_eq!(config.xdp.cache_size, 65536);
+    assert_eq!(config.xdp.negative_ttl, 30);
+    assert_eq!(config.xdp.attach_mode, "auto");
+    assert_eq!(config.xdp.pin_path, "/sys/fs/bpf/doggy-dns/dns_cache");
+}
+
+#[test]
+fn parse_xdp_config_custom() {
+    let toml = r#"
+[server]
+listen_addr = "0.0.0.0"
+port = 53
+
+[xdp]
+enabled = true
+interface = "eth0"
+cache_size = 32768
+negative_ttl = 60
+attach_mode = "manual"
+pin_path = "/sys/fs/bpf/custom/dns_cache"
+"#;
+    let config: DoggyDnsConfig = toml::from_str(toml).expect("parse failed");
+    assert!(config.xdp.enabled);
+    assert_eq!(config.xdp.interface, "eth0");
+    assert_eq!(config.xdp.cache_size, 32768);
+    assert_eq!(config.xdp.negative_ttl, 60);
+    assert_eq!(config.xdp.attach_mode, "manual");
+    assert_eq!(config.xdp.pin_path, "/sys/fs/bpf/custom/dns_cache");
+}
+
+#[test]
+fn validate_xdp_cache_size_zero_rejected() {
+    let toml = r#"
+[server]
+listen_addr = "0.0.0.0"
+port = 53
+
+[xdp]
+enabled = true
+cache_size = 0
+"#;
+    let config: DoggyDnsConfig = toml::from_str(toml).expect("parse failed");
+    let err = validate_config(&config).unwrap_err();
+    assert!(err.to_string().contains("cache_size"));
+}
+
+#[test]
+fn validate_xdp_negative_ttl_zero_rejected() {
+    let toml = r#"
+[server]
+listen_addr = "0.0.0.0"
+port = 53
+
+[xdp]
+enabled = true
+negative_ttl = 0
+"#;
+    let config: DoggyDnsConfig = toml::from_str(toml).expect("parse failed");
+    let err = validate_config(&config).unwrap_err();
+    assert!(err.to_string().contains("negative_ttl"));
+}
+
+#[test]
+fn validate_xdp_invalid_attach_mode_rejected() {
+    let toml = r#"
+[server]
+listen_addr = "0.0.0.0"
+port = 53
+
+[xdp]
+enabled = true
+attach_mode = "invalid"
+"#;
+    let config: DoggyDnsConfig = toml::from_str(toml).expect("parse failed");
+    let err = validate_config(&config).unwrap_err();
+    assert!(err.to_string().contains("attach_mode"));
+}
+
+#[test]
+fn validate_xdp_pin_path_not_under_bpffs_rejected() {
+    let toml = r#"
+[server]
+listen_addr = "0.0.0.0"
+port = 53
+
+[xdp]
+enabled = true
+pin_path = "/tmp/dns_cache"
+"#;
+    let config: DoggyDnsConfig = toml::from_str(toml).expect("parse failed");
+    let err = validate_config(&config).unwrap_err();
+    assert!(err.to_string().contains("pin_path"));
+}
+
+#[test]
+fn validate_xdp_disabled_skips_validation() {
+    let toml = r#"
+[server]
+listen_addr = "0.0.0.0"
+port = 53
+
+[xdp]
+enabled = false
+cache_size = 0
+"#;
+    let config: DoggyDnsConfig = toml::from_str(toml).expect("parse failed");
+    validate_config(&config).expect("disabled XDP should skip validation");
+}

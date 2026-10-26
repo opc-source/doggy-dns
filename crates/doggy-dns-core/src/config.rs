@@ -13,6 +13,8 @@ pub struct DoggyDnsConfig {
     pub remote_config: RemoteConfig,
     #[serde(default)]
     pub observability: ObservabilityConfig,
+    #[serde(default)]
+    pub xdp: XdpConfig,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -143,6 +145,48 @@ pub struct RemoteConfig {
     pub group: String,
     #[serde(default)]
     pub data_id: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct XdpConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub interface: String,
+    #[serde(default = "default_xdp_cache_size")]
+    pub cache_size: u32,
+    #[serde(default = "default_xdp_negative_ttl")]
+    pub negative_ttl: u64,
+    #[serde(default = "default_xdp_attach_mode")]
+    pub attach_mode: String,
+    #[serde(default = "default_xdp_pin_path")]
+    pub pin_path: String,
+}
+
+impl Default for XdpConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            interface: String::new(),
+            cache_size: default_xdp_cache_size(),
+            negative_ttl: default_xdp_negative_ttl(),
+            attach_mode: default_xdp_attach_mode(),
+            pin_path: default_xdp_pin_path(),
+        }
+    }
+}
+
+fn default_xdp_cache_size() -> u32 {
+    65536
+}
+fn default_xdp_negative_ttl() -> u64 {
+    30
+}
+fn default_xdp_attach_mode() -> String {
+    "auto".to_string()
+}
+fn default_xdp_pin_path() -> String {
+    "/sys/fs/bpf/doggy-dns/dns_cache".to_string()
 }
 
 /// OTLP export configuration. A single target is supported; fan-out should be
@@ -493,6 +537,24 @@ pub fn validate_config(config: &DoggyDnsConfig) -> anyhow::Result<()> {
         );
     }
     validate_observability(&config.observability)?;
+    if config.xdp.enabled {
+        anyhow::ensure!(
+            config.xdp.cache_size > 0,
+            "xdp.cache_size must be greater than 0"
+        );
+        anyhow::ensure!(
+            config.xdp.negative_ttl > 0,
+            "xdp.negative_ttl must be greater than 0"
+        );
+        anyhow::ensure!(
+            matches!(config.xdp.attach_mode.as_str(), "auto" | "manual"),
+            "xdp.attach_mode must be 'auto' or 'manual'"
+        );
+        anyhow::ensure!(
+            config.xdp.pin_path.starts_with("/sys/fs/bpf/"),
+            "xdp.pin_path must be under /sys/fs/bpf/"
+        );
+    }
     Ok(())
 }
 
