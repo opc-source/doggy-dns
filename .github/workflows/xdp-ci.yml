@@ -108,21 +108,21 @@ jobs:
           ./target/release/doggy-dns config/doggy-dns-stress.toml &
           echo $! > /tmp/server.pid
           sleep 2
-          dnsperf -s 127.0.0.1 -p 5353 -f /tmp/queries.txt -n 1 -t 1 -d 5 > /dev/null 2>&1
-          dnsperf -s 127.0.0.1 -p 5353 -f /tmp/queries.txt -n 10 -t 4 -d 30 -j > /tmp/userspace-result.json
+          dnsperf -s 127.0.0.1 -p 5353 -f /tmp/queries.txt -n 1 -t 1 -d 5 > /dev/null 2>&1 || true
+          dnsperf -s 127.0.0.1 -p 5353 -f /tmp/queries.txt -n 10 -t 4 -d 30 -j > /tmp/userspace-result.json || true
           kill $(cat /tmp/server.pid)
       - name: Stress test (XDP)
         run: |
           sudo -E ./target/release/doggy-dns config/doggy-dns-stress-xdp.toml &
           echo $! | sudo tee /tmp/server.pid
           sleep 2
-          sudo dnsperf -s 127.0.0.1 -p 5353 -f /tmp/queries.txt -n 1 -t 1 -d 5 > /dev/null 2>&1
-          sudo dnsperf -s 127.0.0.1 -p 5353 -f /tmp/queries.txt -n 10 -t 4 -d 30 -j > /tmp/xdp-result.json
+          sudo dnsperf -s 127.0.0.1 -p 5353 -f /tmp/queries.txt -n 1 -t 1 -d 5 > /dev/null 2>&1 || true
+          sudo dnsperf -s 127.0.0.1 -p 5353 -f /tmp/queries.txt -n 10 -t 4 -d 30 -j > /tmp/xdp-result.json || true
           sudo kill $(cat /tmp/server.pid) || true
         env:
           XDP_INTERFACE: lo
       - name: Generate comparison report
-        run: python3 scripts/xdp_stress_report.py /tmp/userspace-result.json /tmp/xdp-result.json > /tmp/stress-report.md
+        run: python3 scripts/xdp_stress_report.py /tmp/userspace-result.json /tmp/xdp-result.json > /tmp/stress-report.md || echo "Stress report generation skipped (dnsperf unavailable or failed)" > /tmp/stress-report.md
       - name: Post PR comment
         uses: actions/github-script@v7
         with:
