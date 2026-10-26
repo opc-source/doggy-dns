@@ -52,7 +52,7 @@ async fn tracing_error_events_are_force_sampled_at_zero_ratio() {
         enabled: true,
         backend: ObservabilityBackend::Custom,
         endpoint: format!("http://{addr}"),
-        service_name: Some("doggy-dns".to_string()),
+        service_name: Some(doggy_dns_plugin::APP_NAME.to_string()),
         ..ObservabilityConfig::default()
     };
     config.logs.enabled = false;

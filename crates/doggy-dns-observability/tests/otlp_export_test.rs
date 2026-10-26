@@ -20,7 +20,7 @@ async fn exports_logs_metrics_and_traces_with_openobserve_headers() {
         enabled: true,
         backend: doggy_dns_core::config::ObservabilityBackend::Custom,
         endpoint: format!("http://{addr}"),
-        service_name: Some("doggy-dns".to_string()),
+        service_name: Some(doggy_dns_plugin::APP_NAME.to_string()),
         ..ObservabilityConfig::default()
     };
     config.logs.stdout = false;
@@ -103,7 +103,7 @@ async fn exports_logs_metrics_and_traces_with_openobserve_headers() {
                 "service.name"
             )
             .as_deref(),
-            Some("doggy-dns")
+            Some(doggy_dns_plugin::APP_NAME)
         );
         for record in &resource_logs.scope_logs[0].log_records {
             if let Some(opentelemetry_proto::tonic::common::v1::any_value::Value::StringValue(

@@ -95,7 +95,7 @@ pub(crate) fn build_meter_provider(
         .with_resource(resource)
         .build();
 
-    let meter = provider.meter("doggy-dns");
+    let meter = provider.meter(doggy_dns_plugin::APP_NAME);
     let metrics = DnsMetrics::new(&meter);
     Ok((provider, metrics))
 }

@@ -222,7 +222,7 @@ where
     };
 
     let trace_layer = tracer_provider.map(|provider| {
-        let tracer = provider.tracer("doggy-dns");
+        let tracer = provider.tracer(doggy_dns_plugin::APP_NAME);
         // Events are exported through the logs signal; the trace layer only
         // creates spans to avoid duplicating every log line as a span event.
         let filter = FilterFn::new(|metadata: &Metadata<'_>| {
@@ -254,7 +254,7 @@ fn log_startup(config: &ObservabilityConfig, resource: Option<&opentelemetry_sdk
                 .find(|(key, _)| key.as_str() == "service.name")
                 .map(|(_, value)| value.to_string())
         })
-        .unwrap_or_else(|| "doggy-dns".to_string());
+        .unwrap_or_else(|| doggy_dns_plugin::APP_NAME.to_string());
 
     tracing::info!(
         backend = ?config.backend,

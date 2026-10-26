@@ -283,7 +283,9 @@ mod tests {
     }
 
     fn resource() -> Resource {
-        Resource::builder().with_service_name("doggy-dns").build()
+        Resource::builder()
+            .with_service_name(doggy_dns_plugin::APP_NAME)
+            .build()
     }
 
     #[test]
@@ -359,7 +361,7 @@ mod tests {
                     attribute.value.as_ref().and_then(|value| value.value.as_ref()),
                     Some(opentelemetry_proto::tonic::common::v1::any_value::Value::StringValue(
                         value
-                    )) if value == "doggy-dns"
+                    )) if value == doggy_dns_plugin::APP_NAME
                 )
         }));
     }

@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 /// Build the OTel resource shared by every signal.
 ///
 /// Precedence for `service.name`: config `service_name` → `OTEL_SERVICE_NAME` →
-/// `service.name` in `OTEL_RESOURCE_ATTRIBUTES` → `doggy-dns`.
+/// `service.name` in `OTEL_RESOURCE_ATTRIBUTES` → [`APP_NAME`].
 pub(crate) fn build_resource(config: &ObservabilityConfig) -> Resource {
     build_with_env(config, |name| std::env::var(name).ok())
 }
@@ -53,7 +53,7 @@ fn build_with_env(config: &ObservabilityConfig, env: impl Fn(&str) -> Option<Str
                 .map(|value| value.trim().to_string())
                 .filter(|value| !value.is_empty())
         })
-        .unwrap_or_else(|| "doggy-dns".to_string());
+        .unwrap_or_else(|| doggy_dns_plugin::APP_NAME.to_string());
 
     let hostname = env("HOSTNAME")
         .or_else(|| env("COMPUTERNAME"))
@@ -123,7 +123,7 @@ mod tests {
 
         assert_eq!(
             attr(&resource, "service.name").as_deref(),
-            Some("doggy-dns")
+            Some(doggy_dns_plugin::APP_NAME)
         );
         assert_eq!(attr(&resource, "host.name").as_deref(), Some("test-host"));
         assert!(attr(&resource, "service.version").is_some());

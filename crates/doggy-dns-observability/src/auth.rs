@@ -288,7 +288,10 @@ mod tests {
             headers.get("Authorization").unwrap(),
             "Basic cm9vdDpzZWNyZXQ="
         );
-        assert_eq!(headers.get("stream-name").unwrap(), "doggy-dns");
+        assert_eq!(
+            headers.get("stream-name").unwrap(),
+            doggy_dns_plugin::APP_NAME
+        );
     }
 
     #[test]

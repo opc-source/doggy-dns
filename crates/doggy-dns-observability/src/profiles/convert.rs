@@ -117,7 +117,7 @@ pub(crate) fn build_export_request(
         resource: Some(resource),
         scope_profiles: vec![ScopeProfiles {
             scope: Some(InstrumentationScope {
-                name: "doggy-dns".to_string(),
+                name: doggy_dns_plugin::APP_NAME.to_string(),
                 version: env!("CARGO_PKG_VERSION").to_string(),
                 attributes: Vec::new(),
                 dropped_attributes_count: 0,
@@ -452,7 +452,7 @@ mod tests {
             .scope
             .as_ref()
             .unwrap();
-        assert_eq!(scope.name, "doggy-dns");
+        assert_eq!(scope.name, doggy_dns_plugin::APP_NAME);
     }
 
     #[test]
@@ -481,7 +481,9 @@ mod tests {
             attributes: vec![opentelemetry_proto::tonic::common::v1::KeyValue {
                 key: "service.name".to_string(),
                 value: Some(AnyValue {
-                    value: Some(any_value::Value::StringValue("doggy-dns".to_string())),
+                    value: Some(any_value::Value::StringValue(
+                        doggy_dns_plugin::APP_NAME.to_string(),
+                    )),
                 }),
                 key_strindex: 0,
             }],

@@ -6,3 +6,5 @@ pub mod registry;
 
 pub use authority::AuthorityPlugin;
 pub use plugin::{Middleware, MiddlewareAction, RequestOutcome};
+
+pub const APP_NAME: &str = "doggy-dns";
