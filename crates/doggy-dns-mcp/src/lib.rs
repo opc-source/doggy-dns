@@ -1,6 +1,9 @@
 pub mod redact;
 pub mod server;
 pub mod state;
+pub mod transport;
+
+pub use transport::{McpServerHandle, start};
 
 use serde::{Deserialize, Serialize};
 
