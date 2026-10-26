@@ -1,3 +1,6 @@
+pub mod redact;
+pub mod state;
+
 use serde::{Deserialize, Serialize};
 
 /// Mirror of the core MCP config, decoupled from doggy-dns-core.
@@ -39,4 +42,26 @@ pub struct PluginSnapshot {
     pub kind: String,
     pub enabled: bool,
     pub details: serde_json::Value,
+}
+
+/// Build an `McpState` from the individual parts.
+/// Takes `pid` and `started_at` from the current process.
+pub fn build_state(
+    host: String,
+    version: String,
+    listen_addr: String,
+    protocols: Vec<String>,
+    plugins: Vec<PluginSnapshot>,
+    config_path: std::path::PathBuf,
+) -> state::McpState {
+    state::McpState::from_parts(
+        host,
+        std::process::id(),
+        version,
+        chrono::Utc::now(),
+        listen_addr,
+        protocols,
+        plugins,
+        config_path,
+    )
 }
