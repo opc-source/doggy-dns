@@ -13,7 +13,7 @@ use rmcp::transport::streamable_http_server::{
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 
-use crate::McpServerConfig;
+use crate::McpConfig;
 use crate::server::DoggyMcpServer;
 use crate::state::McpState;
 
@@ -36,7 +36,7 @@ impl McpServerHandle {
 ///
 /// Returns a handle that can be used to shut down the server.
 /// If the port is already in use, returns an error.
-pub async fn start(state: Arc<McpState>, cfg: McpServerConfig) -> anyhow::Result<McpServerHandle> {
+pub async fn start(state: Arc<McpState>, cfg: McpConfig) -> anyhow::Result<McpServerHandle> {
     let cancel = CancellationToken::new();
     let listener = TcpListener::bind(format!("{}:{}", cfg.listen_addr, cfg.port)).await?;
     let addr = listener.local_addr()?;
@@ -57,11 +57,7 @@ pub async fn start(state: Arc<McpState>, cfg: McpServerConfig) -> anyhow::Result
 }
 
 /// Build the axum router for the MCP server.
-pub fn build_router(
-    state: Arc<McpState>,
-    cfg: &McpServerConfig,
-    cancel: CancellationToken,
-) -> Router {
+pub fn build_router(state: Arc<McpState>, cfg: &McpConfig, cancel: CancellationToken) -> Router {
     let server_config = StreamableHttpServerConfig::default()
         .with_cancellation_token(cancel)
         .with_allowed_hosts(cfg.allowed_hosts.clone());

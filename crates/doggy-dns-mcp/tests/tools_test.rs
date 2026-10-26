@@ -101,7 +101,7 @@ password = "hunter2"
     assert!(content.contains("admin"));
     assert!(!content.contains("hunter2"));
     assert!(content.contains("***"));
-    assert!(json["redactedKeys"].as_array().unwrap().len() >= 1);
+    assert!(!json["redactedKeys"].as_array().unwrap().is_empty());
 }
 
 #[tokio::test]

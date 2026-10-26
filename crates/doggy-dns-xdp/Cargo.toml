@@ -5,7 +5,7 @@ edition = "2024"
 
 [dependencies]
 doggy-dns-plugin = { path = "../doggy-dns-plugin" }
-doggy-dns-core = { path = "../doggy-dns-core" }
+doggy-dns-basic = { path = "../doggy-dns-basic" }
 tokio = { workspace = true }
 tracing = { workspace = true }
 anyhow = { workspace = true }

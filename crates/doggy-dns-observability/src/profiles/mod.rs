@@ -3,7 +3,7 @@ mod convert;
 use crate::auth;
 use crate::endpoint::{self, Signal};
 use anyhow::{Context, Result};
-use doggy_dns_core::config::ObservabilityConfig;
+use doggy_dns_basic::ObservabilityConfig;
 use opentelemetry_sdk::Resource;
 use prost::Message as _;
 use reqwest::header::{CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue};
@@ -266,7 +266,7 @@ mod tests {
     #![allow(clippy::disallowed_methods)]
 
     use super::*;
-    use doggy_dns_core::config::{BasicAuthConfig, ObservabilityConfig};
+    use doggy_dns_basic::{BasicAuthConfig, ObservabilityConfig};
 
     fn config(endpoint: &str) -> ObservabilityConfig {
         let mut config = ObservabilityConfig {

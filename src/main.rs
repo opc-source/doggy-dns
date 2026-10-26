@@ -285,20 +285,15 @@ fn start_mcp_server(
     }
 
     let state = Arc::new(doggy_dns_mcp::build_state(
-        hostname(),
+        doggy_dns_mcp::state::McpState::detect_hostname(),
         env!("CARGO_PKG_VERSION").to_string(),
         format!("{}:{}", config.server.listen_addr, config.server.port),
-        protocols(config),
-        plugin_snapshots(config),
+        doggy_dns_mcp::state::McpState::enabled_protocols(config),
+        doggy_dns_mcp::snapshots_from(&config.plugins),
         std::path::PathBuf::from(config_path),
     ));
 
-    let mcp_config = doggy_dns_mcp::McpServerConfig {
-        listen_addr: config.mcp.listen_addr.clone(),
-        port: config.mcp.port,
-        token: config.mcp.token.clone(),
-        allowed_hosts: config.mcp.allowed_hosts.clone(),
-    };
+    let mcp_config = config.mcp.clone();
 
     // MCP start is non-blocking on the DNS runtime; we spawn and log.
     let rt = tokio::runtime::Handle::try_current().ok()?;
@@ -316,89 +311,4 @@ fn start_mcp_server(
     })?;
 
     Some(handle)
-}
-
-fn hostname() -> String {
-    std::env::var("HOSTNAME")
-        .or_else(|_| std::env::var("COMPUTERNAME"))
-        .unwrap_or_else(|_| "unknown".to_string())
-}
-
-fn protocols(config: &DoggyDnsConfig) -> Vec<String> {
-    let mut protos = vec!["udp".to_string(), "tcp".to_string()];
-    if config.server.tls.as_ref().is_some_and(|t| t.enabled) {
-        protos.push("dot".to_string());
-    }
-    if config.server.https.as_ref().is_some_and(|h| h.enabled) {
-        protos.push("doh".to_string());
-    }
-    protos
-}
-
-fn plugin_snapshots(config: &DoggyDnsConfig) -> Vec<doggy_dns_mcp::PluginSnapshot> {
-    use serde_json::Value;
-
-    fn str_val(s: &str) -> Value {
-        Value::String(s.to_string())
-    }
-
-    config
-        .plugins
-        .iter()
-        .enumerate()
-        .map(|(i, p)| {
-            let kind = format!("{:?}", p.kind).to_ascii_lowercase();
-            let details = match p.kind {
-                PluginKind::Nacos => {
-                    let mut map = serde_json::Map::new();
-                    map.insert(
-                        "serverAddr".into(),
-                        str_val(p.server_addr.as_deref().unwrap_or("127.0.0.1:8848")),
-                    );
-                    map.insert(
-                        "namespace".into(),
-                        str_val(p.namespace.as_deref().unwrap_or("public")),
-                    );
-                    map.insert(
-                        "group".into(),
-                        str_val(p.group.as_deref().unwrap_or("DEFAULT_GROUP")),
-                    );
-                    map.insert(
-                        "dnsZone".into(),
-                        str_val(p.dns_zone.as_deref().unwrap_or("nacos.local")),
-                    );
-                    map.insert("ttl".into(), Value::from(p.ttl));
-                    Value::Object(map)
-                }
-                PluginKind::Native => {
-                    let mut map = serde_json::Map::new();
-                    map.insert("cacheSize".into(), Value::from(p.cache_size));
-                    map.insert("minTtl".into(), Value::from(p.min_ttl));
-                    map.insert("maxTtl".into(), Value::from(p.max_ttl));
-                    Value::Object(map)
-                }
-                PluginKind::Forward => {
-                    let mut map = serde_json::Map::new();
-                    let upstream: Vec<Value> = p
-                        .upstream
-                        .as_deref()
-                        .unwrap_or(&[])
-                        .iter()
-                        .map(|s| str_val(s))
-                        .collect();
-                    map.insert("upstream".into(), Value::Array(upstream));
-                    map.insert("cacheSize".into(), Value::from(p.cache_size));
-                    map.insert("minTtl".into(), Value::from(p.min_ttl));
-                    map.insert("maxTtl".into(), Value::from(p.max_ttl));
-                    Value::Object(map)
-                }
-            };
-            doggy_dns_mcp::PluginSnapshot {
-                order: i,
-                kind,
-                enabled: p.enabled,
-                details,
-            }
-        })
-        .collect()
 }

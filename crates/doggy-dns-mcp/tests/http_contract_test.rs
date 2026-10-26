@@ -3,7 +3,7 @@
 use chrono::Utc;
 use doggy_dns_mcp::state::McpState;
 use doggy_dns_mcp::transport;
-use doggy_dns_mcp::{McpServerConfig, PluginSnapshot};
+use doggy_dns_mcp::{McpConfig, PluginSnapshot};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -87,7 +87,7 @@ async fn post_mcp_with_session(
 #[tokio::test]
 async fn lists_three_read_only_tools_and_calls_status() {
     let state = test_state();
-    let cfg = McpServerConfig {
+    let cfg = McpConfig {
         port: 0,
         token: None,
         ..Default::default()
@@ -130,7 +130,7 @@ async fn lists_three_read_only_tools_and_calls_status() {
 #[tokio::test]
 async fn rejects_missing_or_wrong_token() {
     let state = test_state();
-    let cfg = McpServerConfig {
+    let cfg = McpConfig {
         port: 0,
         token: Some("s3cret".into()),
         ..Default::default()
@@ -152,7 +152,7 @@ async fn rejects_missing_or_wrong_token() {
 #[tokio::test]
 async fn initialize_returns_doggy_dns_mcp_server_info() {
     let state = test_state();
-    let cfg = McpServerConfig {
+    let cfg = McpConfig {
         port: 0,
         token: None,
         ..Default::default()
@@ -173,10 +173,10 @@ fn parse_sse_or_json(body: &str) -> serde_json::Value {
         return json;
     }
     for line in body.lines() {
-        if let Some(data) = line.strip_prefix("data:") {
-            if let Ok(json) = serde_json::from_str(data.trim()) {
-                return json;
-            }
+        if let Some(data) = line.strip_prefix("data:")
+            && let Ok(json) = serde_json::from_str(data.trim())
+        {
+            return json;
         }
     }
     panic!("could not parse response as JSON or SSE: {body}")

@@ -2,7 +2,7 @@ use crate::auth;
 use crate::endpoint::{self, Signal};
 use anyhow::{Context, Result};
 use async_trait::async_trait;
-use doggy_dns_core::config::{MetricsTemporality, ObservabilityConfig};
+use doggy_dns_basic::{MetricsTemporality, ObservabilityConfig};
 use doggy_dns_plugin::{Middleware, MiddlewareAction, RequestOutcome};
 use hickory_server::server::Request;
 use opentelemetry::KeyValue;

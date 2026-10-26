@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use base64::Engine as _;
-use doggy_dns_core::config::ObservabilityConfig;
+use doggy_dns_basic::ObservabilityConfig;
 use reqwest::header::{HeaderName, HeaderValue};
 use std::collections::HashMap;
 
@@ -160,7 +160,7 @@ mod tests {
     #![allow(clippy::disallowed_methods)]
 
     use super::*;
-    use doggy_dns_core::config::{BasicAuthConfig, ObservabilityConfig};
+    use doggy_dns_basic::{BasicAuthConfig, ObservabilityConfig};
     use std::collections::{BTreeMap, HashMap};
 
     fn env_map(pairs: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> {

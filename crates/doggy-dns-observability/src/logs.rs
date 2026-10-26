@@ -1,7 +1,7 @@
 use crate::auth;
 use crate::endpoint::{self, Signal};
 use anyhow::{Context, Result};
-use doggy_dns_core::config::ObservabilityConfig;
+use doggy_dns_basic::ObservabilityConfig;
 use opentelemetry_otlp::{LogExporter, Protocol, WithExportConfig, WithHttpConfig};
 use opentelemetry_sdk::Resource;
 use opentelemetry_sdk::logs::SdkLoggerProvider;

@@ -1,6 +1,6 @@
 #![allow(clippy::disallowed_methods)]
 
-use doggy_dns_core::config::ObservabilityConfig;
+use doggy_dns_basic::ObservabilityConfig;
 use doggy_dns_observability::Observability;
 use doggy_dns_plugin::RequestOutcome;
 use opentelemetry_proto::tonic::collector::logs::v1::ExportLogsServiceRequest;
@@ -17,7 +17,7 @@ async fn exports_logs_metrics_and_traces_with_openobserve_headers() {
     let (addr, mut receiver) = mock_otlp_server().await;
     let mut config = ObservabilityConfig {
         enabled: true,
-        backend: doggy_dns_core::config::ObservabilityBackend::Custom,
+        backend: doggy_dns_basic::ObservabilityBackend::Custom,
         endpoint: format!("http://{addr}"),
         service_name: Some(doggy_dns_plugin::APP_NAME.to_string()),
         ..ObservabilityConfig::default()

@@ -1,6 +1,6 @@
 #![allow(clippy::disallowed_methods)]
 
-use doggy_dns_core::config::{ObservabilityBackend, ObservabilityConfig};
+use doggy_dns_basic::{ObservabilityBackend, ObservabilityConfig};
 use doggy_dns_observability::Observability;
 use opentelemetry::trace::TraceContextExt;
 use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;

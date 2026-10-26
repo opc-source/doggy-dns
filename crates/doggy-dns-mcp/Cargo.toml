@@ -6,6 +6,7 @@ license = "Apache-2.0"
 description = "Read-only MCP server for doggy-dns instance introspection"
 
 [dependencies]
+doggy-dns-basic = { path = "../doggy-dns-basic" }
 rmcp = { workspace = true }
 axum = { workspace = true }
 tokio = { workspace = true }
@@ -19,6 +20,6 @@ anyhow = { workspace = true }
 thiserror = { workspace = true }
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["full", "test-util"] }
-tempfile = "3"
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+tokio = { workspace = true }
+tempfile = { workspace = true }
+reqwest = { workspace = true }

@@ -19,7 +19,7 @@ use crate::cache::DnsCacheMap;
 #[cfg(target_os = "linux")]
 use crate::interface::resolve_interface;
 #[cfg(target_os = "linux")]
-use doggy_dns_core::config::XdpConfig;
+use doggy_dns_basic::XdpConfig;
 
 /// Manages the XDP eBPF program lifecycle: loading, map setup, and attach.
 ///

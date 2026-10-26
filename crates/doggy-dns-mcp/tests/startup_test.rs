@@ -1,7 +1,7 @@
 #![allow(clippy::disallowed_methods)]
 
 use chrono::Utc;
-use doggy_dns_mcp::McpServerConfig;
+use doggy_dns_mcp::McpConfig;
 use doggy_dns_mcp::state::McpState;
 use doggy_dns_mcp::transport;
 use std::path::PathBuf;
@@ -27,7 +27,7 @@ async fn occupied_port_returns_error_without_panicking() {
     let addr = occupied.local_addr().unwrap();
     let err = transport::start(
         test_state(),
-        McpServerConfig {
+        McpConfig {
             listen_addr: "127.0.0.1".into(),
             port: addr.port(),
             ..Default::default()
@@ -46,7 +46,7 @@ async fn occupied_port_returns_error_without_panicking() {
 async fn start_with_port_zero_assigns_random_port() {
     let handle = transport::start(
         test_state(),
-        McpServerConfig {
+        McpConfig {
             port: 0,
             ..Default::default()
         },

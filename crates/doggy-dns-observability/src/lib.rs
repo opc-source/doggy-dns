@@ -9,7 +9,7 @@ mod sampler;
 mod traces;
 
 use anyhow::{Context, Result};
-use doggy_dns_core::config::{ObservabilityBackend, ObservabilityConfig};
+use doggy_dns_basic::{ObservabilityBackend, ObservabilityConfig};
 use doggy_dns_plugin::Middleware;
 use opentelemetry::trace::TracerProvider as _;
 use opentelemetry_appender_tracing::layer::OpenTelemetryTracingBridge;

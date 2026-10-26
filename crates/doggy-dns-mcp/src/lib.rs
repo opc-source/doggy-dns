@@ -7,37 +7,9 @@ pub use transport::{McpServerHandle, start};
 
 use serde::{Deserialize, Serialize};
 
-/// Mirror of the core MCP config, decoupled from doggy-dns-core.
-#[derive(Debug, Clone, Deserialize)]
-pub struct McpServerConfig {
-    #[serde(default = "default_listen_addr")]
-    pub listen_addr: String,
-    #[serde(default = "default_port")]
-    pub port: u16,
-    #[serde(default)]
-    pub token: Option<String>,
-    #[serde(default)]
-    pub allowed_hosts: Vec<String>,
-}
+use doggy_dns_basic::{PluginConfig, PluginKind};
 
-impl Default for McpServerConfig {
-    fn default() -> Self {
-        Self {
-            listen_addr: default_listen_addr(),
-            port: default_port(),
-            token: None,
-            allowed_hosts: Vec::new(),
-        }
-    }
-}
-
-fn default_listen_addr() -> String {
-    "127.0.0.1".to_string()
-}
-
-fn default_port() -> u16 {
-    19090
-}
+pub use doggy_dns_basic::McpConfig;
 
 /// Snapshot of a single plugin for the MCP `list_plugins` tool.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -46,6 +18,79 @@ pub struct PluginSnapshot {
     pub kind: String,
     pub enabled: bool,
     pub details: serde_json::Value,
+}
+
+/// Build tool-ready snapshots from the configured plugin chain, preserving
+/// evaluation order and applying per-kind display defaults.
+pub fn snapshots_from(plugins: &[PluginConfig]) -> Vec<PluginSnapshot> {
+    plugins
+        .iter()
+        .enumerate()
+        .map(|(order, p)| PluginSnapshot::from_config(order, p))
+        .collect()
+}
+
+impl PluginSnapshot {
+    pub fn from_config(order: usize, p: &PluginConfig) -> Self {
+        use serde_json::Value;
+
+        fn str_val(s: &str) -> Value {
+            Value::String(s.to_string())
+        }
+
+        let kind = format!("{:?}", p.kind).to_ascii_lowercase();
+        let details = match p.kind {
+            PluginKind::Nacos => {
+                let mut map = serde_json::Map::new();
+                map.insert(
+                    "serverAddr".into(),
+                    str_val(p.server_addr.as_deref().unwrap_or("127.0.0.1:8848")),
+                );
+                map.insert(
+                    "namespace".into(),
+                    str_val(p.namespace.as_deref().unwrap_or("public")),
+                );
+                map.insert(
+                    "group".into(),
+                    str_val(p.group.as_deref().unwrap_or("DEFAULT_GROUP")),
+                );
+                map.insert(
+                    "dnsZone".into(),
+                    str_val(p.dns_zone.as_deref().unwrap_or("nacos.local")),
+                );
+                map.insert("ttl".into(), Value::from(p.ttl));
+                Value::Object(map)
+            }
+            PluginKind::Native => {
+                let mut map = serde_json::Map::new();
+                map.insert("cacheSize".into(), Value::from(p.cache_size));
+                map.insert("minTtl".into(), Value::from(p.min_ttl));
+                map.insert("maxTtl".into(), Value::from(p.max_ttl));
+                Value::Object(map)
+            }
+            PluginKind::Forward => {
+                let mut map = serde_json::Map::new();
+                let upstream: Vec<Value> = p
+                    .upstream
+                    .as_deref()
+                    .unwrap_or(&[])
+                    .iter()
+                    .map(|s| str_val(s))
+                    .collect();
+                map.insert("upstream".into(), Value::Array(upstream));
+                map.insert("cacheSize".into(), Value::from(p.cache_size));
+                map.insert("minTtl".into(), Value::from(p.min_ttl));
+                map.insert("maxTtl".into(), Value::from(p.max_ttl));
+                Value::Object(map)
+            }
+        };
+        Self {
+            order,
+            kind,
+            enabled: p.enabled,
+            details,
+        }
+    }
 }
 
 /// Build an `McpState` from the individual parts.

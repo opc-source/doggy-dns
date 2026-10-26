@@ -1,6 +1,6 @@
 #![allow(clippy::disallowed_methods)]
 
-use doggy_dns_core::config::{DoggyDnsConfig, PluginKind, validate_config};
+use doggy_dns_basic::{DoggyDnsConfig, PluginKind, validate_config};
 
 #[test]
 fn parse_full_config() {
@@ -369,7 +369,7 @@ frequency_hz = 199
     assert!(observability.enabled);
     assert_eq!(
         observability.backend,
-        doggy_dns_core::config::ObservabilityBackend::OtelCollector
+        doggy_dns_basic::ObservabilityBackend::OtelCollector
     );
     assert_eq!(observability.endpoint, "http://127.0.0.1:4318");
     assert_eq!(observability.service_name.as_deref(), Some("dns-edge"));
@@ -391,7 +391,7 @@ frequency_hz = 199
     assert_eq!(observability.metrics.interval_secs, 30);
     assert_eq!(
         observability.metrics.temporality,
-        doggy_dns_core::config::MetricsTemporality::Delta
+        doggy_dns_basic::MetricsTemporality::Delta
     );
 
     assert!((observability.traces.sample_ratio - 0.25).abs() < f64::EPSILON);
@@ -421,7 +421,7 @@ port = 53
     assert!(!observability.enabled);
     assert_eq!(
         observability.backend,
-        doggy_dns_core::config::ObservabilityBackend::OpenObserve
+        doggy_dns_basic::ObservabilityBackend::OpenObserve
     );
     assert_eq!(
         observability.backend.default_endpoint(),
