@@ -56,3 +56,10 @@ const _: () = {
     assert!(core::mem::size_of::<CacheKey>() == 16);
     assert!(core::mem::size_of::<CacheValue>() == 528);
 };
+
+// aya::Pod is required for using these types as BPF map keys/values.
+// Only available on Linux where the `aya` crate is compiled.
+#[cfg(target_os = "linux")]
+unsafe impl aya::Pod for CacheKey {}
+#[cfg(target_os = "linux")]
+unsafe impl aya::Pod for CacheValue {}
