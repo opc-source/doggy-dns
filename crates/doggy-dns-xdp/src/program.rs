@@ -8,7 +8,7 @@ use anyhow::{Context as _, Result};
 #[cfg(target_os = "linux")]
 use aya::EbpfLoader;
 #[cfg(target_os = "linux")]
-use aya::programs::{Xdp, XdpFlags};
+use aya::programs::{Xdp, XdpMode};
 #[cfg(target_os = "linux")]
 use std::fs;
 #[cfg(target_os = "linux")]
@@ -58,14 +58,12 @@ impl XdpManager {
         }
 
         // Take the DNS_CACHE map from the ELF and pin it
-        let map_data = ebpf
+        let map = ebpf
             .take_map("DNS_CACHE")
             .context("DNS_CACHE map not found in ELF")?;
-        map_data
-            .pin(pin_path)
-            .context("failed to pin DNS_CACHE map")?;
+        map.pin(pin_path).context("failed to pin DNS_CACHE map")?;
 
-        let cache = DnsCacheMap::from_map_data(map_data)?;
+        let cache = DnsCacheMap::from_map(map)?;
 
         // Load and optionally attach the XDP program
         let link_id = if config.attach_mode == "auto" {
@@ -77,7 +75,7 @@ impl XdpManager {
 
             program.load().context("failed to load XDP program")?;
             let link_id = program
-                .attach(&iface, XdpFlags::default())
+                .attach(&iface, XdpMode::Default)
                 .context(format!("failed to attach XDP to interface {iface}"))?;
             Some(link_id)
         } else {

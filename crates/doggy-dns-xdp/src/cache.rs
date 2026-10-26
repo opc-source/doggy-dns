@@ -33,7 +33,7 @@ pub fn make_cache_key(qname: &str, qtype: u16, qclass: u16) -> CacheKey {
 #[cfg(target_os = "linux")]
 use anyhow::Result;
 #[cfg(target_os = "linux")]
-use aya::maps::{HashMap, MapData, UpdateFlags};
+use aya::maps::{HashMap, Map, MapData};
 
 /// Wrapper around the BPF [`HashMap`] for DNS cache operations.
 ///
@@ -46,22 +46,22 @@ pub struct DnsCacheMap {
 
 #[cfg(target_os = "linux")]
 impl DnsCacheMap {
-    /// Create a new cache map wrapper from raw BPF [`MapData`].
-    pub fn from_map_data(map_data: MapData) -> Result<Self> {
+    /// Create a new cache map wrapper from a [`Map`].
+    pub fn from_map(map: Map) -> Result<Self> {
         Ok(Self {
-            inner: HashMap::new(map_data, None)?,
+            inner: HashMap::try_from(map)?,
         })
     }
 
     /// Insert or update a cache entry.
     pub fn insert(&mut self, key: &CacheKey, value: &CacheValue) -> Result<()> {
-        self.inner.insert(key, value, UpdateFlags::ANY)?;
+        self.inner.insert(key, value, 0)?;
         Ok(())
     }
 
     /// Look up a cache entry by key. Returns `None` if not found.
     pub fn get(&mut self, key: &CacheKey) -> Result<Option<CacheValue>> {
-        match self.inner.get(key) {
+        match self.inner.get(key, 0) {
             Ok(value) => Ok(Some(value)),
             Err(_) => Ok(None),
         }
