@@ -30,6 +30,57 @@ pub struct RequestOutcome {
     pub min_answer_ttl: Option<u32>,
 }
 
+impl RequestOutcome {
+    /// Error outcome: no authority, no answers, no XDP data.
+    pub fn error(response_code: ResponseCode) -> Self {
+        Self {
+            response_code,
+            authority: None,
+            answers: 0,
+            response_bytes: None,
+            min_answer_ttl: None,
+        }
+    }
+
+    /// Error outcome attributed to a specific authority (e.g. ServFail from upstream).
+    pub fn authority_error(response_code: ResponseCode, authority: String) -> Self {
+        Self {
+            response_code,
+            authority: Some(authority),
+            answers: 0,
+            response_bytes: None,
+            min_answer_ttl: None,
+        }
+    }
+
+    /// Successful resolution outcome.
+    pub fn success(
+        authority: String,
+        answers: usize,
+        response_bytes: Option<Vec<u8>>,
+        min_answer_ttl: Option<u32>,
+    ) -> Self {
+        Self {
+            response_code: ResponseCode::NoError,
+            authority: Some(authority),
+            answers,
+            response_bytes,
+            min_answer_ttl,
+        }
+    }
+
+    /// NXDomain: no authority matched, with optional XDP cache bytes.
+    pub fn nxdomain(response_bytes: Option<Vec<u8>>) -> Self {
+        Self {
+            response_code: ResponseCode::NXDomain,
+            authority: None,
+            answers: 0,
+            response_bytes,
+            min_answer_ttl: None,
+        }
+    }
+}
+
 /// Cross-cutting middleware plugin (logging, metrics, etc.).
 /// Wraps request processing with before/after hooks.
 #[async_trait]

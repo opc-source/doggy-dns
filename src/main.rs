@@ -15,9 +15,6 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::signal;
 
-#[cfg(all(feature = "xdp", target_os = "linux"))]
-use doggy_dns_xdp::{XdpCacheMiddleware, XdpManager};
-
 fn main() -> Result<()> {
     // Load config before initializing tracing so log format and OTLP settings
     // are available to the subscriber.
@@ -93,37 +90,17 @@ async fn async_main(config: DoggyDnsConfig, telemetry: &mut Observability) -> Re
     // Initialize XDP fast-path middleware if enabled (Linux only).
     // The manager must stay alive for the server lifetime — dropping it
     // detaches the XDP program from the interface.
-    #[cfg(all(feature = "xdp", target_os = "linux"))]
-    let _xdp_manager = if config.xdp.enabled {
-        match XdpManager::new(&config.xdp) {
-            Ok(mut mgr) => {
-                let cache = mgr.take_cache();
-                let middleware = XdpCacheMiddleware::new(cache, &config.xdp);
-                middlewares.push(Arc::new(middleware));
-                tracing::info!(
-                    interface = %mgr.interface,
-                    attach_mode = %config.xdp.attach_mode,
-                    "XDP fast path enabled"
-                );
-                Some(mgr)
-            }
-            Err(e) => {
-                tracing::warn!(
-                    error = %e,
-                    "failed to initialize XDP fast path, continuing without it"
-                );
-                None
-            }
-        }
-    } else {
-        None
-    };
+    let _xdp_manager = init_xdp(&config, &mut middlewares);
 
     // Build authority chain from plugins (watchers kept alive for subscriptions)
     let (_watchers, authority_chain) = build_authority_chain(&config).await?;
 
     // Create handler
-    let handler = DoggyDnsHandler::new(middlewares, Arc::new(authority_chain));
+    let handler = DoggyDnsHandler::new(
+        middlewares,
+        Arc::new(authority_chain),
+        _xdp_manager.is_some(),
+    );
 
     // Build and start server
     let mut server = build_server(&config, handler).await?;
@@ -161,6 +138,48 @@ async fn async_main(config: DoggyDnsConfig, telemetry: &mut Observability) -> Re
     tracing::info!("doggy-dns shut down gracefully");
 
     Ok(())
+}
+
+/// Initialize XDP fast-path middleware and manager.
+///
+/// Returns the manager (must be kept alive) or `None` if XDP is disabled,
+/// unsupported, or failed to initialize. On success the cache middleware is
+/// appended to `middlewares`.
+#[cfg(all(feature = "xdp", target_os = "linux"))]
+fn init_xdp(
+    config: &DoggyDnsConfig,
+    middlewares: &mut Vec<Arc<dyn Middleware>>,
+) -> Option<doggy_dns_xdp::XdpManager> {
+    use doggy_dns_xdp::{XdpCacheMiddleware, XdpManager};
+
+    if !config.xdp.enabled {
+        return None;
+    }
+    match XdpManager::new(&config.xdp) {
+        Ok(mut mgr) => {
+            let cache = mgr.take_cache();
+            let middleware = XdpCacheMiddleware::new(cache, &config.xdp);
+            middlewares.push(Arc::new(middleware));
+            tracing::info!(
+                interface = %mgr.interface,
+                attach_mode = %config.xdp.attach_mode,
+                "XDP fast path enabled"
+            );
+            Some(mgr)
+        }
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                "failed to initialize XDP fast path, continuing without it"
+            );
+            None
+        }
+    }
+}
+
+#[cfg(not(all(feature = "xdp", target_os = "linux")))]
+fn init_xdp(_config: &DoggyDnsConfig, _middlewares: &mut Vec<Arc<dyn Middleware>>) -> Option<()> {
+    None
 }
 
 async fn build_authority_chain(

@@ -3,7 +3,6 @@
 use doggy_dns_core::config::ObservabilityConfig;
 use doggy_dns_observability::Observability;
 use doggy_dns_plugin::RequestOutcome;
-use hickory_proto::op::ResponseCode;
 use opentelemetry_proto::tonic::collector::logs::v1::ExportLogsServiceRequest;
 use opentelemetry_proto::tonic::collector::metrics::v1::ExportMetricsServiceRequest;
 use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
@@ -51,13 +50,7 @@ async fn exports_logs_metrics_and_traces_with_openobserve_headers() {
         .after_request(
             &request,
             3,
-            &RequestOutcome {
-                response_code: ResponseCode::NoError,
-                authority: Some("native".to_string()),
-                answers: 1,
-                response_bytes: None,
-                min_answer_ttl: None,
-            },
+            &RequestOutcome::success("native".to_string(), 1, None, None),
         )
         .await;
 
