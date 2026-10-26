@@ -68,13 +68,17 @@ fn main() -> Result<()> {
         "tokio runtime built"
     );
 
-    runtime.block_on(async_main(config, &mut telemetry))?;
+    runtime.block_on(async_main(config, &config_path, &mut telemetry))?;
 
     telemetry.shutdown();
     Ok(())
 }
 
-async fn async_main(config: DoggyDnsConfig, telemetry: &mut Observability) -> Result<()> {
+async fn async_main(
+    config: DoggyDnsConfig,
+    config_path: &str,
+    telemetry: &mut Observability,
+) -> Result<()> {
     // Profiles need a Tokio runtime for their HTTP exporter.
     telemetry.spawn_profiles();
 
@@ -107,6 +111,9 @@ async fn async_main(config: DoggyDnsConfig, telemetry: &mut Observability) -> Re
 
     tracing::info!("doggy-dns is ready");
 
+    // Start MCP server if enabled (non-fatal on failure)
+    let mcp_handle = start_mcp_server(&config, config_path);
+
     // Run server until shutdown signal
     let shutdown_timeout = Duration::from_secs(config.server.shutdown_timeout);
     let shutdown_token = server.shutdown_token().clone();
@@ -136,6 +143,16 @@ async fn async_main(config: DoggyDnsConfig, telemetry: &mut Observability) -> Re
         ),
     }
     tracing::info!("doggy-dns shut down gracefully");
+
+    // Shut down MCP server
+    if let Some(handle) = mcp_handle {
+        handle.cancel.cancel();
+        match tokio::time::timeout(Duration::from_secs(2), handle.wait()).await {
+            Ok(Ok(())) => tracing::info!("mcp server shut down"),
+            Ok(Err(e)) => tracing::warn!(error = %e, "mcp server task failed"),
+            Err(_) => tracing::warn!("mcp server shutdown timed out"),
+        }
+    }
 
     Ok(())
 }
@@ -257,4 +274,100 @@ async fn build_authority_chain(
 
     tracing::info!(chain_length = handlers.len(), "authority chain built");
     Ok((watchers, AuthorityChain::new(handlers)))
+}
+
+fn start_mcp_server(
+    config: &DoggyDnsConfig,
+    config_path: &str,
+) -> Option<doggy_dns_mcp::McpServerHandle> {
+    if !config.mcp.enabled {
+        return None;
+    }
+
+    let state = Arc::new(doggy_dns_mcp::build_state(
+        hostname(),
+        env!("CARGO_PKG_VERSION").to_string(),
+        format!("{}:{}", config.server.listen_addr, config.server.port),
+        protocols(config),
+        plugin_snapshots(config),
+        std::path::PathBuf::from(config_path),
+    ));
+
+    let mcp_config = doggy_dns_mcp::McpServerConfig {
+        listen_addr: config.mcp.listen_addr.clone(),
+        port: config.mcp.port,
+        token: config.mcp.token.clone(),
+        allowed_hosts: config.mcp.allowed_hosts.clone(),
+    };
+
+    // MCP start is non-blocking on the DNS runtime; we spawn and log.
+    let rt = tokio::runtime::Handle::try_current().ok()?;
+    let handle = rt.block_on(async {
+        match doggy_dns_mcp::start(state, mcp_config).await {
+            Ok(h) => {
+                tracing::info!(addr = %h.addr, "mcp server listening");
+                Some(h)
+            }
+            Err(error) => {
+                tracing::error!(%error, "failed to start mcp server; continuing with dns only");
+                None
+            }
+        }
+    })?;
+
+    Some(handle)
+}
+
+fn hostname() -> String {
+    std::env::var("HOSTNAME")
+        .or_else(|_| std::env::var("COMPUTERNAME"))
+        .unwrap_or_else(|_| "unknown".to_string())
+}
+
+fn protocols(config: &DoggyDnsConfig) -> Vec<String> {
+    let mut protos = vec!["udp".to_string(), "tcp".to_string()];
+    if config.server.tls.as_ref().is_some_and(|t| t.enabled) {
+        protos.push("dot".to_string());
+    }
+    if config.server.https.as_ref().is_some_and(|h| h.enabled) {
+        protos.push("doh".to_string());
+    }
+    protos
+}
+
+fn plugin_snapshots(config: &DoggyDnsConfig) -> Vec<doggy_dns_mcp::PluginSnapshot> {
+    config
+        .plugins
+        .iter()
+        .enumerate()
+        .map(|(i, p)| {
+            let kind = format!("{:?}", p.kind).to_ascii_lowercase();
+            let details = match p.kind {
+                PluginKind::Nacos => serde_json::json!({
+                    "serverAddr": p.server_addr.as_deref().unwrap_or("127.0.0.1:8848"),
+                    "namespace": p.namespace.as_deref().unwrap_or("public"),
+                    "group": p.group.as_deref().unwrap_or("DEFAULT_GROUP"),
+                    "dnsZone": p.dns_zone.as_deref().unwrap_or("nacos.local"),
+                    "ttl": p.ttl,
+                }),
+                PluginKind::Native => serde_json::json!({
+                    "cacheSize": p.cache_size,
+                    "minTtl": p.min_ttl,
+                    "maxTtl": p.max_ttl,
+                }),
+                PluginKind::Forward => serde_json::json!({
+                    "upstream": p.upstream.as_deref().unwrap_or(&[]),
+                    "cacheSize": p.cache_size,
+                    "minTtl": p.min_ttl,
+                    "maxTtl": p.max_ttl,
+                }),
+            };
+            doggy_dns_mcp::PluginSnapshot {
+                order: i,
+                kind,
+                enabled: p.enabled,
+                details,
+            }
+        })
+        .collect()
 }

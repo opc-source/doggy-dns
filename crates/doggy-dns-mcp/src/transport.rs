@@ -18,6 +18,7 @@ use crate::state::McpState;
 use crate::McpServerConfig;
 
 /// Handle to a running MCP server.
+#[derive(Debug)]
 pub struct McpServerHandle {
     pub addr: SocketAddr,
     pub cancel: CancellationToken,
