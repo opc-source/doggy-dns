@@ -33,7 +33,7 @@ jobs:
       - name: Build eBPF program
         run: cd xdp && cargo build -Z build-std=core,alloc --release --target bpfel-unknown-none
       - name: Run XDP integration tests
-        run: sudo -E env "PATH=$PATH" cargo test -p doggy-dns-xdp --features xdp --test xdp_integration_test -- --ignored --nocapture
+        run: sudo -E env "PATH=$PATH" cargo test -p doggy-dns-xdp --test xdp_integration_test -- --ignored --nocapture
         env:
           RUST_LOG: debug
       - name: Cleanup
@@ -59,12 +59,12 @@ jobs:
         run: cd xdp && cargo build -Z build-std=core,alloc --release --target bpfel-unknown-none
       - name: Run benchmarks (PR)
         run: |
-          sudo -E env "PATH=$PATH" cargo bench -p doggy-dns-xdp --features xdp --bench xdp_bench -- --save-baseline pr | tee /tmp/bench-pr.txt
+          sudo -E env "PATH=$PATH" cargo bench -p doggy-dns-xdp --bench xdp_bench -- --save-baseline pr | tee /tmp/bench-pr.txt
       - name: Checkout base branch
         run: git checkout origin/main
       - name: Run benchmarks (base)
         run: |
-          sudo -E env "PATH=$PATH" cargo bench -p doggy-dns-xdp --features xdp --bench xdp_bench -- --save-baseline base | tee /tmp/bench-base.txt
+          sudo -E env "PATH=$PATH" cargo bench -p doggy-dns-xdp --bench xdp_bench -- --save-baseline base | tee /tmp/bench-base.txt
       - name: Post comparison comment
         uses: actions/github-script@v7
         with:
@@ -108,16 +108,16 @@ jobs:
           ./target/release/doggy-dns config/doggy-dns-stress.toml &
           echo $! > /tmp/server.pid
           sleep 2
-          dnsperf -s 127.0.0.1 -f /tmp/queries.txt -n 1 -t 1 -d 5 > /dev/null 2>&1
-          dnsperf -s 127.0.0.1 -f /tmp/queries.txt -n 10 -t 4 -d 30 -j > /tmp/userspace-result.json
+          dnsperf -s 127.0.0.1 -p 5353 -f /tmp/queries.txt -n 1 -t 1 -d 5 > /dev/null 2>&1
+          dnsperf -s 127.0.0.1 -p 5353 -f /tmp/queries.txt -n 10 -t 4 -d 30 -j > /tmp/userspace-result.json
           kill $(cat /tmp/server.pid)
       - name: Stress test (XDP)
         run: |
           sudo -E ./target/release/doggy-dns config/doggy-dns-stress-xdp.toml &
           echo $! | sudo tee /tmp/server.pid
           sleep 2
-          sudo dnsperf -s 127.0.0.1 -f /tmp/queries.txt -n 1 -t 1 -d 5 > /dev/null 2>&1
-          sudo dnsperf -s 127.0.0.1 -f /tmp/queries.txt -n 10 -t 4 -d 30 -j > /tmp/xdp-result.json
+          sudo dnsperf -s 127.0.0.1 -p 5353 -f /tmp/queries.txt -n 1 -t 1 -d 5 > /dev/null 2>&1
+          sudo dnsperf -s 127.0.0.1 -p 5353 -f /tmp/queries.txt -n 10 -t 4 -d 30 -j > /tmp/xdp-result.json
           sudo kill $(cat /tmp/server.pid) || true
         env:
           XDP_INTERFACE: lo
