@@ -18,5 +18,12 @@ aya = { workspace = true }
 aya-log = { workspace = true }
 libc = "0.2"
 
+[dev-dependencies]
+criterion = { workspace = true }
+
+[[bench]]
+name = "xdp_bench"
+harness = false
+
 [build-dependencies]
 aya-build = "0.2"

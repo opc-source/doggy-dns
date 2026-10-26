@@ -731,6 +731,7 @@ dependencies = [
  "aya",
  "aya-build",
  "aya-log",
+ "criterion",
  "doggy-dns-core",
  "doggy-dns-plugin",
  "hickory-proto",
