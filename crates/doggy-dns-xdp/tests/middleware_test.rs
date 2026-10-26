@@ -1,7 +1,7 @@
 #![allow(clippy::disallowed_methods)]
 
 use doggy_dns_xdp::middleware::compute_cache_entry;
-use doggy_dns_xdp::types::FLAG_NEGATIVE;
+use doggy_dns_xdp::types::{FLAG_NEGATIVE, MAX_RESPONSE_SIZE};
 use hickory_proto::op::ResponseCode;
 
 #[test]
@@ -61,7 +61,7 @@ fn compute_cache_entry_serv_fail_not_cached() {
 
 #[test]
 fn compute_cache_entry_truncates_large_response() {
-    let resp_bytes = vec![0xAB; 1024]; // larger than 512
+    let resp_bytes = vec![0xAB; 1024]; // larger than MAX_RESPONSE_SIZE
     let (_key, value) = compute_cache_entry(
         "large.example.com",
         1,
@@ -72,5 +72,5 @@ fn compute_cache_entry_truncates_large_response() {
         30,
         0,
     );
-    assert_eq!(value.resp_len, 512);
+    assert_eq!(value.resp_len as usize, MAX_RESPONSE_SIZE);
 }

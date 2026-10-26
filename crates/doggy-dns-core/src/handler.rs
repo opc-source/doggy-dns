@@ -295,23 +295,52 @@ fn record_outcome(span: &tracing::Span, outcome: &RequestOutcome, duration_ms: u
     span.record("otel.status_code", status);
 }
 
+/// Maximum DNS response size (in bytes) that can be stored in the XDP cache.
+/// Must match `CacheValue::resp_data` length in doggy-dns-xdp and the eBPF program.
+const XDP_CACHE_MAX_SIZE: usize = 512;
+
 /// Serialize a DNS response to wire format for the XDP cache.
 ///
 /// The caller supplies a closure that builds and emits the response into the
-/// provided [`BinEncoder`]. Returns `None` on serialization failure.
+/// provided [`BinEncoder`]. Returns `None` if the max message size exceeds
+/// [`XDP_CACHE_MAX_SIZE`] (those responses fall through to userspace) or if
+/// serialization fails.
 fn serialize_for_xdp(
     request: &Request,
     emit_fn: impl FnOnce(&mut BinEncoder<'_>) -> bool,
 ) -> Option<Vec<u8>> {
-    let mut bytes = Vec::with_capacity(512);
-    let mut encoder = BinEncoder::new(&mut bytes);
-    encoder.set_max_size(max_message_size(request.protocol(), request.edns.as_ref()));
-    if emit_fn(&mut encoder) {
-        Some(bytes)
-    } else {
-        tracing::warn!("failed to serialize response for XDP cache");
-        None
+    let max_size = max_message_size(request.protocol(), request.edns.as_ref());
+    if max_size > XDP_CACHE_MAX_SIZE as u16 {
+        if let Ok(info) = request.request_info() {
+            tracing::warn!(
+                request_id = request.metadata.id,
+                query = %info.query.name(),
+                qtype = %info.query.query_type(),
+                protocol = ?info.protocol,
+                client = %info.src,
+                max_size = max_size,
+                limit = XDP_CACHE_MAX_SIZE,
+                "response max_size exceeds XDP cache capacity, skipping cache"
+            );
+        } else {
+            tracing::warn!(
+                request_id = request.metadata.id,
+                max_size = max_size,
+                limit = XDP_CACHE_MAX_SIZE,
+                "response max_size exceeds XDP cache capacity, skipping cache"
+            );
+        }
+        return None;
     }
+
+    let mut bytes = Vec::with_capacity(XDP_CACHE_MAX_SIZE);
+    let mut encoder = BinEncoder::new(&mut bytes);
+    encoder.set_max_size(max_size);
+    if !emit_fn(&mut encoder) {
+        tracing::warn!("failed to serialize response for XDP cache");
+        return None;
+    }
+    Some(bytes)
 }
 
 /// Extract the minimum TTL from a slice of DNS records.
