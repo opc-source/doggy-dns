@@ -2,6 +2,8 @@ use async_trait::async_trait;
 use doggy_dns_plugin::authority_chain::AuthorityChain;
 use doggy_dns_plugin::{Middleware, MiddlewareAction, RequestOutcome};
 use hickory_proto::op::{Header, HeaderCounts, MessageType, Metadata, OpCode, ResponseCode};
+use hickory_proto::serialize::binary::BinEncoder;
+use hickory_server::net::xfer::Protocol;
 use hickory_server::server::{Request, RequestHandler, ResponseHandler, ResponseInfo};
 use hickory_server::zone_handler::{LookupControlFlow, MessageResponseBuilder};
 use std::sync::Arc;
@@ -156,6 +158,37 @@ impl RequestHandler for DoggyDnsHandler {
 
             let (response_info, outcome) = match resolve_result.outcome {
                 LookupControlFlow::Continue(Ok(lookup)) | LookupControlFlow::Break(Ok(lookup)) => {
+                    let records: Vec<_> = lookup.iter().cloned().collect();
+                    let answer_count = records.len();
+                    let min_ttl = min_ttl_from_records(&records);
+
+                    // Serialize the response to bytes for the XDP cache middleware
+                    let protocol = request.protocol();
+                    let resp_bytes = {
+                        let builder = MessageResponseBuilder::from_message_request(request);
+                        let mut metadata = Metadata::response_from_request(&request.metadata);
+                        metadata.message_type = MessageType::Response;
+                        metadata.op_code = OpCode::Query;
+                        metadata.response_code = ResponseCode::NoError;
+                        metadata.recursion_available = true;
+
+                        let response = builder.build(metadata, records.iter(), &[], &[], &[]);
+                        let mut bytes = Vec::with_capacity(512);
+                        let mut encoder = BinEncoder::new(&mut bytes);
+                        encoder.set_max_size(max_message_size(protocol, request.edns.as_ref()));
+                        match response.destructive_emit(&mut encoder) {
+                            Ok(_) => Some(bytes),
+                            Err(e) => {
+                                tracing::warn!(
+                                    request_id = request_id,
+                                    error = %e,
+                                    "failed to serialize response for XDP cache"
+                                );
+                                None
+                            }
+                        }
+                    };
+
                     let builder = MessageResponseBuilder::from_message_request(request);
                     let mut metadata = Metadata::response_from_request(&request.metadata);
                     metadata.message_type = MessageType::Response;
@@ -163,8 +196,6 @@ impl RequestHandler for DoggyDnsHandler {
                     metadata.response_code = ResponseCode::NoError;
                     metadata.recursion_available = true;
 
-                    let records: Vec<_> = lookup.iter().cloned().collect();
-                    let answer_count = records.len();
                     let response = builder.build(metadata, records.iter(), &[], &[], &[]);
 
                     match response_handle.send_response(response).await {
@@ -185,8 +216,8 @@ impl RequestHandler for DoggyDnsHandler {
                                     response_code: ResponseCode::NoError,
                                     authority: Some(handler_name.to_string()),
                                     answers: answer_count,
-                                    response_bytes: None,
-                                    min_answer_ttl: None,
+                                    response_bytes: resp_bytes,
+                                    min_answer_ttl: min_ttl,
                                 },
                             )
                         }
@@ -235,6 +266,27 @@ impl RequestHandler for DoggyDnsHandler {
                     )
                 }
                 LookupControlFlow::Skip => {
+                    // Serialize NXDomain response to bytes for the XDP cache middleware
+                    let protocol = request.protocol();
+                    let resp_bytes = {
+                        let builder = MessageResponseBuilder::from_message_request(request);
+                        let response = builder.error_msg(&request.metadata, ResponseCode::NXDomain);
+                        let mut bytes = Vec::with_capacity(512);
+                        let mut encoder = BinEncoder::new(&mut bytes);
+                        encoder.set_max_size(max_message_size(protocol, request.edns.as_ref()));
+                        match response.destructive_emit(&mut encoder) {
+                            Ok(_) => Some(bytes),
+                            Err(e) => {
+                                tracing::warn!(
+                                    request_id = request_id,
+                                    error = %e,
+                                    "failed to serialize NXDomain response for XDP cache"
+                                );
+                                None
+                            }
+                        }
+                    };
+
                     tracing::info!(
                         request_id = request_id,
                         query = %query_display,
@@ -248,7 +300,7 @@ impl RequestHandler for DoggyDnsHandler {
                             response_code: ResponseCode::NXDomain,
                             authority: None,
                             answers: 0,
-                            response_bytes: None,
+                            response_bytes: resp_bytes,
                             min_answer_ttl: None,
                         },
                     )
@@ -284,6 +336,22 @@ fn record_outcome(span: &tracing::Span, outcome: &RequestOutcome, duration_ms: u
         "ERROR"
     };
     span.record("otel.status_code", status);
+}
+
+/// Extract the minimum TTL from a slice of DNS records.
+fn min_ttl_from_records(records: &[hickory_proto::rr::Record]) -> Option<u32> {
+    records.iter().map(|r| r.ttl).min()
+}
+
+/// Compute the max message size for the BinEncoder, matching hickory-server's internal logic.
+fn max_message_size(protocol: Protocol, edns: Option<&hickory_proto::op::Edns>) -> u16 {
+    match protocol {
+        Protocol::Udp => match edns {
+            Some(edns) => edns.max_payload(),
+            None => 4096,
+        },
+        _ => u16::MAX,
+    }
 }
 
 async fn send_error<R: ResponseHandler>(
