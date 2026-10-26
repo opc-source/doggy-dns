@@ -26,13 +26,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: bpfel-unknown-none
       - uses: Swatinem/rust-cache@v2
       - name: Install bpf-linker
         run: cargo install bpf-linker
       - name: Build eBPF program
-        run: cd xdp && cargo build --release --target bpfel-unknown-none
+        run: cd xdp && cargo build -Z build-std=core,alloc --release --target bpfel-unknown-none
       - name: Run XDP integration tests
         run: sudo -E cargo test -p doggy-dns-xdp --features xdp --test xdp_integration_test -- --ignored --nocapture
         env:
@@ -52,13 +50,11 @@ jobs:
         with:
           fetch-depth: 0
       - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: bpfel-unknown-none
       - uses: Swatinem/rust-cache@v2
       - name: Install bpf-linker
         run: cargo install bpf-linker
       - name: Build eBPF program
-        run: cd xdp && cargo build --release --target bpfel-unknown-none
+        run: cd xdp && cargo build -Z build-std=core,alloc --release --target bpfel-unknown-none
       - name: Run benchmarks (PR)
         run: |
           sudo -E cargo bench -p doggy-dns-xdp --features xdp --bench xdp_bench -- --save-baseline pr | tee /tmp/bench-pr.txt
@@ -91,15 +87,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: bpfel-unknown-none
       - uses: Swatinem/rust-cache@v2
       - name: Install dependencies
         run: |
           cargo install bpf-linker
           sudo apt-get update && sudo apt-get install -y dnsperf
       - name: Build eBPF program
-        run: cd xdp && cargo build --release --target bpfel-unknown-none
+        run: cd xdp && cargo build -Z build-std=core,alloc --release --target bpfel-unknown-none
       - name: Build doggy-dns (with XDP)
         run: cargo build --features xdp --release
       - name: Generate query file

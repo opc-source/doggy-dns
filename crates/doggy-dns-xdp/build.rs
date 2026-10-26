@@ -22,7 +22,14 @@ fn main() {
         // Attempt to build the eBPF program
         let status = std::process::Command::new("cargo")
             .current_dir(&ebpf_dir)
-            .args(["build", "--release", "--target", "bpfel-unknown-none"])
+            .args([
+                "build",
+                "-Z",
+                "build-std=core,alloc",
+                "--release",
+                "--target",
+                "bpfel-unknown-none",
+            ])
             .status();
 
         match status {
