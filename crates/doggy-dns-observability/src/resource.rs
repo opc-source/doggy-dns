@@ -1,4 +1,4 @@
-use doggy_dns_core::config::ObservabilityConfig;
+use doggy_dns_basic::ObservabilityConfig;
 use opentelemetry::KeyValue;
 use opentelemetry_sdk::Resource;
 use std::collections::BTreeMap;

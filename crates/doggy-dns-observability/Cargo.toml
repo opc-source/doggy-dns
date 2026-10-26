@@ -6,7 +6,7 @@ license = "Apache-2.0"
 description = "OTLP (logs, metrics, traces, profiles) observability for doggy-dns"
 
 [dependencies]
-doggy-dns-core = { path = "../doggy-dns-core" }
+doggy-dns-basic = { path = "../doggy-dns-basic" }
 doggy-dns-plugin = { path = "../doggy-dns-plugin" }
 hickory-proto = { workspace = true }
 hickory-server = { workspace = true }

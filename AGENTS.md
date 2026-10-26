@@ -9,7 +9,7 @@ cargo build                                    # Build all crates
 cargo test --workspace                         # Run all tests (some need network)
 cargo test -p doggy-dns-nacos                 # Test a single crate
 cargo test -p doggy-dns-plugin --test authority_chain_test  # Run a single test file
-cargo test -p doggy-dns-core --test config_test -- parse_full_config  # Run a single test
+cargo test -p doggy-dns-basic --test config_test -- parse_full_config  # Run a single test
 cargo clippy --all-features --all-targets -- -D warnings    # Lint (CI uses -D, not -W)
 cargo fmt --all -- --check                     # Format check
 cargo bench --no-run --workspace               # Verify benchmarks compile
@@ -32,16 +32,20 @@ sudo -E cargo test -p doggy-dns-xdp --test xdp_integration_test -- --ignored  # 
 
 ```
 doggy-dns (binary)
-  ├── doggy-dns-core            (server, config, handler, middleware)
+  ├── doggy-dns-core            (server, handler, middleware; config re-exported from basic)
+  │     ├── doggy-dns-basic
   │     └── doggy-dns-plugin
   ├── doggy-dns-nacos           (Nacos service discovery backend)
   │     └── doggy-dns-plugin
   ├── doggy-dns-observability   (OTLP logs/metrics/traces/profiles)
-  │     ├── doggy-dns-core
+  │     ├── doggy-dns-basic
   │     └── doggy-dns-plugin
+  ├── doggy-dns-mcp             (read-only MCP server)
+  │     └── doggy-dns-basic
+  ├── doggy-dns-basic           (all TOML config types, load & validate — serde/toml/anyhow only)
   ├── doggy-dns-plugin          (traits, authority chain, built-in authorities — leaf crate)
   └── doggy-dns-xdp (optional, feature = "xdp")
-        ├── doggy-dns-core
+        ├── doggy-dns-basic
         └── doggy-dns-plugin
 
 xdp/
@@ -98,7 +102,7 @@ Cache updates replace the entire Vec for a key (never mutate in place). Config s
 
 ## Configuration
 
-TOML config at `config/doggy-dns.toml`. Key structs in `core/config.rs`: `DoggyDnsConfig`, `ServerConfig`, `PluginConfig` (flat — fields per kind), `PluginKind` enum (`Nacos`, `Native`, `Forward`).
+TOML config at `config/doggy-dns.toml`. Key structs in `crates/doggy-dns-basic` (`doggy_dns_basic`): `DoggyDnsConfig`, `ServerConfig`, `PluginConfig` (flat — fields per kind), `PluginKind` enum (`Nacos`, `Native`, `Forward`). `doggy-dns-core` re-exports the module as `config`.
 
 `validate_config()` checks: worker_threads > 0, TLS/HTTPS cert files exist when enabled, remote_config fields non-empty when enabled, and observability ranges/URLs (observability enabled, signal ranges, profile duration/frequency, log level, endpoint format).
 

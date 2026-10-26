@@ -1,6 +1,6 @@
 #![allow(clippy::disallowed_methods)]
 
-use doggy_dns_core::config::{DoggyDnsConfig, PluginKind, validate_config};
+use doggy_dns_basic::{DoggyDnsConfig, PluginKind, validate_config};
 
 #[test]
 fn parse_full_config() {
@@ -369,7 +369,7 @@ frequency_hz = 199
     assert!(observability.enabled);
     assert_eq!(
         observability.backend,
-        doggy_dns_core::config::ObservabilityBackend::OtelCollector
+        doggy_dns_basic::ObservabilityBackend::OtelCollector
     );
     assert_eq!(observability.endpoint, "http://127.0.0.1:4318");
     assert_eq!(observability.service_name.as_deref(), Some("dns-edge"));
@@ -391,7 +391,7 @@ frequency_hz = 199
     assert_eq!(observability.metrics.interval_secs, 30);
     assert_eq!(
         observability.metrics.temporality,
-        doggy_dns_core::config::MetricsTemporality::Delta
+        doggy_dns_basic::MetricsTemporality::Delta
     );
 
     assert!((observability.traces.sample_ratio - 0.25).abs() < f64::EPSILON);
@@ -421,7 +421,7 @@ port = 53
     assert!(!observability.enabled);
     assert_eq!(
         observability.backend,
-        doggy_dns_core::config::ObservabilityBackend::OpenObserve
+        doggy_dns_basic::ObservabilityBackend::OpenObserve
     );
     assert_eq!(
         observability.backend.default_endpoint(),
@@ -723,4 +723,56 @@ cache_size = 0
 "#;
     let config: DoggyDnsConfig = toml::from_str(toml).expect("parse failed");
     validate_config(&config).expect("disabled XDP should skip validation");
+}
+
+#[test]
+fn mcp_defaults_to_disabled_on_loopback_19090() {
+    let toml_str = r#"
+[server]
+listen_addr = "127.0.0.1"
+port = 15353
+"#;
+    let config: DoggyDnsConfig = toml::from_str(toml_str).unwrap();
+    assert!(!config.mcp.enabled);
+    assert_eq!(config.mcp.listen_addr, "127.0.0.1");
+    assert_eq!(config.mcp.port, 19090);
+    assert!(config.mcp.token.is_none());
+}
+
+#[test]
+fn mcp_config_parses_token_and_allowed_hosts() {
+    let toml_str = r#"
+[server]
+listen_addr = "127.0.0.1"
+port = 15353
+
+[mcp]
+enabled = true
+listen_addr = "0.0.0.0"
+port = 19091
+token = "secret"
+allowed_hosts = ["dns-node-1", "10.0.0.5:19091"]
+"#;
+    let config: DoggyDnsConfig = toml::from_str(toml_str).unwrap();
+    assert!(config.mcp.enabled);
+    assert_eq!(config.mcp.port, 19091);
+    assert_eq!(config.mcp.token.as_deref(), Some("secret"));
+    assert_eq!(config.mcp.allowed_hosts.len(), 2);
+}
+
+#[test]
+fn validate_rejects_invalid_mcp_address() {
+    let toml_str = r#"
+[server]
+listen_addr = "127.0.0.1"
+port = 15353
+
+[mcp]
+enabled = true
+listen_addr = "not an ip"
+port = 19090
+"#;
+    let config: DoggyDnsConfig = toml::from_str(toml_str).unwrap();
+    let err = validate_config(&config).unwrap_err().to_string();
+    assert!(err.contains("mcp.listen_addr"), "unexpected error: {err}");
 }

@@ -1,0 +1,24 @@
+[package]
+name = "doggy-dns-mcp"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+description = "Read-only MCP server for doggy-dns instance introspection"
+
+[dependencies]
+doggy-dns-basic = { path = "../doggy-dns-basic" }
+rmcp = { workspace = true }
+axum = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+toml = { workspace = true }
+tracing = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }
+reqwest = { workspace = true }

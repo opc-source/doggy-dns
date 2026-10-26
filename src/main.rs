@@ -21,7 +21,7 @@ fn main() -> Result<()> {
     let config_path = std::env::args()
         .nth(1)
         .unwrap_or_else(|| "config/doggy-dns.toml".to_string());
-    let config =
+    let (config, config_content) =
         load_config(&config_path).context(format!("failed to load config from {}", config_path))?;
 
     let mut telemetry = Observability::init(
@@ -68,13 +68,17 @@ fn main() -> Result<()> {
         "tokio runtime built"
     );
 
-    runtime.block_on(async_main(config, &mut telemetry))?;
+    runtime.block_on(async_main(config, &config_content, &mut telemetry))?;
 
     telemetry.shutdown();
     Ok(())
 }
 
-async fn async_main(config: DoggyDnsConfig, telemetry: &mut Observability) -> Result<()> {
+async fn async_main(
+    config: DoggyDnsConfig,
+    config_content: &str,
+    telemetry: &mut Observability,
+) -> Result<()> {
     // Profiles need a Tokio runtime for their HTTP exporter.
     telemetry.spawn_profiles();
 
@@ -107,6 +111,9 @@ async fn async_main(config: DoggyDnsConfig, telemetry: &mut Observability) -> Re
 
     tracing::info!("doggy-dns is ready");
 
+    // Start MCP server if enabled (non-fatal on failure)
+    let mcp_handle = start_mcp_server(&config, config_content).await;
+
     // Run server until shutdown signal
     let shutdown_timeout = Duration::from_secs(config.server.shutdown_timeout);
     let shutdown_token = server.shutdown_token().clone();
@@ -136,6 +143,16 @@ async fn async_main(config: DoggyDnsConfig, telemetry: &mut Observability) -> Re
         ),
     }
     tracing::info!("doggy-dns shut down gracefully");
+
+    // Shut down MCP server
+    if let Some(handle) = mcp_handle {
+        handle.cancel.cancel();
+        match tokio::time::timeout(Duration::from_secs(2), handle.wait()).await {
+            Ok(Ok(())) => tracing::info!("mcp server shut down"),
+            Ok(Err(e)) => tracing::warn!(error = %e, "mcp server task failed"),
+            Err(_) => tracing::warn!("mcp server shutdown timed out"),
+        }
+    }
 
     Ok(())
 }
@@ -257,4 +274,37 @@ async fn build_authority_chain(
 
     tracing::info!(chain_length = handlers.len(), "authority chain built");
     Ok((watchers, AuthorityChain::new(handlers)))
+}
+
+async fn start_mcp_server(
+    config: &DoggyDnsConfig,
+    config_content: &str,
+) -> Option<doggy_dns_mcp::McpServerHandle> {
+    if !config.mcp.enabled {
+        return None;
+    }
+
+    let state = Arc::new(doggy_dns_mcp::build_state(
+        doggy_dns_mcp::state::McpState::detect_hostname(),
+        env!("CARGO_PKG_VERSION").to_string(),
+        format!("{}:{}", config.server.listen_addr, config.server.port),
+        doggy_dns_mcp::state::McpState::enabled_protocols(config),
+        doggy_dns_mcp::snapshots_from(&config.plugins),
+        config_content,
+    ));
+
+    let mcp_config = config.mcp.clone();
+
+    // start() only binds the listener and spawns the serve task; a failure
+    // here must stay non-fatal so DNS service continues alone.
+    match doggy_dns_mcp::start(state, mcp_config).await {
+        Ok(handle) => {
+            tracing::info!(addr = %handle.addr, "mcp server listening");
+            Some(handle)
+        }
+        Err(error) => {
+            tracing::error!(%error, "failed to start mcp server; continuing with dns only");
+            None
+        }
+    }
 }

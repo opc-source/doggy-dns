@@ -51,7 +51,7 @@ use crate::cache::{DnsCacheMap, now_ktime_ns};
 #[cfg(target_os = "linux")]
 use async_trait::async_trait;
 #[cfg(target_os = "linux")]
-use doggy_dns_core::config::XdpConfig;
+use doggy_dns_basic::XdpConfig;
 #[cfg(target_os = "linux")]
 use doggy_dns_plugin::{Middleware, MiddlewareAction, RequestOutcome};
 #[cfg(target_os = "linux")]

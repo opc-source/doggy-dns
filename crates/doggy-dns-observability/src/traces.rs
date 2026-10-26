@@ -2,7 +2,7 @@ use crate::auth;
 use crate::endpoint::{self, Signal};
 use crate::sampler::ErrorBiasedSampler;
 use anyhow::{Context, Result};
-use doggy_dns_core::config::ObservabilityConfig;
+use doggy_dns_basic::ObservabilityConfig;
 use opentelemetry_otlp::{Protocol, SpanExporter, WithExportConfig, WithHttpConfig};
 use opentelemetry_sdk::Resource;
 use opentelemetry_sdk::trace::{BatchConfigBuilder, BatchSpanProcessor, SdkTracerProvider};

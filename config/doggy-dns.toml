@@ -24,7 +24,7 @@ logging = true
 # OpenObserve is the default backend; OTel Collector and Vector work by
 # changing `endpoint` (both use http://host:4318 + /v1/<signal>).
 [observability]
-enabled = false
+enabled = true
 backend = "openobserve"              # openobserve | otel-collector | vector | custom
 endpoint = "http://127.0.0.1:5080/api/default"
 # protocol = "http/protobuf"
@@ -37,7 +37,7 @@ basic_auth = { username = "root@example.com", password = "${OPENOBSERVE_PASSWORD
 
 [observability.logs]
 enabled = true
-level = "warn"                       # OTLP log level; stdout uses RUST_LOG
+level = "info"                       # OTLP log level; stdout uses RUST_LOG
 stdout = true
 
 [observability.metrics]
@@ -46,7 +46,7 @@ interval_secs = 15
 
 [observability.traces]
 enabled = true
-sample_ratio = 0.05
+sample_ratio = 1.00
 max_queue_size = 8192
 max_export_batch_size = 512
 scheduled_delay_ms = 2000
@@ -96,3 +96,12 @@ data_id = "doggy-dns.toml"
 # negative_ttl = 30           # NXDomain cache TTL in seconds
 # attach_mode = "auto"        # "auto" or "manual"
 # pin_path = "/sys/fs/bpf/doggy-dns/dns_cache"
+
+# Read-only MCP server for the console. Disabled by default.
+# When enabled, serves JSON-RPC over Streamable HTTP at /mcp.
+# [mcp]
+# enabled = false
+# listen_addr = "127.0.0.1"
+# port = 19090
+# token = "change-me"          # Bearer token; omit for no auth
+# allowed_hosts = ["dns-node-1", "10.0.0.5:19090"]

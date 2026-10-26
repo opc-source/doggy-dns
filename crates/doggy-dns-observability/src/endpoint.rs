@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use doggy_dns_core::config::ObservabilityConfig;
+use doggy_dns_basic::ObservabilityConfig;
 
 /// One OTLP signal. All supported backends expose the same `/v1/<signal>` paths.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -147,7 +147,7 @@ mod tests {
     #![allow(clippy::disallowed_methods)]
 
     use super::*;
-    use doggy_dns_core::config::{ObservabilityBackend, ObservabilityConfig};
+    use doggy_dns_basic::{ObservabilityBackend, ObservabilityConfig};
     use std::collections::HashMap;
 
     fn config_with(
