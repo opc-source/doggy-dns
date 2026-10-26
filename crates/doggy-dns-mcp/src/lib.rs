@@ -1,4 +1,5 @@
 pub mod redact;
+pub mod server;
 pub mod state;
 
 use serde::{Deserialize, Serialize};
