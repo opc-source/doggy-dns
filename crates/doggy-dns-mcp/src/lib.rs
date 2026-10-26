@@ -20,6 +20,36 @@ pub struct PluginSnapshot {
     pub details: serde_json::Value,
 }
 
+/// Redacted config captured once at startup, or the error that prevented it.
+#[derive(Debug, Clone)]
+pub enum ConfigSnapshot {
+    Redacted {
+        content: String,
+        redacted_keys: Vec<String>,
+    },
+    Error {
+        code: &'static str,
+        message: String,
+    },
+}
+
+impl ConfigSnapshot {
+    /// Redact raw TOML content once. Never touches the filesystem: the
+    /// content comes from `doggy_dns_basic::load_config`.
+    pub fn capture(raw: &str) -> Self {
+        match redact::redact_toml(raw) {
+            Ok((content, redacted_keys)) => Self::Redacted {
+                content,
+                redacted_keys,
+            },
+            Err(e) => Self::Error {
+                code: "config_parse_error",
+                message: format!("failed to parse config: {e}"),
+            },
+        }
+    }
+}
+
 /// Build tool-ready snapshots from the configured plugin chain, preserving
 /// evaluation order and applying per-kind display defaults.
 pub fn snapshots_from(plugins: &[PluginConfig]) -> Vec<PluginSnapshot> {
@@ -101,7 +131,7 @@ pub fn build_state(
     listen_addr: String,
     protocols: Vec<String>,
     plugins: Vec<PluginSnapshot>,
-    config_path: std::path::PathBuf,
+    config_content: &str,
 ) -> state::McpState {
     state::McpState::from_parts(
         host,
@@ -111,6 +141,6 @@ pub fn build_state(
         listen_addr,
         protocols,
         plugins,
-        config_path,
+        config_content,
     )
 }

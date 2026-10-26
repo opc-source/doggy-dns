@@ -102,6 +102,10 @@ Returns all configured DNS authority plugins in evaluation order.
 ### `get_config`
 
 Returns the doggy-dns TOML configuration with sensitive values redacted.
+The raw file content is captured once by `load_config` at startup and
+redacted when the MCP state is built; the tool never touches the
+filesystem per call, so comments, ordering and unknown keys are
+preserved exactly as written.
 
 **Input:** `{}` (no arguments)
 
@@ -115,13 +119,14 @@ Returns the doggy-dns TOML configuration with sensitive values redacted.
 }
 ```
 
-If the config file cannot be read:
+If the captured content cannot be parsed as TOML (defensive; startup
+validation normally prevents this):
 
 ```json
 {
   "error": {
-    "code": "config_unreadable",
-    "message": "failed to read config file: ..."
+    "code": "config_parse_error",
+    "message": "failed to parse config: ..."
   }
 }
 ```

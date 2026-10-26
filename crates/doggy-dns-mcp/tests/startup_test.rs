@@ -4,7 +4,6 @@ use chrono::Utc;
 use doggy_dns_mcp::McpConfig;
 use doggy_dns_mcp::state::McpState;
 use doggy_dns_mcp::transport;
-use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::net::TcpListener;
 
@@ -17,7 +16,7 @@ fn test_state() -> Arc<McpState> {
         "0.0.0.0:15353".into(),
         vec!["udp".into(), "tcp".into()],
         Vec::new(),
-        PathBuf::from("config/doggy-dns.toml"),
+        "",
     ))
 }
 

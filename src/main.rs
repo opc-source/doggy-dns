@@ -21,7 +21,7 @@ fn main() -> Result<()> {
     let config_path = std::env::args()
         .nth(1)
         .unwrap_or_else(|| "config/doggy-dns.toml".to_string());
-    let config =
+    let (config, config_content) =
         load_config(&config_path).context(format!("failed to load config from {}", config_path))?;
 
     let mut telemetry = Observability::init(
@@ -68,7 +68,7 @@ fn main() -> Result<()> {
         "tokio runtime built"
     );
 
-    runtime.block_on(async_main(config, &config_path, &mut telemetry))?;
+    runtime.block_on(async_main(config, &config_content, &mut telemetry))?;
 
     telemetry.shutdown();
     Ok(())
@@ -76,7 +76,7 @@ fn main() -> Result<()> {
 
 async fn async_main(
     config: DoggyDnsConfig,
-    config_path: &str,
+    config_content: &str,
     telemetry: &mut Observability,
 ) -> Result<()> {
     // Profiles need a Tokio runtime for their HTTP exporter.
@@ -112,7 +112,7 @@ async fn async_main(
     tracing::info!("doggy-dns is ready");
 
     // Start MCP server if enabled (non-fatal on failure)
-    let mcp_handle = start_mcp_server(&config, config_path);
+    let mcp_handle = start_mcp_server(&config, config_content).await;
 
     // Run server until shutdown signal
     let shutdown_timeout = Duration::from_secs(config.server.shutdown_timeout);
@@ -276,9 +276,9 @@ async fn build_authority_chain(
     Ok((watchers, AuthorityChain::new(handlers)))
 }
 
-fn start_mcp_server(
+async fn start_mcp_server(
     config: &DoggyDnsConfig,
-    config_path: &str,
+    config_content: &str,
 ) -> Option<doggy_dns_mcp::McpServerHandle> {
     if !config.mcp.enabled {
         return None;
@@ -290,25 +290,21 @@ fn start_mcp_server(
         format!("{}:{}", config.server.listen_addr, config.server.port),
         doggy_dns_mcp::state::McpState::enabled_protocols(config),
         doggy_dns_mcp::snapshots_from(&config.plugins),
-        std::path::PathBuf::from(config_path),
+        config_content,
     ));
 
     let mcp_config = config.mcp.clone();
 
-    // MCP start is non-blocking on the DNS runtime; we spawn and log.
-    let rt = tokio::runtime::Handle::try_current().ok()?;
-    let handle = rt.block_on(async {
-        match doggy_dns_mcp::start(state, mcp_config).await {
-            Ok(h) => {
-                tracing::info!(addr = %h.addr, "mcp server listening");
-                Some(h)
-            }
-            Err(error) => {
-                tracing::error!(%error, "failed to start mcp server; continuing with dns only");
-                None
-            }
+    // start() only binds the listener and spawns the serve task; a failure
+    // here must stay non-fatal so DNS service continues alone.
+    match doggy_dns_mcp::start(state, mcp_config).await {
+        Ok(handle) => {
+            tracing::info!(addr = %handle.addr, "mcp server listening");
+            Some(handle)
         }
-    })?;
-
-    Some(handle)
+        Err(error) => {
+            tracing::error!(%error, "failed to start mcp server; continuing with dns only");
+            None
+        }
+    }
 }

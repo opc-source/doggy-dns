@@ -1,9 +1,8 @@
 use chrono::{DateTime, Utc};
-use std::path::PathBuf;
 
 use doggy_dns_basic::DoggyDnsConfig;
 
-use crate::PluginSnapshot;
+use crate::{ConfigSnapshot, PluginSnapshot};
 
 /// Immutable snapshot of a doggy-dns instance's state, built once at startup.
 #[derive(Debug, Clone)]
@@ -16,7 +15,7 @@ pub struct McpState {
     pub listen_addr: String,
     pub protocols: Vec<String>,
     pub plugins: Vec<PluginSnapshot>,
-    pub config_path: PathBuf,
+    pub config: ConfigSnapshot,
 }
 
 impl McpState {
@@ -48,9 +47,10 @@ impl McpState {
         listen_addr: String,
         protocols: Vec<String>,
         plugins: Vec<PluginSnapshot>,
-        config_path: PathBuf,
+        config_content: &str,
     ) -> Self {
         let instance_id = format!("{host}-{pid}");
+        let config = ConfigSnapshot::capture(config_content);
         Self {
             instance_id,
             host,
@@ -60,7 +60,7 @@ impl McpState {
             listen_addr,
             protocols,
             plugins,
-            config_path,
+            config,
         }
     }
 }

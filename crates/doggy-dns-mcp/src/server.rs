@@ -7,7 +7,7 @@ use rmcp::{
 };
 use serde_json::Value;
 
-use crate::redact::redact_toml;
+use crate::ConfigSnapshot;
 use crate::state::McpState;
 
 #[derive(Clone)]
@@ -111,38 +111,23 @@ impl DoggyMcpServer {
         )
     )]
     pub async fn get_config(&self) -> Result<CallToolResult, ErrorData> {
-        let content = match std::fs::read_to_string(&self.state.config_path) {
-            Ok(c) => c,
-            Err(e) => {
-                return Ok(CallToolResult::success(vec![ContentBlock::text(
-                    error_json(
-                        "config_unreadable",
-                        &format!("failed to read config file: {e}"),
-                    ),
-                )]));
-            }
-        };
-
-        match redact_toml(&content) {
-            Ok((redacted_content, redacted_keys)) => {
+        let json = match &self.state.config {
+            ConfigSnapshot::Redacted {
+                content,
+                redacted_keys,
+            } => {
                 let mut map = serde_json::Map::new();
                 map.insert("format".into(), Value::String("toml".into()));
-                map.insert("content".into(), Value::String(redacted_content));
+                map.insert("content".into(), Value::String(content.clone()));
                 map.insert(
                     "redactedKeys".into(),
-                    Value::Array(redacted_keys.into_iter().map(Value::String).collect()),
+                    Value::Array(redacted_keys.iter().cloned().map(Value::String).collect()),
                 );
-                Ok(CallToolResult::success(vec![ContentBlock::text(
-                    Value::Object(map).to_string(),
-                )]))
+                Value::Object(map).to_string()
             }
-            Err(e) => Ok(CallToolResult::success(vec![ContentBlock::text(
-                error_json(
-                    "config_parse_error",
-                    &format!("failed to parse config: {e}"),
-                ),
-            )])),
-        }
+            ConfigSnapshot::Error { code, message } => error_json(code, message),
+        };
+        Ok(CallToolResult::success(vec![ContentBlock::text(json)]))
     }
 }
 

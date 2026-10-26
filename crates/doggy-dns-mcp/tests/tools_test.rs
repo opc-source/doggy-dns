@@ -4,7 +4,6 @@ use chrono::Utc;
 use doggy_dns_mcp::PluginSnapshot;
 use doggy_dns_mcp::server::DoggyMcpServer;
 use doggy_dns_mcp::state::McpState;
-use std::path::PathBuf;
 use std::sync::Arc;
 
 fn test_state() -> McpState {
@@ -21,7 +20,7 @@ fn test_state() -> McpState {
             enabled: true,
             details: serde_json::json!({"upstream": ["8.8.8.8:53"]}),
         }],
-        PathBuf::from("config/doggy-dns.toml"),
+        "[server]\nlisten_addr = \"0.0.0.0\"\nport = 15353\n",
     )
 }
 
@@ -65,12 +64,8 @@ async fn list_plugins_returns_snapshots() {
 }
 
 #[tokio::test]
-async fn get_config_reads_and_redacts_file() {
-    let dir = tempfile::tempdir().unwrap();
-    let config_path = dir.path().join("test.toml");
-    std::fs::write(
-        &config_path,
-        r#"
+async fn get_config_redacts_sensitive_keys() {
+    let raw = r#"
 [server]
 listen_addr = "127.0.0.1"
 port = 53
@@ -78,10 +73,7 @@ port = 53
 [observability.basic_auth]
 username = "admin"
 password = "hunter2"
-"#,
-    )
-    .unwrap();
-
+"#;
     let state = McpState::from_parts(
         "h".into(),
         1,
@@ -90,7 +82,7 @@ password = "hunter2"
         "0.0.0.0:53".into(),
         vec!["udp".into()],
         Vec::new(),
-        config_path,
+        raw,
     );
     let server = DoggyMcpServer::new(Arc::new(state));
     let result = server.get_config().await.unwrap();
@@ -105,7 +97,7 @@ password = "hunter2"
 }
 
 #[tokio::test]
-async fn get_config_returns_error_for_missing_file() {
+async fn get_config_returns_parse_error_for_malformed_content() {
     let state = McpState::from_parts(
         "h".into(),
         1,
@@ -114,12 +106,12 @@ async fn get_config_returns_error_for_missing_file() {
         "0.0.0.0:53".into(),
         vec![],
         Vec::new(),
-        PathBuf::from("/nonexistent/config.toml"),
+        "this is = = not valid toml",
     );
     let server = DoggyMcpServer::new(Arc::new(state));
     let result = server.get_config().await.unwrap();
     let json = first_text_json(&result);
-    assert_eq!(json["error"]["code"], "config_unreadable");
+    assert_eq!(json["error"]["code"], "config_parse_error");
 }
 
 #[tokio::test]

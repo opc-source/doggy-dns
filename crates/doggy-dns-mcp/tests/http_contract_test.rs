@@ -4,7 +4,6 @@ use chrono::Utc;
 use doggy_dns_mcp::state::McpState;
 use doggy_dns_mcp::transport;
 use doggy_dns_mcp::{McpConfig, PluginSnapshot};
-use std::path::PathBuf;
 use std::sync::Arc;
 
 fn test_state() -> Arc<McpState> {
@@ -21,7 +20,7 @@ fn test_state() -> Arc<McpState> {
             enabled: true,
             details: serde_json::json!({"upstream": ["8.8.8.8:53"]}),
         }],
-        PathBuf::from("config/doggy-dns.toml"),
+        "",
     ))
 }
 
