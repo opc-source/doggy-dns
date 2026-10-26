@@ -22,7 +22,7 @@ libc = "0.2"
 criterion = { workspace = true }
 
 [[bench]]
-name = "xdp_bench"
+name = "xdp_component_bench"
 harness = false
 
 [build-dependencies]

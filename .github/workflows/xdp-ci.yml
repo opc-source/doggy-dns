@@ -40,8 +40,8 @@ jobs:
         if: always()
         run: sudo ip netns delete doggy-dns-test || true
 
-  xdp-benchmark:
-    name: XDP Benchmarks
+  xdp-component-bench:
+    name: XDP Component Benchmarks
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -59,12 +59,12 @@ jobs:
         run: cd xdp && cargo build -Z build-std=core,alloc --release --target bpfel-unknown-none
       - name: Run benchmarks (PR)
         run: |
-          sudo -E env "PATH=$PATH" cargo bench -p doggy-dns-xdp --bench xdp_bench -- --save-baseline pr | tee /tmp/bench-pr.txt
+          sudo -E env "PATH=$PATH" cargo bench -p doggy-dns-xdp --bench xdp_component_bench -- --save-baseline pr | tee /tmp/bench-pr.txt
       - name: Checkout base branch
         run: git checkout origin/main
       - name: Run benchmarks (base)
         run: |
-          sudo -E env "PATH=$PATH" cargo bench -p doggy-dns-xdp --bench xdp_bench -- --save-baseline base | tee /tmp/bench-base.txt
+          sudo -E env "PATH=$PATH" cargo bench -p doggy-dns-xdp --bench xdp_component_bench -- --save-baseline base | tee /tmp/bench-base.txt
       - name: Post comparison comment
         uses: actions/github-script@v7
         with:
@@ -72,7 +72,7 @@ jobs:
             const fs = require('fs');
             const pr = fs.readFileSync('/tmp/bench-pr.txt', 'utf8');
             const base = fs.readFileSync('/tmp/bench-base.txt', 'utf8');
-            const body = `## XDP Benchmark Comparison\n\n### PR Branch\n\`\`\`\n${pr}\n\`\`\`\n\n### Base Branch\n\`\`\`\n${base}\n\`\`\``;
+            const body = `## XDP Component Benchmark Comparison\n\n### PR Branch\n\`\`\`\n${pr}\n\`\`\`\n\n### Base Branch\n\`\`\`\n${base}\n\`\`\``;
             github.rest.issues.createComment({
               issue_number: context.issue.number,
               owner: context.repo.owner,
@@ -108,8 +108,8 @@ jobs:
           ./target/release/doggy-dns config/doggy-dns-stress.toml &
           echo $! > /tmp/server.pid
           sleep 2
-          dnsperf -s 127.0.0.1 -p 5353 -f /tmp/queries.txt -n 1 -t 1 -d 5 > /dev/null 2>&1 || true
-          dnsperf -s 127.0.0.1 -p 5353 -f /tmp/queries.txt -n 10 -t 4 -d 30 -j > /tmp/userspace-result.json || true
+          dnsperf -s 127.0.0.1 -p 5353 -d /tmp/queries.txt -n 1 -l 5 > /dev/null 2>&1 || true
+          dnsperf -s 127.0.0.1 -p 5353 -d /tmp/queries.txt -n 10 -T 4 -l 30 > /tmp/userspace-result.txt 2>&1 || true
           kill $(cat /tmp/server.pid)
       - name: Stress test (XDP)
         continue-on-error: true
@@ -117,13 +117,13 @@ jobs:
           sudo -E ./target/release/doggy-dns config/doggy-dns-stress-xdp.toml &
           echo $! | sudo tee /tmp/server.pid
           sleep 2
-          sudo dnsperf -s 127.0.0.1 -p 5353 -f /tmp/queries.txt -n 1 -t 1 -d 5 > /dev/null 2>&1 || true
-          sudo dnsperf -s 127.0.0.1 -p 5353 -f /tmp/queries.txt -n 10 -t 4 -d 30 -j > /tmp/xdp-result.json || true
+          sudo dnsperf -s 127.0.0.1 -p 5353 -d /tmp/queries.txt -n 1 -l 5 > /dev/null 2>&1 || true
+          sudo dnsperf -s 127.0.0.1 -p 5353 -d /tmp/queries.txt -n 10 -T 4 -l 30 > /tmp/xdp-result.txt 2>&1 || true
           sudo kill $(cat /tmp/server.pid) || true
         env:
           XDP_INTERFACE: lo
       - name: Generate comparison report
-        run: python3 scripts/xdp_stress_report.py /tmp/userspace-result.json /tmp/xdp-result.json > /tmp/stress-report.md || echo "Stress report generation skipped (dnsperf unavailable or failed)" > /tmp/stress-report.md
+        run: python3 scripts/xdp_stress_report.py /tmp/userspace-result.txt /tmp/xdp-result.txt > /tmp/stress-report.md || echo "Stress report generation skipped (dnsperf failed)" > /tmp/stress-report.md
       - name: Post PR comment
         uses: actions/github-script@v7
         with:
