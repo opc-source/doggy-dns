@@ -186,7 +186,7 @@ fn make_nacos_authority_with_hit() -> NacosAuthority {
 async fn handler_resolves_query_returns_no_error() {
     let authority = make_nacos_authority_with_hit();
     let chain = AuthorityChain::new(vec![("nacos".to_string(), Arc::new(authority))]);
-    let handler = DoggyDnsHandler::new(vec![], Arc::new(chain));
+    let handler = DoggyDnsHandler::new(vec![], Arc::new(chain), false);
 
     let request = make_dns_request("my-svc.DEFAULT_GROUP.public.nacos.local.", RecordType::A);
     let mock = MockResponseHandler::new();
@@ -200,7 +200,7 @@ async fn handler_resolves_query_returns_no_error() {
 #[tokio::test]
 async fn handler_all_skip_returns_nxdomain() {
     let chain = AuthorityChain::new(vec![]);
-    let handler = DoggyDnsHandler::new(vec![], Arc::new(chain));
+    let handler = DoggyDnsHandler::new(vec![], Arc::new(chain), false);
 
     let request = make_dns_request("unknown.example.com.", RecordType::A);
     let mock = MockResponseHandler::new();
@@ -214,7 +214,7 @@ async fn handler_all_skip_returns_nxdomain() {
 #[tokio::test]
 async fn handler_authority_error_returns_servfail() {
     let chain = AuthorityChain::new(vec![("error".to_string(), Arc::new(ErrorZoneHandler))]);
-    let handler = DoggyDnsHandler::new(vec![], Arc::new(chain));
+    let handler = DoggyDnsHandler::new(vec![], Arc::new(chain), false);
 
     let request = make_dns_request("anything.example.com.", RecordType::A);
     let mock = MockResponseHandler::new();
@@ -229,7 +229,11 @@ async fn handler_authority_error_returns_servfail() {
 async fn handler_middleware_short_circuit_returns_refused() {
     let chain = AuthorityChain::new(vec![]);
     let sc_mw = Arc::new(ShortCircuitMiddleware::new());
-    let handler = DoggyDnsHandler::new(vec![sc_mw.clone() as Arc<dyn Middleware>], Arc::new(chain));
+    let handler = DoggyDnsHandler::new(
+        vec![sc_mw.clone() as Arc<dyn Middleware>],
+        Arc::new(chain),
+        false,
+    );
 
     let request = make_dns_request("example.com.", RecordType::A);
     let mock = MockResponseHandler::new();
@@ -244,7 +248,11 @@ async fn handler_middleware_short_circuit_returns_refused() {
 async fn handler_after_request_called_on_short_circuit() {
     let chain = AuthorityChain::new(vec![]);
     let sc_mw = Arc::new(ShortCircuitMiddleware::new());
-    let handler = DoggyDnsHandler::new(vec![sc_mw.clone() as Arc<dyn Middleware>], Arc::new(chain));
+    let handler = DoggyDnsHandler::new(
+        vec![sc_mw.clone() as Arc<dyn Middleware>],
+        Arc::new(chain),
+        false,
+    );
 
     let request = make_dns_request("example.com.", RecordType::A);
     let mock = MockResponseHandler::new();
@@ -260,7 +268,7 @@ async fn handler_after_request_called_on_short_circuit() {
 async fn handler_no_middlewares_resolves_normally() {
     let authority = make_nacos_authority_with_hit();
     let chain = AuthorityChain::new(vec![("nacos".to_string(), Arc::new(authority))]);
-    let handler = DoggyDnsHandler::new(vec![], Arc::new(chain));
+    let handler = DoggyDnsHandler::new(vec![], Arc::new(chain), false);
 
     let request = make_dns_request("my-svc.DEFAULT_GROUP.public.nacos.local.", RecordType::A);
     let mock = MockResponseHandler::new();

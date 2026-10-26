@@ -87,3 +87,12 @@ server_addr = "127.0.0.1:8848"
 namespace = "public"
 group = "DOGGY_DNS"
 data_id = "doggy-dns.toml"
+
+# XDP fast path (optional, requires --features xdp build)
+# [xdp]
+# enabled = false
+# interface = ""              # Empty = auto-detect default route interface
+# cache_size = 65536          # BPF LRU hash map max entries
+# negative_ttl = 30           # NXDomain cache TTL in seconds
+# attach_mode = "auto"        # "auto" or "manual"
+# pin_path = "/sys/fs/bpf/doggy-dns/dns_cache"

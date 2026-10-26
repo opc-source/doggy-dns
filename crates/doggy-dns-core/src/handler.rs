@@ -2,6 +2,8 @@ use async_trait::async_trait;
 use doggy_dns_plugin::authority_chain::AuthorityChain;
 use doggy_dns_plugin::{Middleware, MiddlewareAction, RequestOutcome};
 use hickory_proto::op::{Header, HeaderCounts, MessageType, Metadata, OpCode, ResponseCode};
+use hickory_proto::serialize::binary::BinEncoder;
+use hickory_server::net::xfer::Protocol;
 use hickory_server::server::{Request, RequestHandler, ResponseHandler, ResponseInfo};
 use hickory_server::zone_handler::{LookupControlFlow, MessageResponseBuilder};
 use std::sync::Arc;
@@ -11,16 +13,19 @@ use tracing::Instrument;
 pub struct DoggyDnsHandler {
     middlewares: Vec<Arc<dyn Middleware>>,
     authority_chain: Arc<AuthorityChain>,
+    xdp_enabled: bool,
 }
 
 impl DoggyDnsHandler {
     pub fn new(
         middlewares: Vec<Arc<dyn Middleware>>,
         authority_chain: Arc<AuthorityChain>,
+        xdp_enabled: bool,
     ) -> Self {
         Self {
             middlewares,
             authority_chain,
+            xdp_enabled,
         }
     }
 
@@ -72,11 +77,7 @@ impl RequestHandler for DoggyDnsHandler {
             // Run before_request on all middlewares
             for middleware in &self.middlewares {
                 if let MiddlewareAction::ShortCircuit = middleware.before_request(request).await {
-                    let outcome = RequestOutcome {
-                        response_code: ResponseCode::Refused,
-                        authority: None,
-                        answers: 0,
-                    };
+                    let outcome = RequestOutcome::error(ResponseCode::Refused);
                     self.finish(request, start, &span_for_body, &outcome).await;
                     tracing::warn!(
                         request_id = request_id,
@@ -92,11 +93,7 @@ impl RequestHandler for DoggyDnsHandler {
             let request_info = match request.request_info() {
                 Ok(info) => info,
                 Err(e) => {
-                    let outcome = RequestOutcome {
-                        response_code: ResponseCode::FormErr,
-                        authority: None,
-                        answers: 0,
-                    };
+                    let outcome = RequestOutcome::error(ResponseCode::FormErr);
                     self.finish(request, start, &span_for_body, &outcome).await;
                     tracing::warn!(
                         request_id = request_id,
@@ -152,16 +149,34 @@ impl RequestHandler for DoggyDnsHandler {
 
             let (response_info, outcome) = match resolve_result.outcome {
                 LookupControlFlow::Continue(Ok(lookup)) | LookupControlFlow::Break(Ok(lookup)) => {
-                    let builder = MessageResponseBuilder::from_message_request(request);
+                    let records: Vec<_> = lookup.iter().cloned().collect();
+                    let answer_count = records.len();
+
                     let mut metadata = Metadata::response_from_request(&request.metadata);
                     metadata.message_type = MessageType::Response;
                     metadata.op_code = OpCode::Query;
                     metadata.response_code = ResponseCode::NoError;
                     metadata.recursion_available = true;
 
-                    let records: Vec<_> = lookup.iter().cloned().collect();
-                    let answer_count = records.len();
-                    let response = builder.build(metadata, records.iter(), &[], &[], &[]);
+                    let resp_bytes = if self.xdp_enabled {
+                        serialize_for_xdp(request, |probe| {
+                            let b = MessageResponseBuilder::from_message_request(request);
+                            b.build(metadata, records.iter(), &[], &[], &[])
+                                .destructive_emit(probe)
+                                .is_ok()
+                        })
+                    } else {
+                        None
+                    };
+
+                    let min_ttl = if self.xdp_enabled {
+                        min_ttl_from_records(&records)
+                    } else {
+                        None
+                    };
+
+                    let send_builder = MessageResponseBuilder::from_message_request(request);
+                    let response = send_builder.build(metadata, records.iter(), &[], &[], &[]);
 
                     match response_handle.send_response(response).await {
                         Ok(info) => {
@@ -177,11 +192,12 @@ impl RequestHandler for DoggyDnsHandler {
                             );
                             (
                                 info,
-                                RequestOutcome {
-                                    response_code: ResponseCode::NoError,
-                                    authority: Some(handler_name.to_string()),
-                                    answers: answer_count,
-                                },
+                                RequestOutcome::success(
+                                    handler_name.to_string(),
+                                    answer_count,
+                                    resp_bytes,
+                                    min_ttl,
+                                ),
                             )
                         }
                         Err(e) => {
@@ -196,11 +212,10 @@ impl RequestHandler for DoggyDnsHandler {
                             (
                                 send_error(request, &mut response_handle, ResponseCode::ServFail)
                                     .await,
-                                RequestOutcome {
-                                    response_code: ResponseCode::ServFail,
-                                    authority: Some(handler_name.to_string()),
-                                    answers: 0,
-                                },
+                                RequestOutcome::authority_error(
+                                    ResponseCode::ServFail,
+                                    handler_name.to_string(),
+                                ),
                             )
                         }
                     }
@@ -217,14 +232,24 @@ impl RequestHandler for DoggyDnsHandler {
                     );
                     (
                         send_error(request, &mut response_handle, ResponseCode::ServFail).await,
-                        RequestOutcome {
-                            response_code: ResponseCode::ServFail,
-                            authority: Some(handler_name.to_string()),
-                            answers: 0,
-                        },
+                        RequestOutcome::authority_error(
+                            ResponseCode::ServFail,
+                            handler_name.to_string(),
+                        ),
                     )
                 }
                 LookupControlFlow::Skip => {
+                    let resp_bytes = if self.xdp_enabled {
+                        serialize_for_xdp(request, |probe| {
+                            let b = MessageResponseBuilder::from_message_request(request);
+                            b.error_msg(&request.metadata, ResponseCode::NXDomain)
+                                .destructive_emit(probe)
+                                .is_ok()
+                        })
+                    } else {
+                        None
+                    };
+
                     tracing::info!(
                         request_id = request_id,
                         query = %query_display,
@@ -234,11 +259,7 @@ impl RequestHandler for DoggyDnsHandler {
                     );
                     (
                         send_error(request, &mut response_handle, ResponseCode::NXDomain).await,
-                        RequestOutcome {
-                            response_code: ResponseCode::NXDomain,
-                            authority: None,
-                            answers: 0,
-                        },
+                        RequestOutcome::nxdomain(resp_bytes),
                     )
                 }
             };
@@ -272,6 +293,70 @@ fn record_outcome(span: &tracing::Span, outcome: &RequestOutcome, duration_ms: u
         "ERROR"
     };
     span.record("otel.status_code", status);
+}
+
+/// Maximum DNS response size (in bytes) that can be stored in the XDP cache.
+/// Must match `CacheValue::resp_data` length in doggy-dns-xdp and the eBPF program.
+const XDP_CACHE_MAX_SIZE: usize = 512;
+
+/// Serialize a DNS response to wire format for the XDP cache.
+///
+/// The caller supplies a closure that builds and emits the response into the
+/// provided [`BinEncoder`]. Returns `None` if the max message size exceeds
+/// [`XDP_CACHE_MAX_SIZE`] (those responses fall through to userspace) or if
+/// serialization fails.
+fn serialize_for_xdp(
+    request: &Request,
+    emit_fn: impl FnOnce(&mut BinEncoder<'_>) -> bool,
+) -> Option<Vec<u8>> {
+    let max_size = max_message_size(request.protocol(), request.edns.as_ref());
+    if max_size > XDP_CACHE_MAX_SIZE as u16 {
+        if let Ok(info) = request.request_info() {
+            tracing::warn!(
+                request_id = request.metadata.id,
+                query = %info.query.name(),
+                qtype = %info.query.query_type(),
+                protocol = ?info.protocol,
+                client = %info.src,
+                max_size = max_size,
+                limit = XDP_CACHE_MAX_SIZE,
+                "response max_size exceeds XDP cache capacity, skipping cache"
+            );
+        } else {
+            tracing::warn!(
+                request_id = request.metadata.id,
+                max_size = max_size,
+                limit = XDP_CACHE_MAX_SIZE,
+                "response max_size exceeds XDP cache capacity, skipping cache"
+            );
+        }
+        return None;
+    }
+
+    let mut bytes = Vec::with_capacity(XDP_CACHE_MAX_SIZE);
+    let mut encoder = BinEncoder::new(&mut bytes);
+    encoder.set_max_size(max_size);
+    if !emit_fn(&mut encoder) {
+        tracing::warn!("failed to serialize response for XDP cache");
+        return None;
+    }
+    Some(bytes)
+}
+
+/// Extract the minimum TTL from a slice of DNS records.
+fn min_ttl_from_records(records: &[hickory_proto::rr::Record]) -> Option<u32> {
+    records.iter().map(|r| r.ttl).min()
+}
+
+/// Compute the max message size for the BinEncoder, matching hickory-server's internal logic.
+fn max_message_size(protocol: Protocol, edns: Option<&hickory_proto::op::Edns>) -> u16 {
+    match protocol {
+        Protocol::Udp => match edns {
+            Some(edns) => edns.max_payload(),
+            None => 512,
+        },
+        _ => u16::MAX,
+    }
 }
 
 async fn send_error<R: ResponseHandler>(

@@ -1,0 +1,138 @@
+name: XDP CI
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'crates/doggy-dns-xdp/**'
+      - 'xdp/**'
+      - 'crates/doggy-dns-plugin/**'
+      - 'crates/doggy-dns-core/**'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'crates/doggy-dns-xdp/**'
+      - 'xdp/**'
+      - 'crates/doggy-dns-plugin/**'
+      - 'crates/doggy-dns-core/**'
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  xdp-integration-test:
+    name: XDP Integration Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install bpf-linker
+        run: |
+          curl -sSL https://github.com/aya-rs/bpf-linker/releases/download/v0.12.0/bpf-linker-x86_64-unknown-linux-musl.tar.zst | tar -xI zstd -C ~/.cargo/bin/
+      - name: Build eBPF program
+        run: cd xdp && cargo build -Z build-std=core,alloc --release --target bpfel-unknown-none
+      - name: Run XDP integration tests
+        run: sudo -E env "PATH=$PATH" cargo test -p doggy-dns-xdp --test xdp_integration_test -- --ignored --nocapture
+        env:
+          RUST_LOG: debug
+      - name: Cleanup
+        if: always()
+        run: sudo ip netns delete doggy-dns-test || true
+
+  xdp-component-bench:
+    name: XDP Component Benchmarks
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install bpf-linker
+        run: |
+          curl -sSL https://github.com/aya-rs/bpf-linker/releases/download/v0.12.0/bpf-linker-x86_64-unknown-linux-musl.tar.zst | tar -xI zstd -C ~/.cargo/bin/
+      - name: Build eBPF program
+        run: cd xdp && cargo build -Z build-std=core,alloc --release --target bpfel-unknown-none
+      - name: Run benchmarks (PR)
+        run: |
+          sudo -E env "PATH=$PATH" cargo bench -p doggy-dns-xdp --bench xdp_component_bench -- --save-baseline pr | tee /tmp/bench-pr.txt
+      - name: Checkout base branch
+        run: git checkout origin/main
+      - name: Run benchmarks (base)
+        run: |
+          sudo -E env "PATH=$PATH" cargo bench -p doggy-dns-xdp --bench xdp_component_bench -- --save-baseline base | tee /tmp/bench-base.txt
+      - name: Post comparison comment
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const pr = fs.readFileSync('/tmp/bench-pr.txt', 'utf8');
+            const base = fs.readFileSync('/tmp/bench-base.txt', 'utf8');
+            const body = `## XDP Component Benchmark Comparison\n\n### PR Branch\n\`\`\`\n${pr}\n\`\`\`\n\n### Base Branch\n\`\`\`\n${base}\n\`\`\``;
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body
+            });
+
+  xdp-stress-test:
+    name: XDP Stress Test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install dependencies
+        run: |
+          curl -sSL https://github.com/aya-rs/bpf-linker/releases/download/v0.12.0/bpf-linker-x86_64-unknown-linux-musl.tar.zst | tar -xI zstd -C ~/.cargo/bin/
+          sudo apt-get update && sudo apt-get install -y dnsperf
+      - name: Build eBPF program
+        run: cd xdp && cargo build -Z build-std=core,alloc --release --target bpfel-unknown-none
+      - name: Build doggy-dns (with XDP)
+        run: cargo build --features xdp --release
+      - name: Generate query file
+        run: |
+          for i in $(seq 1 1000); do
+            echo "svc-${i}.nacos.default.doggy.test A"
+          done > /tmp/queries.txt
+      - name: Stress test (userspace-only)
+        run: |
+          ./target/release/doggy-dns config/doggy-dns-stress.toml &
+          echo $! > /tmp/server.pid
+          sleep 2
+          dnsperf -s 127.0.0.1 -p 5353 -d /tmp/queries.txt -n 1 -l 5 > /dev/null 2>&1 || true
+          dnsperf -s 127.0.0.1 -p 5353 -d /tmp/queries.txt -n 10 -T 4 -l 30 > /tmp/userspace-result.txt 2>&1 || true
+          kill $(cat /tmp/server.pid)
+      - name: Stress test (XDP)
+        continue-on-error: true
+        run: |
+          sudo -E ./target/release/doggy-dns config/doggy-dns-stress-xdp.toml &
+          echo $! | sudo tee /tmp/server.pid
+          sleep 2
+          sudo dnsperf -s 127.0.0.1 -p 5353 -d /tmp/queries.txt -n 1 -l 5 > /dev/null 2>&1 || true
+          sudo dnsperf -s 127.0.0.1 -p 5353 -d /tmp/queries.txt -n 10 -T 4 -l 30 > /tmp/xdp-result.txt 2>&1 || true
+          sudo kill $(cat /tmp/server.pid) || true
+        env:
+          XDP_INTERFACE: lo
+      - name: Generate comparison report
+        run: python3 scripts/xdp_stress_report.py /tmp/userspace-result.txt /tmp/xdp-result.txt > /tmp/stress-report.md || echo "Stress report generation skipped (dnsperf failed)" > /tmp/stress-report.md
+      - name: Post PR comment
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const report = fs.readFileSync('/tmp/stress-report.md', 'utf8');
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: report
+            });

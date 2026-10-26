@@ -5,6 +5,7 @@ members = [
     "crates/doggy-dns-plugin",
     "crates/doggy-dns-nacos",
     "crates/doggy-dns-observability",
+    "crates/doggy-dns-xdp",
 ]
 
 [package]
@@ -14,11 +15,16 @@ edition = "2024"
 license = "Apache-2.0"
 description = "A Rust-based service discovery DNS server built on hickory-dns"
 
+[features]
+xdp = ["dep:doggy-dns-xdp"]
+default = []
+
 [dependencies]
 doggy-dns-core = { path = "crates/doggy-dns-core" }
 doggy-dns-plugin = { path = "crates/doggy-dns-plugin" }
 doggy-dns-nacos = { path = "crates/doggy-dns-nacos" }
 doggy-dns-observability = { path = "crates/doggy-dns-observability" }
+doggy-dns-xdp = { path = "crates/doggy-dns-xdp", optional = true }
 hickory-server = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
@@ -58,3 +64,7 @@ pprof = "0.15"
 reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
 prost = "0.14"
 base64 = "0.23"
+
+# XDP / eBPF
+aya = "0.14"
+aya-log = "0.3"

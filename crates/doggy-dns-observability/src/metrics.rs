@@ -182,11 +182,7 @@ mod tests {
     #[test]
     fn attributes_contain_low_cardinality_dns_dimensions() {
         let request = make_request();
-        let outcome = RequestOutcome {
-            response_code: ResponseCode::NoError,
-            authority: Some("native".to_string()),
-            answers: 2,
-        };
+        let outcome = RequestOutcome::success("native".to_string(), 2, None, None);
 
         let attributes = outcome_attributes(&request, &outcome);
         assert_eq!(attribute(&attributes, "dns.question.type"), Some("AAAA"));
@@ -204,11 +200,7 @@ mod tests {
     #[test]
     fn response_codes_are_upper_case() {
         let request = make_request();
-        let outcome = RequestOutcome {
-            response_code: ResponseCode::ServFail,
-            authority: None,
-            answers: 0,
-        };
+        let outcome = RequestOutcome::error(ResponseCode::ServFail);
         let attributes = outcome_attributes(&request, &outcome);
         assert_eq!(
             attribute(&attributes, "dns.response.code"),
@@ -220,11 +212,7 @@ mod tests {
     #[test]
     fn unparseable_requests_still_produce_attributes() {
         let request = make_request();
-        let outcome = RequestOutcome {
-            response_code: ResponseCode::FormErr,
-            authority: None,
-            answers: 0,
-        };
+        let outcome = RequestOutcome::error(ResponseCode::FormErr);
         let attributes = outcome_attributes(&request, &outcome);
         assert_eq!(attribute(&attributes, "dns.response.code"), Some("FORMERR"));
     }

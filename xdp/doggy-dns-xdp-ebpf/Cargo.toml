@@ -1,0 +1,23 @@
+[package]
+name = "doggy-dns-xdp-ebpf"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+aya-ebpf = "0.2"
+aya-log-ebpf = "0.2"
+
+[[bin]]
+name = "doggy-dns-xdp-ebpf"
+path = "src/main.rs"
+
+[profile.dev]
+opt-level = 2
+overflow-checks = false
+debug-assertions = false
+panic = "abort"
+
+[profile.release]
+lto = true
+opt-level = "s"
+panic = "abort"

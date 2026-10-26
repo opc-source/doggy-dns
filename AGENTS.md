@@ -19,6 +19,11 @@ cargo bench --bench nacos_bench                # Run a single benchmark file
 cargo bench --bench handler_bench -- handler_pipeline_nacos_hit  # Filter by name
 cargo tarpaulin --config tarpaulin.toml        # Coverage (XML + HTML reports)
 cargo tarpaulin --workspace --out Stdout       # Coverage quick summary
+cargo build --features xdp                 # Build with XDP support (requires Linux + bpf-linker)
+cd xdp && cargo build --target bpfel-unknown-none --release  # Build eBPF program
+cargo test -p doggy-dns-xdp                # Test XDP userspace crate
+cargo bench -p doggy-dns-xdp               # Benchmark XDP components
+sudo -E cargo test -p doggy-dns-xdp --test xdp_integration_test -- --ignored  # XDP integration tests (requires root)
 ```
 
 ## Architecture
@@ -34,7 +39,13 @@ doggy-dns (binary)
   ├── doggy-dns-observability   (OTLP logs/metrics/traces/profiles)
   │     ├── doggy-dns-core
   │     └── doggy-dns-plugin
-  └── doggy-dns-plugin          (traits, authority chain, built-in authorities — leaf crate)
+  ├── doggy-dns-plugin          (traits, authority chain, built-in authorities — leaf crate)
+  └── doggy-dns-xdp (optional, feature = "xdp")
+        ├── doggy-dns-core
+        └── doggy-dns-plugin
+
+xdp/
+└── doggy-dns-xdp-ebpf  (eBPF program, separate workspace, target = bpfel-unknown-none)
 ```
 
 ### Request Processing Pipeline

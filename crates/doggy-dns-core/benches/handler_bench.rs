@@ -74,7 +74,7 @@ fn bench_handler_pipeline_nacos_hit(c: &mut Criterion) {
         "nacos".to_string(),
         Arc::new(authority),
     )]));
-    let handler = DoggyDnsHandler::new(vec![], chain);
+    let handler = DoggyDnsHandler::new(vec![], chain, false);
     let request = make_request("my-svc.DEFAULT_GROUP.public.nacos.local.");
 
     let mut group = c.benchmark_group("handler_pipeline_nacos_hit");
@@ -99,7 +99,7 @@ fn bench_handler_pipeline_nacos_hit(c: &mut Criterion) {
 
 fn bench_handler_pipeline_nxdomain(c: &mut Criterion) {
     let chain = Arc::new(AuthorityChain::new(vec![]));
-    let handler = DoggyDnsHandler::new(vec![], chain);
+    let handler = DoggyDnsHandler::new(vec![], chain, false);
     let request = make_request("unknown.example.com.");
 
     let mut group = c.benchmark_group("handler_pipeline_nxdomain");

@@ -1,0 +1,15 @@
+[server]
+listen_addr = "127.0.0.1"
+port = 5353
+worker_threads = 4
+
+[xdp]
+enabled = true
+interface = "lo"
+cache_size = 65536
+negative_ttl = 300
+
+[[plugins]]
+kind = "forward"
+enabled = true
+upstream = ["8.8.8.8:53"]

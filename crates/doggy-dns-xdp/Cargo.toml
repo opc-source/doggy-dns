@@ -1,0 +1,29 @@
+[package]
+name = "doggy-dns-xdp"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+doggy-dns-plugin = { path = "../doggy-dns-plugin" }
+doggy-dns-core = { path = "../doggy-dns-core" }
+tokio = { workspace = true }
+tracing = { workspace = true }
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+hickory-proto = { workspace = true }
+hickory-server = { workspace = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+aya = { workspace = true }
+aya-log = { workspace = true }
+libc = "0.2"
+
+[dev-dependencies]
+criterion = { workspace = true }
+
+[[bench]]
+name = "xdp_component_bench"
+harness = false
+
+[build-dependencies]
+aya-build = "0.2"
