@@ -10,6 +10,6 @@ cache_size = 65536
 negative_ttl = 300
 
 [[plugins]]
-kind = "Forward"
+kind = "forward"
 enabled = true
 upstream = ["8.8.8.8:53"]

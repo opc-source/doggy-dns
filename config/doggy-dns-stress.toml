@@ -7,6 +7,6 @@ worker_threads = 4
 enabled = false
 
 [[plugins]]
-kind = "Forward"
+kind = "forward"
 enabled = true
 upstream = ["8.8.8.8:53"]
