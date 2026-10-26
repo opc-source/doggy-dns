@@ -5,6 +5,7 @@ use rmcp::{
     model::{CallToolResult, ContentBlock, ErrorData, ServerCapabilities, ServerConfig},
     tool, tool_handler, tool_router,
 };
+use serde_json::Value;
 
 use crate::redact::redact_toml;
 use crate::state::McpState;
@@ -40,19 +41,36 @@ impl DoggyMcpServer {
     pub async fn get_status(&self) -> Result<CallToolResult, ErrorData> {
         let now = chrono::Utc::now();
         let uptime = (now - self.state.started_at).num_seconds().max(0) as u64;
-        let json = serde_json::json!({
-            "instanceId": self.state.instance_id,
-            "host": self.state.host,
-            "version": self.state.version,
-            "pid": self.state.pid,
-            "uptimeSeconds": uptime,
-            "startedAt": self.state.started_at.to_rfc3339(),
-            "listenAddr": self.state.listen_addr,
-            "protocols": self.state.protocols,
-            "status": "running",
-        });
+        let mut map = serde_json::Map::new();
+        map.insert(
+            "instanceId".into(),
+            Value::String(self.state.instance_id.clone()),
+        );
+        map.insert("host".into(), Value::String(self.state.host.clone()));
+        map.insert("version".into(), Value::String(self.state.version.clone()));
+        map.insert("pid".into(), Value::from(self.state.pid));
+        map.insert("uptimeSeconds".into(), Value::from(uptime));
+        map.insert(
+            "startedAt".into(),
+            Value::String(self.state.started_at.to_rfc3339()),
+        );
+        map.insert(
+            "listenAddr".into(),
+            Value::String(self.state.listen_addr.clone()),
+        );
+        map.insert(
+            "protocols".into(),
+            Value::Array(
+                self.state
+                    .protocols
+                    .iter()
+                    .map(|p| Value::String(p.clone()))
+                    .collect(),
+            ),
+        );
+        map.insert("status".into(), Value::String("running".into()));
         Ok(CallToolResult::success(vec![ContentBlock::text(
-            json.to_string(),
+            Value::Object(map).to_string(),
         )]))
     }
 
@@ -68,11 +86,16 @@ impl DoggyMcpServer {
         )
     )]
     pub async fn list_plugins(&self) -> Result<CallToolResult, ErrorData> {
-        let json = serde_json::json!({
-            "plugins": self.state.plugins,
-        });
+        let plugins: Vec<Value> = self
+            .state
+            .plugins
+            .iter()
+            .map(|p| serde_json::to_value(p).expect("PluginSnapshot is serializable"))
+            .collect();
+        let mut map = serde_json::Map::new();
+        map.insert("plugins".into(), Value::Array(plugins));
         Ok(CallToolResult::success(vec![ContentBlock::text(
-            json.to_string(),
+            Value::Object(map).to_string(),
         )]))
     }
 
@@ -91,42 +114,45 @@ impl DoggyMcpServer {
         let content = match std::fs::read_to_string(&self.state.config_path) {
             Ok(c) => c,
             Err(e) => {
-                let json = serde_json::json!({
-                    "error": {
-                        "code": "config_unreadable",
-                        "message": format!("failed to read config file: {e}"),
-                    }
-                });
                 return Ok(CallToolResult::success(vec![ContentBlock::text(
-                    json.to_string(),
+                    error_json(
+                        "config_unreadable",
+                        &format!("failed to read config file: {e}"),
+                    ),
                 )]));
             }
         };
 
         match redact_toml(&content) {
             Ok((redacted_content, redacted_keys)) => {
-                let json = serde_json::json!({
-                    "format": "toml",
-                    "content": redacted_content,
-                    "redactedKeys": redacted_keys,
-                });
+                let mut map = serde_json::Map::new();
+                map.insert("format".into(), Value::String("toml".into()));
+                map.insert("content".into(), Value::String(redacted_content));
+                map.insert(
+                    "redactedKeys".into(),
+                    Value::Array(redacted_keys.into_iter().map(Value::String).collect()),
+                );
                 Ok(CallToolResult::success(vec![ContentBlock::text(
-                    json.to_string(),
+                    Value::Object(map).to_string(),
                 )]))
             }
-            Err(e) => {
-                let json = serde_json::json!({
-                    "error": {
-                        "code": "config_parse_error",
-                        "message": format!("failed to parse config: {e}"),
-                    }
-                });
-                Ok(CallToolResult::success(vec![ContentBlock::text(
-                    json.to_string(),
-                )]))
-            }
+            Err(e) => Ok(CallToolResult::success(vec![ContentBlock::text(
+                error_json(
+                    "config_parse_error",
+                    &format!("failed to parse config: {e}"),
+                ),
+            )])),
         }
     }
+}
+
+fn error_json(code: &str, message: &str) -> String {
+    let mut error = serde_json::Map::new();
+    error.insert("code".into(), Value::String(code.into()));
+    error.insert("message".into(), Value::String(message.into()));
+    let mut map = serde_json::Map::new();
+    map.insert("error".into(), Value::Object(error));
+    Value::Object(map).to_string()
 }
 
 #[tool_handler(name = "doggy-dns-mcp", version = "0.1.0")]

@@ -13,9 +13,9 @@ use rmcp::transport::streamable_http_server::{
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 
+use crate::McpServerConfig;
 use crate::server::DoggyMcpServer;
 use crate::state::McpState;
-use crate::McpServerConfig;
 
 /// Handle to a running MCP server.
 #[derive(Debug)]
@@ -36,10 +36,7 @@ impl McpServerHandle {
 ///
 /// Returns a handle that can be used to shut down the server.
 /// If the port is already in use, returns an error.
-pub async fn start(
-    state: Arc<McpState>,
-    cfg: McpServerConfig,
-) -> anyhow::Result<McpServerHandle> {
+pub async fn start(state: Arc<McpState>, cfg: McpServerConfig) -> anyhow::Result<McpServerHandle> {
     let cancel = CancellationToken::new();
     let listener = TcpListener::bind(format!("{}:{}", cfg.listen_addr, cfg.port)).await?;
     let addr = listener.local_addr()?;
@@ -89,10 +86,8 @@ pub fn build_router(
                         .and_then(|v| v.to_str().ok());
                     match auth {
                         Some(value) if value == expected => next.run(req).await,
-                        _ => {
-                            (StatusCode::UNAUTHORIZED, r#"{"error":"unauthorized"}"#)
-                                .into_response()
-                        }
+                        _ => (StatusCode::UNAUTHORIZED, r#"{"error":"unauthorized"}"#)
+                            .into_response(),
                     }
                 }
             },

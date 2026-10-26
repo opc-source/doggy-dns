@@ -113,10 +113,7 @@ async fn lists_three_read_only_tools_and_calls_status() {
     let tools = json["result"]["tools"].as_array().unwrap();
     assert_eq!(tools.len(), 3);
 
-    let names: Vec<&str> = tools
-        .iter()
-        .map(|t| t["name"].as_str().unwrap())
-        .collect();
+    let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
     assert!(names.contains(&"get_status"));
     assert!(names.contains(&"list_plugins"));
     assert!(names.contains(&"get_config"));

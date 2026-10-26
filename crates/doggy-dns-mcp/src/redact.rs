@@ -23,11 +23,7 @@ fn is_sensitive(key: &str) -> bool {
     SENSITIVE_KEYS.iter().any(|s| lower == *s)
 }
 
-fn redact_value(
-    value: &mut toml::Value,
-    path: &str,
-    redacted: &mut Vec<String>,
-) {
+fn redact_value(value: &mut toml::Value, path: &str, redacted: &mut Vec<String>) {
     match value {
         toml::Value::Table(table) => {
             let keys: Vec<String> = table.keys().cloned().collect();

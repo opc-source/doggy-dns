@@ -336,6 +336,12 @@ fn protocols(config: &DoggyDnsConfig) -> Vec<String> {
 }
 
 fn plugin_snapshots(config: &DoggyDnsConfig) -> Vec<doggy_dns_mcp::PluginSnapshot> {
+    use serde_json::Value;
+
+    fn str_val(s: &str) -> Value {
+        Value::String(s.to_string())
+    }
+
     config
         .plugins
         .iter()
@@ -343,24 +349,49 @@ fn plugin_snapshots(config: &DoggyDnsConfig) -> Vec<doggy_dns_mcp::PluginSnapsho
         .map(|(i, p)| {
             let kind = format!("{:?}", p.kind).to_ascii_lowercase();
             let details = match p.kind {
-                PluginKind::Nacos => serde_json::json!({
-                    "serverAddr": p.server_addr.as_deref().unwrap_or("127.0.0.1:8848"),
-                    "namespace": p.namespace.as_deref().unwrap_or("public"),
-                    "group": p.group.as_deref().unwrap_or("DEFAULT_GROUP"),
-                    "dnsZone": p.dns_zone.as_deref().unwrap_or("nacos.local"),
-                    "ttl": p.ttl,
-                }),
-                PluginKind::Native => serde_json::json!({
-                    "cacheSize": p.cache_size,
-                    "minTtl": p.min_ttl,
-                    "maxTtl": p.max_ttl,
-                }),
-                PluginKind::Forward => serde_json::json!({
-                    "upstream": p.upstream.as_deref().unwrap_or(&[]),
-                    "cacheSize": p.cache_size,
-                    "minTtl": p.min_ttl,
-                    "maxTtl": p.max_ttl,
-                }),
+                PluginKind::Nacos => {
+                    let mut map = serde_json::Map::new();
+                    map.insert(
+                        "serverAddr".into(),
+                        str_val(p.server_addr.as_deref().unwrap_or("127.0.0.1:8848")),
+                    );
+                    map.insert(
+                        "namespace".into(),
+                        str_val(p.namespace.as_deref().unwrap_or("public")),
+                    );
+                    map.insert(
+                        "group".into(),
+                        str_val(p.group.as_deref().unwrap_or("DEFAULT_GROUP")),
+                    );
+                    map.insert(
+                        "dnsZone".into(),
+                        str_val(p.dns_zone.as_deref().unwrap_or("nacos.local")),
+                    );
+                    map.insert("ttl".into(), Value::from(p.ttl));
+                    Value::Object(map)
+                }
+                PluginKind::Native => {
+                    let mut map = serde_json::Map::new();
+                    map.insert("cacheSize".into(), Value::from(p.cache_size));
+                    map.insert("minTtl".into(), Value::from(p.min_ttl));
+                    map.insert("maxTtl".into(), Value::from(p.max_ttl));
+                    Value::Object(map)
+                }
+                PluginKind::Forward => {
+                    let mut map = serde_json::Map::new();
+                    let upstream: Vec<Value> = p
+                        .upstream
+                        .as_deref()
+                        .unwrap_or(&[])
+                        .iter()
+                        .map(|s| str_val(s))
+                        .collect();
+                    map.insert("upstream".into(), Value::Array(upstream));
+                    map.insert("cacheSize".into(), Value::from(p.cache_size));
+                    map.insert("minTtl".into(), Value::from(p.min_ttl));
+                    map.insert("maxTtl".into(), Value::from(p.max_ttl));
+                    Value::Object(map)
+                }
             };
             doggy_dns_mcp::PluginSnapshot {
                 order: i,

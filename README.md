@@ -36,14 +36,16 @@ doggy-dns/                    # Binary entrypoint
     doggy-dns-core/           # Server runtime, config, handler, middleware
     doggy-dns-nacos/          # Nacos service discovery backend
     doggy-dns-observability/  # OTLP logs/metrics/traces/profiles export
+    doggy-dns-mcp/            # Read-only MCP server for console introspection
 ```
 
 **Dependency graph:**
 
-- `doggy-dns` (binary) -> `doggy-dns-core`, `doggy-dns-plugin`, `doggy-dns-nacos`, `doggy-dns-observability`
+- `doggy-dns` (binary) -> `doggy-dns-core`, `doggy-dns-plugin`, `doggy-dns-nacos`, `doggy-dns-observability`, `doggy-dns-mcp`
 - `doggy-dns-core` -> `doggy-dns-plugin`
 - `doggy-dns-nacos` -> `doggy-dns-plugin`
 - `doggy-dns-observability` -> `doggy-dns-core`, `doggy-dns-plugin`
+- `doggy-dns-mcp` is standalone (no internal deps)
 - `doggy-dns-plugin` is the leaf crate (no internal deps)
 
 ### Request Flow
@@ -149,6 +151,22 @@ enabled = false
 
 The base endpoint is `<host>/api/<org>` for OpenObserve and `http://host:4318`
 for Collector/Vector; doggy-dns appends `/v1/<signal>`.
+
+### MCP Server (Read-Only Introspection)
+
+Optional MCP (Model Context Protocol) server for AI-powered management consoles.
+Disabled by default; when enabled, serves read-only tools over Streamable HTTP at `/mcp`.
+
+```toml
+[mcp]
+enabled = true
+listen_addr = "127.0.0.1"
+port = 19090
+token = "change-me"                    # optional Bearer auth
+```
+
+Three read-only tools: `get_status` (instance identity/uptime), `list_plugins` (authority chain), `get_config` (TOML with secrets redacted).
+See [crates/doggy-dns-mcp/README.md](crates/doggy-dns-mcp/README.md) for the full contract.
 
 ## Configuration
 
