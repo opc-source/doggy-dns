@@ -36,7 +36,7 @@ impl NacosConfigWatcher {
         let props = ClientProps::new()
             .server_addr(server_addr)
             .namespace(namespace)
-            .app_name("doggy-dns");
+            .app_name(doggy_dns_plugin::APP_NAME);
 
         let config_service = ConfigServiceBuilder::new(props).build().await?;
 

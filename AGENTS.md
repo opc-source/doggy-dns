@@ -27,11 +27,14 @@ cargo tarpaulin --workspace --out Stdout       # Coverage quick summary
 
 ```
 doggy-dns (binary)
-  ├── doggy-dns-core     (server, config, handler, middleware)
+  ├── doggy-dns-core            (server, config, handler, middleware)
   │     └── doggy-dns-plugin
-  ├── doggy-dns-nacos    (Nacos service discovery backend)
+  ├── doggy-dns-nacos           (Nacos service discovery backend)
   │     └── doggy-dns-plugin
-  └── doggy-dns-plugin   (traits, authority chain, built-in authorities — leaf crate)
+  ├── doggy-dns-observability   (OTLP logs/metrics/traces/profiles)
+  │     ├── doggy-dns-core
+  │     └── doggy-dns-plugin
+  └── doggy-dns-plugin          (traits, authority chain, built-in authorities — leaf crate)
 ```
 
 ### Request Processing Pipeline
@@ -40,7 +43,7 @@ DNS query → **Middleware chain** (before_request) → **AuthorityChain** (sequ
 
 **AuthorityChain** iterates `Vec<(String, Arc<dyn ZoneHandler>)>` in order. Each handler returns `Skip` (try next), `Continue(Ok/Err)`, or `Break(Ok/Err)` (stop). Returns a `ResolveResult` with `outcome` + `handler_name`. The handler maps outcomes to DNS response codes: `NoError`, `ServFail`, or `NXDomain` (all skipped).
 
-**Middleware** trait (`plugin.rs`): `before_request()` returns `Continue` or `ShortCircuit`; `after_request()` receives elapsed time.
+**Middleware** trait (`plugin.rs`): `before_request()` returns `Continue` or `ShortCircuit`; `after_request()` receives elapsed time plus the final outcome (response code, authority, answer count).
 
 ### Authority Plugin Types
 
@@ -86,7 +89,7 @@ Cache updates replace the entire Vec for a key (never mutate in place). Config s
 
 TOML config at `config/doggy-dns.toml`. Key structs in `core/config.rs`: `DoggyDnsConfig`, `ServerConfig`, `PluginConfig` (flat — fields per kind), `PluginKind` enum (`Nacos`, `Native`, `Forward`).
 
-`validate_config()` checks: worker_threads > 0, TLS/HTTPS cert files exist when enabled, remote_config fields non-empty when enabled.
+`validate_config()` checks: worker_threads > 0, TLS/HTTPS cert files exist when enabled, remote_config fields non-empty when enabled, and observability ranges/URLs (observability enabled, signal ranges, profile duration/frequency, log level, endpoint format).
 
 ## Test Conventions
 

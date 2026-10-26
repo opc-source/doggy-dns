@@ -10,10 +10,12 @@ use hickory_server::zone_handler::{
 };
 use std::net::SocketAddr;
 use std::time::Duration;
+use tracing::Instrument;
 
 pub struct ForwardAuthority {
     resolver: Resolver<TokioRuntimeProvider>,
     origin: LowerName,
+    upstream_count: usize,
 }
 
 impl ForwardAuthority {
@@ -23,6 +25,7 @@ impl ForwardAuthority {
         min_ttl: Duration,
         max_ttl: Duration,
     ) -> Result<Self> {
+        let upstream_count = upstream.len();
         let name_servers: Vec<NameServerConfig> = upstream
             .iter()
             .map(|addr| {
@@ -46,7 +49,11 @@ impl ForwardAuthority {
             .build()?;
 
         let origin = LowerName::from(Name::root());
-        Ok(Self { resolver, origin })
+        Ok(Self {
+            resolver,
+            origin,
+            upstream_count,
+        })
     }
 }
 
@@ -72,15 +79,41 @@ impl ZoneHandler for ForwardAuthority {
         _lookup_options: LookupOptions,
     ) -> LookupControlFlow<AuthLookup> {
         let name_str = name.to_string();
-        match self.resolver.lookup(&name_str, rtype).await {
+        let span = tracing::info_span!(
+            "dns.forward",
+            otel.kind = "client",
+            "dns.question.name" = %name_str,
+            "dns.question.type" = tracing::field::display(rtype),
+            "dns.upstream.count" = self.upstream_count as u64,
+            "dns.answers" = tracing::field::Empty,
+            otel.status_code = tracing::field::Empty,
+        );
+        match self
+            .resolver
+            .lookup(&name_str, rtype)
+            .instrument(span.clone())
+            .await
+        {
             Ok(lookup) => {
-                if lookup.answers().is_empty() {
+                let answers = lookup.answers().len();
+                span.record("dns.answers", tracing::field::display(answers));
+                span.record("otel.status_code", "OK");
+                if answers == 0 {
                     LookupControlFlow::Skip
                 } else {
                     LookupControlFlow::Continue(Ok(AuthLookup::Resolved(lookup)))
                 }
             }
-            Err(_) => LookupControlFlow::Skip,
+            Err(e) => {
+                span.record("otel.status_code", "ERROR");
+                tracing::error!(
+                    query = %name_str,
+                    qtype = ?rtype,
+                    error = %e,
+                    "upstream forward lookup failed"
+                );
+                LookupControlFlow::Skip
+            }
         }
     }
 

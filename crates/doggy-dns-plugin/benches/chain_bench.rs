@@ -1,3 +1,5 @@
+#![allow(clippy::disallowed_methods)]
+
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use dashmap::DashMap;
 use doggy_dns_nacos::authority::NacosAuthority;

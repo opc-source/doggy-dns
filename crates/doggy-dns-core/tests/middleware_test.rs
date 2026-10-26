@@ -1,7 +1,6 @@
 #![allow(clippy::disallowed_methods)]
 
-use doggy_dns_core::middleware::metrics::MetricsMiddleware;
-use doggy_dns_plugin::{Middleware, MiddlewareAction};
+use doggy_dns_plugin::{Middleware, MiddlewareAction, RequestOutcome};
 use hickory_proto::op::{Message, MessageType, OpCode, Query};
 use hickory_proto::rr::{Name, RecordType};
 use hickory_server::net::xfer::Protocol;
@@ -23,38 +22,6 @@ fn make_dns_request(domain: &str, rtype: RecordType) -> Request {
     Request::from_bytes(bytes, src, Protocol::Udp).unwrap()
 }
 
-#[test]
-fn metrics_counter_starts_at_zero() {
-    let metrics = MetricsMiddleware::new();
-    assert_eq!(metrics.total_queries(), 0);
-}
-
-#[tokio::test]
-async fn metrics_before_request_increments_counter() {
-    let metrics = MetricsMiddleware::new();
-    let request = make_dns_request("example.com.", RecordType::A);
-    metrics.before_request(&request).await;
-    assert_eq!(metrics.total_queries(), 1);
-}
-
-#[tokio::test]
-async fn metrics_multiple_calls_increment_correctly() {
-    let metrics = MetricsMiddleware::new();
-    let request = make_dns_request("example.com.", RecordType::A);
-    for _ in 0..5 {
-        metrics.before_request(&request).await;
-    }
-    assert_eq!(metrics.total_queries(), 5);
-}
-
-#[tokio::test]
-async fn metrics_before_request_returns_continue() {
-    let metrics = MetricsMiddleware::new();
-    let request = make_dns_request("example.com.", RecordType::A);
-    let action = metrics.before_request(&request).await;
-    assert!(matches!(action, MiddlewareAction::Continue));
-}
-
 #[tokio::test]
 async fn logging_before_request_returns_continue() {
     use doggy_dns_core::middleware::logging::LoggingMiddleware;
@@ -69,5 +36,10 @@ async fn logging_after_request_completes_without_panic() {
     use doggy_dns_core::middleware::logging::LoggingMiddleware;
     let mw = LoggingMiddleware;
     let request = make_dns_request("example.com.", RecordType::A);
-    mw.after_request(&request, 42).await;
+    let outcome = RequestOutcome {
+        response_code: hickory_proto::op::ResponseCode::NoError,
+        authority: Some("native".to_string()),
+        answers: 1,
+    };
+    mw.after_request(&request, 42, &outcome).await;
 }

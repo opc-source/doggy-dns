@@ -19,7 +19,43 @@ worker_threads = 1    # defaults to 1 (runs as DaemonSet, one per node)
 
 [middleware]
 logging = true
-metrics = false
+
+# OTLP observability. Disabled by default.
+# OpenObserve is the default backend; OTel Collector and Vector work by
+# changing `endpoint` (both use http://host:4318 + /v1/<signal>).
+[observability]
+enabled = false
+backend = "openobserve"              # openobserve | otel-collector | vector | custom
+endpoint = "http://127.0.0.1:5080/api/default"
+# protocol = "http/protobuf"
+service_name = "doggy-dns"
+environment = "prod"
+timeout_secs = 10
+headers = { "stream-name" = "doggy-dns" }
+basic_auth = { username = "root@example.com", password = "${OPENOBSERVE_PASSWORD}" }
+# resource_attributes = { "service.namespace" = "dns" }
+
+[observability.logs]
+enabled = true
+level = "warn"                       # OTLP log level; stdout uses RUST_LOG
+stdout = true
+
+[observability.metrics]
+enabled = true
+interval_secs = 15
+
+[observability.traces]
+enabled = true
+sample_ratio = 0.05
+max_queue_size = 8192
+max_export_batch_size = 512
+scheduled_delay_ms = 2000
+
+[observability.profiles]
+enabled = false                       # CPU profiles only; Linux/macOS
+interval_secs = 60
+duration_secs = 10
+frequency_hz = 99
 
 [[plugins]]
 kind = "nacos"
