@@ -55,6 +55,8 @@ async fn exports_logs_metrics_and_traces_with_openobserve_headers() {
                 response_code: ResponseCode::NoError,
                 authority: Some("native".to_string()),
                 answers: 1,
+                response_bytes: None,
+                min_answer_ttl: None,
             },
         )
         .await;

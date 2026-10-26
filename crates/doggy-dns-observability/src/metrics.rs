@@ -186,6 +186,8 @@ mod tests {
             response_code: ResponseCode::NoError,
             authority: Some("native".to_string()),
             answers: 2,
+            response_bytes: None,
+            min_answer_ttl: None,
         };
 
         let attributes = outcome_attributes(&request, &outcome);
@@ -208,6 +210,8 @@ mod tests {
             response_code: ResponseCode::ServFail,
             authority: None,
             answers: 0,
+            response_bytes: None,
+            min_answer_ttl: None,
         };
         let attributes = outcome_attributes(&request, &outcome);
         assert_eq!(
@@ -224,6 +228,8 @@ mod tests {
             response_code: ResponseCode::FormErr,
             authority: None,
             answers: 0,
+            response_bytes: None,
+            min_answer_ttl: None,
         };
         let attributes = outcome_attributes(&request, &outcome);
         assert_eq!(attribute(&attributes, "dns.response.code"), Some("FORMERR"));

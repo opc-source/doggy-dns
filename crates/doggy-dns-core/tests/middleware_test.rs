@@ -40,6 +40,8 @@ async fn logging_after_request_completes_without_panic() {
         response_code: hickory_proto::op::ResponseCode::NoError,
         authority: Some("native".to_string()),
         answers: 1,
+        response_bytes: None,
+        min_answer_ttl: None,
     };
     mw.after_request(&request, 42, &outcome).await;
 }

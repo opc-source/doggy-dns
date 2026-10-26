@@ -76,6 +76,8 @@ impl RequestHandler for DoggyDnsHandler {
                         response_code: ResponseCode::Refused,
                         authority: None,
                         answers: 0,
+                        response_bytes: None,
+                        min_answer_ttl: None,
                     };
                     self.finish(request, start, &span_for_body, &outcome).await;
                     tracing::warn!(
@@ -96,6 +98,8 @@ impl RequestHandler for DoggyDnsHandler {
                         response_code: ResponseCode::FormErr,
                         authority: None,
                         answers: 0,
+                        response_bytes: None,
+                        min_answer_ttl: None,
                     };
                     self.finish(request, start, &span_for_body, &outcome).await;
                     tracing::warn!(
@@ -181,6 +185,8 @@ impl RequestHandler for DoggyDnsHandler {
                                     response_code: ResponseCode::NoError,
                                     authority: Some(handler_name.to_string()),
                                     answers: answer_count,
+                                    response_bytes: None,
+                                    min_answer_ttl: None,
                                 },
                             )
                         }
@@ -200,6 +206,8 @@ impl RequestHandler for DoggyDnsHandler {
                                     response_code: ResponseCode::ServFail,
                                     authority: Some(handler_name.to_string()),
                                     answers: 0,
+                                    response_bytes: None,
+                                    min_answer_ttl: None,
                                 },
                             )
                         }
@@ -221,6 +229,8 @@ impl RequestHandler for DoggyDnsHandler {
                             response_code: ResponseCode::ServFail,
                             authority: Some(handler_name.to_string()),
                             answers: 0,
+                            response_bytes: None,
+                            min_answer_ttl: None,
                         },
                     )
                 }
@@ -238,6 +248,8 @@ impl RequestHandler for DoggyDnsHandler {
                             response_code: ResponseCode::NXDomain,
                             authority: None,
                             answers: 0,
+                            response_bytes: None,
+                            min_answer_ttl: None,
                         },
                     )
                 }

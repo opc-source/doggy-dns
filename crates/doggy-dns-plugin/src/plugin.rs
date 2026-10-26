@@ -24,6 +24,10 @@ pub struct RequestOutcome {
     pub authority: Option<String>,
     /// Number of answer records in the response.
     pub answers: usize,
+    /// Raw DNS response wire format. `None` when XDP cache is disabled.
+    pub response_bytes: Option<Vec<u8>>,
+    /// Minimum TTL across all answer RRs. `None` when XDP cache is disabled or no answers.
+    pub min_answer_ttl: Option<u32>,
 }
 
 /// Cross-cutting middleware plugin (logging, metrics, etc.).
