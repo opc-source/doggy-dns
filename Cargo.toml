@@ -6,6 +6,7 @@ members = [
     "crates/doggy-dns-nacos",
     "crates/doggy-dns-observability",
     "crates/doggy-dns-xdp",
+    "crates/doggy-dns-mcp",
 ]
 
 [package]
@@ -25,8 +26,10 @@ doggy-dns-plugin = { path = "crates/doggy-dns-plugin" }
 doggy-dns-nacos = { path = "crates/doggy-dns-nacos" }
 doggy-dns-observability = { path = "crates/doggy-dns-observability" }
 doggy-dns-xdp = { path = "crates/doggy-dns-xdp", optional = true }
+doggy-dns-mcp = { path = "crates/doggy-dns-mcp" }
 hickory-server = { workspace = true }
 tokio = { workspace = true }
+tokio-util = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 anyhow = { workspace = true }
@@ -68,3 +71,11 @@ base64 = "0.23"
 # XDP / eBPF
 aya = "0.14"
 aya-log = "0.3"
+
+# MCP server
+rmcp = { version = "3.7", features = ["server", "transport-streamable-http-server"] }
+axum = "0.8"
+chrono = { version = "0.4", features = ["serde"] }
+tokio-util = { version = "0.7", features = ["rt"] }
+serde_json = "1"
+thiserror = "2"

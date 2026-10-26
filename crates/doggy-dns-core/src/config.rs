@@ -1,6 +1,7 @@
 use serde::Deserialize;
 use std::collections::BTreeMap;
 use std::fmt;
+use std::net::SocketAddr;
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct DoggyDnsConfig {
@@ -15,6 +16,8 @@ pub struct DoggyDnsConfig {
     pub observability: ObservabilityConfig,
     #[serde(default)]
     pub xdp: XdpConfig,
+    #[serde(default)]
+    pub mcp: McpConfig,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -187,6 +190,41 @@ fn default_xdp_attach_mode() -> String {
 }
 fn default_xdp_pin_path() -> String {
     "/sys/fs/bpf/doggy-dns/dns_cache".to_string()
+}
+
+/// Read-only MCP server configuration for the console.
+#[derive(Debug, Clone, Deserialize)]
+pub struct McpConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_mcp_listen_addr")]
+    pub listen_addr: String,
+    #[serde(default = "default_mcp_port")]
+    pub port: u16,
+    #[serde(default)]
+    pub token: Option<String>,
+    #[serde(default)]
+    pub allowed_hosts: Vec<String>,
+}
+
+impl Default for McpConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            listen_addr: default_mcp_listen_addr(),
+            port: default_mcp_port(),
+            token: None,
+            allowed_hosts: Vec::new(),
+        }
+    }
+}
+
+fn default_mcp_listen_addr() -> String {
+    "127.0.0.1".to_string()
+}
+
+fn default_mcp_port() -> u16 {
+    19090
 }
 
 /// OTLP export configuration. A single target is supported; fan-out should be
@@ -554,6 +592,11 @@ pub fn validate_config(config: &DoggyDnsConfig) -> anyhow::Result<()> {
             config.xdp.pin_path.starts_with("/sys/fs/bpf/"),
             "xdp.pin_path must be under /sys/fs/bpf/"
         );
+    }
+    if config.mcp.enabled {
+        let addr = format!("{}:{}", config.mcp.listen_addr, config.mcp.port);
+        addr.parse::<SocketAddr>()
+            .map_err(|_| anyhow::anyhow!("mcp.listen_addr is not a valid IP address: {}", addr))?;
     }
     Ok(())
 }
