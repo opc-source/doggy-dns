@@ -12,9 +12,13 @@ mod linux_tests {
     use std::process::Command;
 
     fn setup_netns() {
-        let _ = Command::new("ip").args(["netns", "add", "doggy-dns-test"]).output();
         let _ = Command::new("ip")
-            .args(["link", "add", "veth0", "type", "veth", "peer", "name", "veth1"])
+            .args(["netns", "add", "doggy-dns-test"])
+            .output();
+        let _ = Command::new("ip")
+            .args([
+                "link", "add", "veth0", "type", "veth", "peer", "name", "veth1",
+            ])
             .output();
         let _ = Command::new("ip")
             .args(["link", "set", "veth1", "netns", "doggy-dns-test"])
@@ -22,18 +26,43 @@ mod linux_tests {
         let _ = Command::new("ip")
             .args(["addr", "add", "10.0.0.1/24", "dev", "veth0"])
             .output();
-        let _ = Command::new("ip").args(["link", "set", "veth0", "up"]).output();
         let _ = Command::new("ip")
-            .args(["netns", "exec", "doggy-dns-test", "ip", "addr", "add", "10.0.0.2/24", "dev", "veth1"])
+            .args(["link", "set", "veth0", "up"])
             .output();
         let _ = Command::new("ip")
-            .args(["netns", "exec", "doggy-dns-test", "ip", "link", "set", "veth1", "up"])
+            .args([
+                "netns",
+                "exec",
+                "doggy-dns-test",
+                "ip",
+                "addr",
+                "add",
+                "10.0.0.2/24",
+                "dev",
+                "veth1",
+            ])
+            .output();
+        let _ = Command::new("ip")
+            .args([
+                "netns",
+                "exec",
+                "doggy-dns-test",
+                "ip",
+                "link",
+                "set",
+                "veth1",
+                "up",
+            ])
             .output();
     }
 
     fn teardown_netns() {
-        let _ = Command::new("ip").args(["netns", "delete", "doggy-dns-test"]).output();
-        let _ = Command::new("ip").args(["link", "delete", "veth0"]).output();
+        let _ = Command::new("ip")
+            .args(["netns", "delete", "doggy-dns-test"])
+            .output();
+        let _ = Command::new("ip")
+            .args(["link", "delete", "veth0"])
+            .output();
     }
 
     #[test]
