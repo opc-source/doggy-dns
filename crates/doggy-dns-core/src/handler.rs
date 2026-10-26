@@ -348,7 +348,7 @@ fn max_message_size(protocol: Protocol, edns: Option<&hickory_proto::op::Edns>) 
     match protocol {
         Protocol::Udp => match edns {
             Some(edns) => edns.max_payload(),
-            None => 4096,
+            None => 512,
         },
         _ => u16::MAX,
     }
