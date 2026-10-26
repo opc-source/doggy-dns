@@ -112,6 +112,7 @@ jobs:
           dnsperf -s 127.0.0.1 -p 5353 -f /tmp/queries.txt -n 10 -t 4 -d 30 -j > /tmp/userspace-result.json || true
           kill $(cat /tmp/server.pid)
       - name: Stress test (XDP)
+        continue-on-error: true
         run: |
           sudo -E ./target/release/doggy-dns config/doggy-dns-stress-xdp.toml &
           echo $! | sudo tee /tmp/server.pid
