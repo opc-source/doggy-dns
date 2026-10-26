@@ -29,8 +29,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Install bpf-linker
         run: |
-          sudo apt-get update && sudo apt-get install -y llvm-dev
-          cargo install bpf-linker
+          curl -sSL https://github.com/aya-rs/bpf-linker/releases/download/v0.12.0/bpf-linker-x86_64-unknown-linux-musl.tar.zst | tar -xI zstd -C ~/.cargo/bin/
       - name: Build eBPF program
         run: cd xdp && cargo build -Z build-std=core,alloc --release --target bpfel-unknown-none
       - name: Run XDP integration tests
@@ -55,8 +54,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Install bpf-linker
         run: |
-          sudo apt-get update && sudo apt-get install -y llvm-dev
-          cargo install bpf-linker
+          curl -sSL https://github.com/aya-rs/bpf-linker/releases/download/v0.12.0/bpf-linker-x86_64-unknown-linux-musl.tar.zst | tar -xI zstd -C ~/.cargo/bin/
       - name: Build eBPF program
         run: cd xdp && cargo build -Z build-std=core,alloc --release --target bpfel-unknown-none
       - name: Run benchmarks (PR)
@@ -94,8 +92,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Install dependencies
         run: |
-          sudo apt-get update && sudo apt-get install -y llvm-dev dnsperf
-          cargo install bpf-linker
+          curl -sSL https://github.com/aya-rs/bpf-linker/releases/download/v0.12.0/bpf-linker-x86_64-unknown-linux-musl.tar.zst | tar -xI zstd -C ~/.cargo/bin/
+          sudo apt-get update && sudo apt-get install -y dnsperf
       - name: Build eBPF program
         run: cd xdp && cargo build -Z build-std=core,alloc --release --target bpfel-unknown-none
       - name: Build doggy-dns (with XDP)
