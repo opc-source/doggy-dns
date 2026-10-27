@@ -262,11 +262,14 @@ fn parse_dns_question(
             return None;
         }
         // Compare packet-relative addresses, not bare offsets: the verifier
-        // only tracks bounds for pointers derived from the packet. `>=` with
-        // no constant addend leaves the pointer's fixed offset untouched, so
-        // the comparison proves exactly the bytes this iteration reads.
+        // only tracks bounds for pointers derived from the packet. The check
+        // asks for two bytes because on a pointer with a zero fixed offset a
+        // right-open range grants nothing, and the constant addend also keeps
+        // the compiler from folding the comparison to `end > cur` (which moves
+        // the proven range to the wrong branch). Every label is followed by at
+        // least the root label, so this only rejects truncated messages.
         let cur = data + pos;
-        if cur >= end {
+        if cur + 2 > end {
             return None;
         }
         let label_len = unsafe { *(cur as *const u8) } as usize;
@@ -289,7 +292,10 @@ fn parse_dns_question(
             // register is rejected by the verifier.
             let idx = core::hint::black_box(i);
             let cur = data + pos + idx;
-            if cur >= end {
+            // Same `+ 2` shape as the label-length check: a strict comparison
+            // against a pointer with a non-zero fixed offset is the form the
+            // verifier turns into a packet range.
+            if cur + 2 > end {
                 return None;
             }
             let byte = unsafe { *(cur as *const u8) };
