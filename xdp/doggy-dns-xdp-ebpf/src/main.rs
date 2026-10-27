@@ -79,10 +79,8 @@ struct UdpHdr {
 const ETH_P_IP: u16 = 0x0800;
 const IPPROTO_UDP: u8 = 17;
 const DNS_PORT: u16 = 53;
-// The verifier unrolls the label loop once per possible path, so this bound
-// trades fast-path coverage for a program that fits the 1M-instruction budget.
-// Names with more labels than this are simply handed to userspace.
-const MAX_LABELS: usize = 16;
+// A QNAME is at most 255 bytes on the wire, including the root label.
+const MAX_QNAME_LEN: usize = 255;
 const ETH_HDR_LEN: usize = core::mem::size_of::<EthHdr>();
 const UDP_HDR_LEN: usize = core::mem::size_of::<UdpHdr>();
 const DNS_HDR_LEN: usize = 12;
@@ -250,18 +248,16 @@ fn parse_dns_question(
 ) -> Option<(u64, u16, u16, usize)> {
     let data = ctx.data();
     let end = ctx.data_end();
-    // The name is hashed as it is parsed instead of being assembled in a
-    // stack buffer: hashing a buffer afterwards needs a second loop whose
-    // trip count is the name length, and the verifier explores it one state
-    // per length until it hits the instruction limit.
+    // The QNAME is hashed as one flat stream of wire bytes (length-prefixed
+    // labels, lowercased), matching the userspace key builder. A per-label
+    // loop does not fit the verifier budget: every label length re-splits the
+    // path, so the explored state count grows with each nesting level.
     let mut hash = FNV_OFFSET_BASIS;
-    let mut name_len = 0usize;
     let mut pos = dns_offset + DNS_HDR_LEN;
-    let mut labels = 0usize;
+    let mut name_len = 0usize;
 
-    // Parse QNAME label by label (bounded loop for BPF verifier)
     loop {
-        if labels >= MAX_LABELS {
+        if name_len >= MAX_QNAME_LEN {
             return None;
         }
         // Compare packet-relative addresses, not bare offsets: the verifier
@@ -269,56 +265,25 @@ fn parse_dns_question(
         // asks for two bytes because on a pointer with a zero fixed offset a
         // right-open range grants nothing, and the constant addend also keeps
         // the compiler from folding the comparison to `end > cur` (which moves
-        // the proven range to the wrong branch). Every label is followed by at
-        // least the root label, so this only rejects truncated messages.
+        // the proven range to the wrong branch).
         let cur = data + pos;
         if cur + 2 > end {
             return None;
         }
-        let label_len = unsafe { *(cur as *const u8) } as usize;
+        let byte = unsafe { *(cur as *const u8) };
+        // Length bytes and the root's zero are below 'A', so lowercasing them
+        // is an identity and the whole name can be folded uniformly.
+        hash ^= byte.to_ascii_lowercase() as u64;
+        hash = hash.wrapping_mul(FNV_PRIME);
         pos += 1;
-
-        if label_len == 0 {
+        name_len += 1;
+        if byte == 0 {
             break; // Root label — end of QNAME
         }
-        if label_len > 63 || name_len + label_len + 1 > 255 {
-            return None;
-        }
-
-        // Fold the label into the name hash (lowercased so matching is
-        // case-insensitive, as DNS names are).
-        let mut i = 0;
-        while i < label_len {
-            // Opaque to the optimiser: with a plain `i` it hoists the bounds
-            // check out of the loop as a trip-count computation, which needs
-            // `data_end - data`, and arithmetic on a PTR_TO_PACKET_END
-            // register is rejected by the verifier.
-            let idx = core::hint::black_box(i);
-            let cur = data + pos + idx;
-            // Same `+ 2` shape as the label-length check: a strict comparison
-            // against a pointer with a non-zero fixed offset is the form the
-            // verifier turns into a packet range.
-            if cur + 2 > end {
-                return None;
-            }
-            let byte = unsafe { *(cur as *const u8) };
-            hash ^= byte.to_ascii_lowercase() as u64;
-            hash = hash.wrapping_mul(FNV_PRIME);
-            name_len += 1;
-            i += 1;
-        }
-        // The trailing dot matches the userspace side, which hashes
-        // `Name::to_string()` including the root label.
-        hash ^= b'.' as u64;
-        hash = hash.wrapping_mul(FNV_PRIME);
-        name_len += 1;
-        pos += label_len;
-        labels += 1;
     }
 
-    // After the loop, pos points to QTYPE (the 0x00 root label was consumed
-    // inside the loop: we read it, then incremented pos past it).
-    // Read QTYPE and QCLASS byte-by-byte to avoid misaligned reads.
+    // QTYPE follows the QNAME (pos is already past the root label). Read both
+    // fields byte-by-byte to avoid misaligned reads.
     let q_ptr = data + pos;
     if q_ptr + 4 > end {
         return None;
@@ -333,10 +298,9 @@ fn parse_dns_question(
     };
 
     // Length of the question section itself (QNAME + QTYPE + QCLASS), which
-    // starts right after the DNS header. Derived from the name length rather
-    // than from `pos`, so it stays a bounded scalar instead of a
-    // packet-pointer difference (only privileged loads allow those).
-    let question_len = name_len + 1 + 4;
+    // starts right after the DNS header. `name_len` counts the QNAME's wire
+    // bytes, so this stays a bounded scalar instead of a pointer difference.
+    let question_len = name_len + 4;
 
     Some((hash, qtype, qclass, question_len))
 }

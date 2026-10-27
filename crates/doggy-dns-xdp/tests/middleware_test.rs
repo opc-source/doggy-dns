@@ -3,12 +3,17 @@
 use doggy_dns_xdp::middleware::compute_cache_entry;
 use doggy_dns_xdp::types::{FLAG_NEGATIVE, MAX_RESPONSE_SIZE};
 use hickory_proto::op::ResponseCode;
+use hickory_proto::rr::Name;
+
+fn name(s: &str) -> Name {
+    Name::from_ascii(s).expect("valid name")
+}
 
 #[test]
 fn compute_cache_entry_positive() {
     let resp_bytes = vec![0u8; 64];
     let (key, value) = compute_cache_entry(
-        "example.com",
+        &name("example.com."),
         1, // A
         1, // IN
         ResponseCode::NoError,
@@ -29,7 +34,7 @@ fn compute_cache_entry_positive() {
 fn compute_cache_entry_nx_domain() {
     let resp_bytes = vec![0u8; 12];
     let (_key, value) = compute_cache_entry(
-        "nonexistent.example.com",
+        &name("nonexistent.example.com."),
         1,
         1,
         ResponseCode::NXDomain,
@@ -46,7 +51,7 @@ fn compute_cache_entry_nx_domain() {
 #[test]
 fn compute_cache_entry_serv_fail_not_cached() {
     let result = compute_cache_entry(
-        "fail.example.com",
+        &name("fail.example.com."),
         1,
         1,
         ResponseCode::ServFail,
@@ -63,7 +68,7 @@ fn compute_cache_entry_serv_fail_not_cached() {
 fn compute_cache_entry_truncates_large_response() {
     let resp_bytes = vec![0xAB; 1024]; // larger than MAX_RESPONSE_SIZE
     let (_key, value) = compute_cache_entry(
-        "large.example.com",
+        &name("large.example.com."),
         1,
         1,
         ResponseCode::NoError,
