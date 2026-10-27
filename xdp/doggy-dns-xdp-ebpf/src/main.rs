@@ -238,17 +238,8 @@ fn try_dns_xdp(ctx: &XdpContext) -> Result<u32, ()> {
 // DNS question parsing + FNV-1a hash
 // ---------------------------------------------------------------------------
 
-#[inline]
-fn fnv1a_64(data: &[u8]) -> u64 {
-    let mut hash: u64 = 0xcbf29ce484222325;
-    let mut i = 0;
-    while i < data.len() {
-        hash ^= data[i] as u64;
-        hash = hash.wrapping_mul(0x100000001b3);
-        i += 1;
-    }
-    hash
-}
+const FNV_OFFSET_BASIS: u64 = 0xcbf29ce484222325;
+const FNV_PRIME: u64 = 0x100000001b3;
 
 fn parse_dns_question(
     ctx: &XdpContext,
@@ -256,7 +247,11 @@ fn parse_dns_question(
 ) -> Option<(u64, u16, u16, usize)> {
     let data = ctx.data();
     let end = ctx.data_end();
-    let mut name_buf = [0u8; 256];
+    // The name is hashed as it is parsed instead of being assembled in a
+    // stack buffer: hashing a buffer afterwards needs a second loop whose
+    // trip count is the name length, and the verifier explores it one state
+    // per length until it hits the instruction limit.
+    let mut hash = FNV_OFFSET_BASIS;
     let mut name_len = 0usize;
     let mut pos = dns_offset + DNS_HDR_LEN;
     let mut labels = 0usize;
@@ -267,10 +262,11 @@ fn parse_dns_question(
             return None;
         }
         // Compare packet-relative addresses, not bare offsets: the verifier
-        // only tracks bounds for pointers derived from the packet, and only
-        // for a strict `>` comparison against data_end.
+        // only tracks bounds for pointers derived from the packet. `>=` with
+        // no constant addend leaves the pointer's fixed offset untouched, so
+        // the comparison proves exactly the bytes this iteration reads.
         let cur = data + pos;
-        if cur + 1 > end {
+        if cur >= end {
             return None;
         }
         let label_len = unsafe { *(cur as *const u8) } as usize;
@@ -283,30 +279,29 @@ fn parse_dns_question(
             return None;
         }
 
-        // Copy label bytes to buffer (lowercased for case-insensitive matching)
+        // Fold the label into the name hash (lowercased so matching is
+        // case-insensitive, as DNS names are).
         let mut i = 0;
         while i < label_len {
-            let cur = data + pos + i;
-            // Two bytes, not one: the compiler folds `cur + 1 > end` into
-            // `end > cur`, and a comparison whose packet operand has no fixed
-            // offset yields the verifier no range. Every label body is followed
-            // by the root label and QTYPE/QCLASS, so asking for a second byte
-            // only rejects truncated messages.
-            if cur + 2 > end {
+            // Opaque to the optimiser: with a plain `i` it hoists the bounds
+            // check out of the loop as a trip-count computation, which needs
+            // `data_end - data`, and arithmetic on a PTR_TO_PACKET_END
+            // register is rejected by the verifier.
+            let idx = core::hint::black_box(i);
+            let cur = data + pos + idx;
+            if cur >= end {
                 return None;
             }
             let byte = unsafe { *(cur as *const u8) };
-            if name_len >= 255 {
-                return None;
-            }
-            name_buf[name_len] = byte.to_ascii_lowercase();
+            hash ^= byte.to_ascii_lowercase() as u64;
+            hash = hash.wrapping_mul(FNV_PRIME);
             name_len += 1;
             i += 1;
         }
-        if name_len >= 255 {
-            return None;
-        }
-        name_buf[name_len] = b'.';
+        // The trailing dot matches the userspace side, which hashes
+        // `Name::to_string()` including the root label.
+        hash ^= b'.' as u64;
+        hash = hash.wrapping_mul(FNV_PRIME);
         name_len += 1;
         pos += label_len;
         labels += 1;
@@ -329,11 +324,12 @@ fn parse_dns_question(
     };
 
     // Length of the question section itself (QNAME + QTYPE + QCLASS), which
-    // starts right after the DNS header.
-    let question_len = (pos + 4) - (dns_offset + DNS_HDR_LEN);
+    // starts right after the DNS header. Derived from the name length rather
+    // than from `pos`, so it stays a bounded scalar instead of a
+    // packet-pointer difference (only privileged loads allow those).
+    let question_len = name_len + 1 + 4;
 
-    let name_hash = fnv1a_64(&name_buf[..name_len]);
-    Some((name_hash, qtype, qclass, question_len))
+    Some((hash, qtype, qclass, question_len))
 }
 
 // ---------------------------------------------------------------------------
