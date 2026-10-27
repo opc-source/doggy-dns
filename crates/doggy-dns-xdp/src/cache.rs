@@ -39,6 +39,7 @@ pub fn make_cache_key(name: &Name, qtype: u16, qclass: u16) -> CacheKey {
     CacheKey {
         name_hash: hash,
         qtype_class: ((qtype as u32) << 16) | (qclass as u32),
+        _pad: 0,
     }
 }
 

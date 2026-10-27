@@ -10,6 +10,9 @@ pub const MAX_RESPONSE_SIZE: usize = 512;
 pub struct CacheKey {
     pub name_hash: u64,
     pub qtype_class: u32,
+    /// The kernel hashes all key bytes, padding included, so it is spelled out
+    /// to keep the value deterministic on both sides.
+    pub _pad: u32,
 }
 
 #[repr(C)]
@@ -20,6 +23,18 @@ pub struct CacheValue {
     pub flags: u16,
     pub _pad: u32,
     pub expires_at: u64,
+}
+
+/// Configuration written into the eBPF program's config map before attach.
+///
+/// This is the channel for settings the program cannot know at compile time;
+/// add fields here (in lockstep with `xdp/doggy-dns-xdp-ebpf/src/main.rs`) as
+/// the fast path grows new knobs.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct XdpRuntimeConfig {
+    /// UDP port the userspace DNS server listens on.
+    pub dns_port: u16,
 }
 
 impl CacheValue {
@@ -59,6 +74,7 @@ impl CacheValue {
 const _: () = {
     assert!(core::mem::size_of::<CacheKey>() == 16);
     assert!(core::mem::size_of::<CacheValue>() == 528);
+    assert!(core::mem::size_of::<XdpRuntimeConfig>() == 2);
 };
 
 // aya::Pod is required for using these types as BPF map keys/values.
@@ -67,3 +83,5 @@ const _: () = {
 unsafe impl aya::Pod for CacheKey {}
 #[cfg(target_os = "linux")]
 unsafe impl aya::Pod for CacheValue {}
+#[cfg(target_os = "linux")]
+unsafe impl aya::Pod for XdpRuntimeConfig {}

@@ -5,7 +5,7 @@ use aya_ebpf::{
     bindings::xdp_action,
     helpers::{bpf_ktime_get_ns, bpf_xdp_adjust_tail},
     macros::{map, xdp},
-    maps::LruHashMap,
+    maps::{Array, LruHashMap},
     programs::XdpContext,
 };
 
@@ -20,6 +20,9 @@ pub const FLAG_NEGATIVE: u16 = 0x01;
 pub struct CacheKey {
     pub name_hash: u64,
     pub qtype_class: u32,
+    // The kernel hashes all key bytes, padding included, so it is spelled out
+    // to keep the value deterministic on both sides.
+    pub _pad: u32,
 }
 
 #[repr(C)]
@@ -30,6 +33,14 @@ pub struct CacheValue {
     pub flags: u16,
     pub _pad: u32,
     pub expires_at: u64,
+}
+
+/// Configuration written by the userspace loader before the program is
+/// attached. Must match crates/doggy-dns-xdp/src/types.rs exactly.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct XdpRuntimeConfig {
+    pub dns_port: u16,
 }
 
 // ---------------------------------------------------------------------------
@@ -78,7 +89,6 @@ struct UdpHdr {
 
 const ETH_P_IP: u16 = 0x0800;
 const IPPROTO_UDP: u8 = 17;
-const DNS_PORT: u16 = 53;
 // A QNAME is at most 255 bytes on the wire, including the root label.
 const MAX_QNAME_LEN: usize = 255;
 const ETH_HDR_LEN: usize = core::mem::size_of::<EthHdr>();
@@ -94,6 +104,10 @@ const COPY_CHUNK: usize = 4;
 #[map]
 static DNS_CACHE: LruHashMap<CacheKey, CacheValue> =
     LruHashMap::with_max_entries(65536, 0);
+
+/// Single-entry map holding the settings the userspace loader supplies.
+#[map]
+static XDP_CONFIG: Array<XdpRuntimeConfig> = Array::with_max_entries(1, 0);
 
 // ---------------------------------------------------------------------------
 // XDP entry point
@@ -142,7 +156,12 @@ fn try_dns_xdp(ctx: &XdpContext) -> Result<u32, ()> {
         return Ok(xdp_action::XDP_PASS);
     }
     let udp = unsafe { &*((data + udp_offset) as *const UdpHdr) };
-    if u16::from_be(udp.dest) != DNS_PORT {
+    // The userspace server may listen on any port, so it is read from the
+    // configuration map the loader fills in before attaching.
+    let Some(config) = XDP_CONFIG.get(0) else {
+        return Ok(xdp_action::XDP_PASS);
+    };
+    if u16::from_be(udp.dest) != config.dns_port {
         return Ok(xdp_action::XDP_PASS);
     }
     let udp_len = u16::from_be(udp.len) as usize;
@@ -176,6 +195,7 @@ fn try_dns_xdp(ctx: &XdpContext) -> Result<u32, ()> {
     let key = CacheKey {
         name_hash,
         qtype_class: ((qtype as u32) << 16) | (qclass as u32),
+        _pad: 0,
     };
 
     // 6. Cache lookup
