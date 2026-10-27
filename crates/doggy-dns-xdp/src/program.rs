@@ -80,7 +80,7 @@ impl XdpManager {
         )
         .context("XDP_CONFIG has an unexpected value type")?;
         config_map
-            .set(0, &XdpRuntimeConfig { dns_port }, 0)
+            .set(0, XdpRuntimeConfig { dns_port }, 0)
             .context("failed to write XDP runtime configuration")?;
 
         // Load and optionally attach the XDP program
