@@ -186,7 +186,7 @@ fn init_xdp(
         }
         Err(e) => {
             tracing::warn!(
-                error = %e,
+                error = %format!("{e:#}"),
                 "failed to initialize XDP fast path, continuing without it"
             );
             None
