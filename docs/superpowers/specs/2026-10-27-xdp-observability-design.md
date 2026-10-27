@@ -261,8 +261,9 @@ more often than the exporter drains buys nothing.
 
 - Visibility lag is at most one poll period plus one OTLP export period (for example
   10s + 10s). Values are never sampled or approximated.
-- Reloading the XDP program resets counters; the reset detection turns that into a
-  zero delta instead of an underflow or a spike.
+- Reloading the XDP program resets counters; the reset detection counts the
+  post-reset value fresh instead of underflowing or spiking, but the pre-reset
+  remainder of the window is lost.
 - Kernel hits do not appear in `dns.query.duration` or `dns.queries`; dashboards that
   want end-to-end demand must combine both instruments as described above.
 

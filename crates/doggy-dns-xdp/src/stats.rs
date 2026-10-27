@@ -136,6 +136,9 @@ use tokio::task::JoinHandle;
 /// `sink` receives `(dns.xdp.result label, delta)` for every non-zero field.
 /// The task performs one final read when `stop` flips to `true`, then returns,
 /// so the last partial window is not lost on shutdown.
+///
+/// `period` must be non-zero; `tokio::time::interval` panics on
+/// `Duration::ZERO`. The binary clamps it with `interval_secs.max(1)`.
 #[cfg(target_os = "linux")]
 pub fn spawn_stats_poller(
     reader: XdpStatsReader,

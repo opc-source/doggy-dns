@@ -9,6 +9,64 @@ fn layout_matches_the_ebpf_program() {
     assert_eq!(core::mem::align_of::<XdpStats>(), 8);
 }
 
+/// Ordered `pub <name>:` field names of the `pub struct XdpStats {` body,
+/// up to its closing brace. Returns `None` when the struct is not found.
+fn xdp_stats_field_order(source: &str) -> Option<Vec<&str>> {
+    let marker = "pub struct XdpStats {";
+    let start = source.find(marker)?;
+    let mut fields = Vec::new();
+    for line in source[start + marker.len()..].lines() {
+        let line = line.trim();
+        if line.starts_with('}') {
+            return Some(fields);
+        }
+        if let Some(rest) = line.strip_prefix("pub ") {
+            fields.push(rest.split(':').next()?.trim());
+        }
+    }
+    None
+}
+
+/// Ordered field names, failing if the struct is missing or has no fields.
+fn field_order_from_source<'a>(source: &'a str, path: &str) -> Vec<&'a str> {
+    let fields = xdp_stats_field_order(source)
+        .unwrap_or_else(|| panic!("no `pub struct XdpStats {{` found in {path}"));
+    assert!(!fields.is_empty(), "empty XdpStats field list in {path}");
+    fields
+}
+
+#[test]
+fn xdp_stats_field_order_matches_across_workspaces() {
+    // XdpStats is duplicated across the two cargo workspaces; BPF map values
+    // are raw byte layouts, so a reordered field would silently relabel the
+    // kernel's counters while the size asserts still pass. Compare the field
+    // order as text — this runs on any platform, no eBPF toolchain needed.
+    let userspace_path = concat!(env!("CARGO_MANIFEST_DIR"), "/src/types.rs");
+    let kernel_path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../xdp/doggy-dns-xdp-ebpf/src/main.rs"
+    );
+
+    let userspace_source = std::fs::read_to_string(userspace_path)
+        .unwrap_or_else(|error| panic!("failed to read {userspace_path}: {error}"));
+    let kernel_source = std::fs::read_to_string(kernel_path)
+        .unwrap_or_else(|error| panic!("failed to read {kernel_path}: {error}"));
+
+    let userspace = field_order_from_source(&userspace_source, userspace_path);
+    let kernel = field_order_from_source(&kernel_source, kernel_path);
+    let expected = ["hit", "negative_hit", "miss", "expired", "drop"];
+
+    assert_eq!(
+        userspace, expected,
+        "field order drifted in {userspace_path}"
+    );
+    assert_eq!(kernel, expected, "field order drifted in {kernel_path}");
+    assert_eq!(
+        userspace, kernel,
+        "XdpStats field order differs between {userspace_path} and {kernel_path}"
+    );
+}
+
 #[test]
 fn delta_of_the_first_snapshot_is_the_snapshot() {
     let current = XdpStats {

@@ -239,13 +239,18 @@ Buckets: `0.1, 0.25, 0.5, 1, 2.5, 5, 10, 25, 50, 100, 250, 500, 1000, 2500,
 5000` ms. Query names and client IPs are intentionally **not** metric
 attributes (cardinality); use logs/traces for those.
 
-`dns.xdp.queries` exists only when `xdp.enabled = true`. Userspace reads a per-CPU BPF
-map once per metrics interval, so values lag by up to one poll period plus one export
-interval; they are exact, not sampled. Kernel-served answers never appear in
+The `dns.xdp.queries` instrument is created whenever metrics are enabled; its data
+points appear only when both `xdp.enabled` and `observability.metrics.enabled` are
+true (and the process is Linux with the `xdp` feature built in). Userspace reads a
+per-CPU BPF map once per metrics interval, so values lag by up to one poll period
+plus one export interval; within an interval that saw no reload they are exact, not
+sampled. Kernel-served answers never appear in
 `dns.queries`, so total demand is `dns.queries` plus
 `dns.xdp.queries{result=hit|negative_hit}`. Do not add `miss`/`expired` again — those
 queries also appear in `dns.queries`. Reloading the XDP program resets the kernel
-counters; a reset is reported as a zero delta, not a negative one.
+counters; a counter that went backwards is counted fresh from its post-reset value,
+so a reload never yields a negative delta or a spurious spike, but counts accumulated
+between the last successful poll and the reload are lost.
 
 ## Traces
 

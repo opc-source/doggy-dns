@@ -54,6 +54,10 @@ pub struct XdpStats {
     pub drop: u64,
 }
 
+const _: () = {
+    assert!(core::mem::size_of::<XdpStats>() == 40);
+};
+
 // ---------------------------------------------------------------------------
 // Network header structs (aya-ebpf-bindings does not export usable definitions)
 // ---------------------------------------------------------------------------

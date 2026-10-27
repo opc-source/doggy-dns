@@ -272,6 +272,8 @@ mod tests {
             .find(|metric| metric.name() == "dns.xdp.queries")
             .expect("dns.xdp.queries must be exported");
 
+        assert_eq!(metric.unit(), "1", "dns.xdp.queries must carry unit \"1\"");
+
         let AggregatedMetrics::U64(MetricData::Sum(sum)) = metric.data() else {
             panic!("dns.xdp.queries must be a u64 sum");
         };
