@@ -65,10 +65,40 @@ impl DnsMetrics {
     }
 }
 
+/// Kernel-side fast-path counters produced by the XDP program.
+///
+/// One counter with a low-cardinality `dns.xdp.result` attribute; kernel-served
+/// hits never reach [`DnsMetrics`], so keeping the instruments separate avoids a
+/// sparse attribute set.
+pub struct XdpMetrics {
+    queries: Counter<u64>,
+}
+
+impl XdpMetrics {
+    pub(crate) fn new(meter: &Meter) -> Self {
+        let queries = meter
+            .u64_counter("dns.xdp.queries")
+            .with_description("DNS queries classified by the XDP fast path")
+            .with_unit("1")
+            .build();
+        Self { queries }
+    }
+
+    /// Record a per-result delta. Zero counts are skipped so an idle interval
+    /// does not create an empty time series.
+    pub fn record(&self, result: &'static str, count: u64) {
+        if count == 0 {
+            return;
+        }
+        self.queries
+            .add(count, &[KeyValue::new("dns.xdp.result", result)]);
+    }
+}
+
 pub(crate) fn build_meter_provider(
     config: &ObservabilityConfig,
     resource: Resource,
-) -> Result<(SdkMeterProvider, DnsMetrics)> {
+) -> Result<(SdkMeterProvider, DnsMetrics, XdpMetrics)> {
     let endpoint = endpoint::resolve_signal_endpoint(config, Signal::Metrics)?;
     let headers = auth::resolve_headers(config)?;
     let temporality = match config.metrics.temporality {
@@ -97,7 +127,8 @@ pub(crate) fn build_meter_provider(
 
     let meter = provider.meter(doggy_dns_plugin::APP_NAME);
     let metrics = DnsMetrics::new(&meter);
-    Ok((provider, metrics))
+    let xdp_metrics = XdpMetrics::new(&meter);
+    Ok((provider, metrics, xdp_metrics))
 }
 
 struct DnsMetricsMiddleware {
@@ -215,5 +246,40 @@ mod tests {
         let outcome = RequestOutcome::error(ResponseCode::FormErr);
         let attributes = outcome_attributes(&request, &outcome);
         assert_eq!(attribute(&attributes, "dns.response.code"), Some("FORMERR"));
+    }
+
+    #[test]
+    fn xdp_counter_records_result_attributes() {
+        use opentelemetry_sdk::metrics::InMemoryMetricExporter;
+        use opentelemetry_sdk::metrics::data::{AggregatedMetrics, MetricData};
+
+        let exporter = InMemoryMetricExporter::default();
+        let provider = SdkMeterProvider::builder()
+            .with_reader(PeriodicReader::builder(exporter.clone()).build())
+            .build();
+        let meter = provider.meter("test");
+        let metrics = XdpMetrics::new(&meter);
+
+        metrics.record("hit", 3);
+        metrics.record("miss", 0);
+        provider.force_flush().expect("flush metrics");
+
+        let exported = exporter.get_finished_metrics().expect("metrics exported");
+        let metric = exported
+            .iter()
+            .flat_map(|resource| resource.scope_metrics())
+            .flat_map(|scope| scope.metrics())
+            .find(|metric| metric.name() == "dns.xdp.queries")
+            .expect("dns.xdp.queries must be exported");
+
+        let AggregatedMetrics::U64(MetricData::Sum(sum)) = metric.data() else {
+            panic!("dns.xdp.queries must be a u64 sum");
+        };
+        let points: Vec<_> = sum.data_points().collect();
+        assert_eq!(points.len(), 1, "zero counts must not create a time series");
+        assert_eq!(points[0].value(), 3);
+
+        let attributes: Vec<KeyValue> = points[0].attributes().cloned().collect();
+        assert_eq!(attribute(&attributes, "dns.xdp.result"), Some("hit"));
     }
 }

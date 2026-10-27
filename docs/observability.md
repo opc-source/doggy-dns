@@ -233,10 +233,19 @@ Vector's own sinks. This keeps doggy-dns a single-target OTLP producer.
 | `dns.queries` | counter | `1` | `dns.question.type`, `network.protocol.name`, `dns.response.code`, `dns.authority` |
 | `dns.query.duration` | histogram | `ms` | same |
 | `dns.queries.in_flight` | up/down counter | `1` | — |
+| `dns.xdp.queries` | counter | `1` | `dns.xdp.result` (`hit`, `negative_hit`, `miss`, `expired`, `drop`) |
 
 Buckets: `0.1, 0.25, 0.5, 1, 2.5, 5, 10, 25, 50, 100, 250, 500, 1000, 2500,
 5000` ms. Query names and client IPs are intentionally **not** metric
 attributes (cardinality); use logs/traces for those.
+
+`dns.xdp.queries` exists only when `xdp.enabled = true`. Userspace reads a per-CPU BPF
+map once per metrics interval, so values lag by up to one poll period plus one export
+interval; they are exact, not sampled. Kernel-served answers never appear in
+`dns.queries`, so total demand is `dns.queries` plus
+`dns.xdp.queries{result=hit|negative_hit}`. Do not add `miss`/`expired` again — those
+queries also appear in `dns.queries`. Reloading the XDP program resets the kernel
+counters; a reset is reported as a zero delta, not a negative one.
 
 ## Traces
 

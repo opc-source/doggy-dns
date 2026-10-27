@@ -30,3 +30,5 @@ pprof = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true }
+# `testing` exposes `InMemoryMetricExporter`, used by the metrics unit tests.
+opentelemetry_sdk = { workspace = true, features = ["testing"] }
