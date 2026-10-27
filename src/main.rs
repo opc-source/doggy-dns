@@ -15,6 +15,15 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::signal;
 
+/// XDP fast-path wiring, chosen per platform/feature so `async_main` stays
+/// cfg-free: the Linux module owns the real manager, the stub does nothing.
+#[cfg(all(feature = "xdp", target_os = "linux"))]
+#[path = "xdp/linux.rs"]
+mod xdp;
+#[cfg(not(all(feature = "xdp", target_os = "linux")))]
+#[path = "xdp/stub.rs"]
+mod xdp;
+
 fn main() -> Result<()> {
     // Load config before initializing tracing so log format and OTLP settings
     // are available to the subscriber.
@@ -91,22 +100,13 @@ async fn async_main(
         middlewares.push(metrics);
     }
 
-    // Initialize XDP fast-path middleware if enabled (Linux only).
-    // The manager must stay alive for the server lifetime — dropping it
-    // detaches the XDP program from the interface.
-    //
-    // `mut` is only consumed by the Linux-gated `take_stats()` call below, so
-    // silence `unused_mut` on other platforms instead of restructuring here.
-    #[cfg_attr(not(all(feature = "xdp", target_os = "linux")), allow(unused_mut))]
-    let mut xdp_manager = init_xdp(&config, &mut middlewares);
+    // Initialize the XDP fast path (Linux + `xdp` feature; a stub elsewhere).
+    // The handle owns the manager, which must stay alive for the server
+    // lifetime — dropping it detaches the XDP program from the interface.
+    let mut xdp = xdp::init(&config, &mut middlewares);
 
-    #[cfg(all(feature = "xdp", target_os = "linux"))]
-    let xdp_stats = xdp_manager.as_mut().map(|manager| manager.take_stats());
-    #[cfg(not(all(feature = "xdp", target_os = "linux")))]
-    let xdp_stats: Option<()> = None;
-
-    let xdp_task = start_xdp_stats(
-        xdp_stats,
+    let xdp_task = xdp::start_stats(
+        &mut xdp,
         telemetry.xdp_metrics(),
         Duration::from_secs(config.observability.metrics.interval_secs.max(1)),
     );
@@ -115,11 +115,7 @@ async fn async_main(
     let (_watchers, authority_chain) = build_authority_chain(&config).await?;
 
     // Create handler
-    let handler = DoggyDnsHandler::new(
-        middlewares,
-        Arc::new(authority_chain),
-        xdp_manager.is_some(),
-    );
+    let handler = DoggyDnsHandler::new(middlewares, Arc::new(authority_chain), xdp.enabled());
 
     // Build and start server
     let mut server = build_server(&config, handler).await?;
@@ -163,108 +159,30 @@ async fn async_main(
     // telemetry providers are flushed in main().
     if let Some((stop, handle)) = xdp_task {
         let _ = stop.send(true);
-        match tokio::time::timeout(Duration::from_secs(2), handle).await {
-            Ok(Ok(())) => tracing::info!("xdp stats poller stopped"),
-            Ok(Err(error)) => tracing::warn!(%error, "xdp stats poller failed"),
-            Err(_) => tracing::warn!("xdp stats poller shutdown timed out"),
-        }
+        await_shutdown("xdp stats poller", handle).await;
     }
 
     // Shut down MCP server
     if let Some(handle) = mcp_handle {
         handle.cancel.cancel();
-        match tokio::time::timeout(Duration::from_secs(2), handle.wait()).await {
-            Ok(Ok(())) => tracing::info!("mcp server shut down"),
-            Ok(Err(e)) => tracing::warn!(error = %e, "mcp server task failed"),
-            Err(_) => tracing::warn!("mcp server shutdown timed out"),
-        }
+        await_shutdown("mcp server", handle.wait()).await;
     }
 
     Ok(())
 }
 
-/// Initialize XDP fast-path middleware and manager.
-///
-/// Returns the manager (must be kept alive) or `None` if XDP is disabled,
-/// unsupported, or failed to initialize. On success the cache middleware is
-/// appended to `middlewares`.
-#[cfg(all(feature = "xdp", target_os = "linux"))]
-fn init_xdp(
-    config: &DoggyDnsConfig,
-    middlewares: &mut Vec<Arc<dyn Middleware>>,
-) -> Option<doggy_dns_xdp::XdpManager> {
-    use doggy_dns_xdp::{XdpCacheMiddleware, XdpManager};
-
-    if !config.xdp.enabled {
-        return None;
+/// Await a background task's shutdown with a fixed 2-second grace, logging the
+/// three outcomes (clean stop / error / timeout) under a shared label.
+async fn await_shutdown<F, E>(label: &str, task: F)
+where
+    F: Future<Output = std::result::Result<(), E>>,
+    E: std::fmt::Display,
+{
+    match tokio::time::timeout(Duration::from_secs(2), task).await {
+        Ok(Ok(())) => tracing::info!("{label} shut down"),
+        Ok(Err(error)) => tracing::warn!(%error, "{label} task failed during shutdown"),
+        Err(_) => tracing::warn!("{label} shutdown timed out after 2s"),
     }
-    match XdpManager::new(&config.xdp, config.server.port) {
-        Ok(mut mgr) => {
-            let cache = mgr.take_cache();
-            let middleware = XdpCacheMiddleware::new(cache, &config.xdp);
-            middlewares.push(Arc::new(middleware));
-            tracing::info!(
-                interface = %mgr.interface,
-                attach_mode = %config.xdp.attach_mode,
-                "XDP fast path enabled"
-            );
-            Some(mgr)
-        }
-        Err(e) => {
-            tracing::warn!(
-                error = %format!("{e:#}"),
-                "failed to initialize XDP fast path, continuing without it"
-            );
-            None
-        }
-    }
-}
-
-#[cfg(not(all(feature = "xdp", target_os = "linux")))]
-fn init_xdp(_config: &DoggyDnsConfig, _middlewares: &mut Vec<Arc<dyn Middleware>>) -> Option<()> {
-    None
-}
-
-/// Start the XDP counter poller when the fast path and OTLP metrics are both on.
-///
-/// Returns the stop sender and the task handle. The closure keeps the
-/// observability crate independent of the XDP crate: only `main` knows both.
-#[cfg(all(feature = "xdp", target_os = "linux"))]
-fn start_xdp_stats(
-    stats: Option<doggy_dns_xdp::stats::XdpStatsReader>,
-    metrics: Option<Arc<doggy_dns_observability::XdpMetrics>>,
-    period: Duration,
-) -> Option<(
-    tokio::sync::watch::Sender<bool>,
-    tokio::task::JoinHandle<()>,
-)> {
-    let stats = stats?;
-    let Some(metrics) = metrics else {
-        tracing::warn!(
-            "XDP fast path is enabled but OTLP metrics are disabled; \
-             kernel-side counters will not be exported"
-        );
-        return None;
-    };
-
-    let (stop, stop_rx) = tokio::sync::watch::channel(false);
-    let handle =
-        doggy_dns_xdp::stats::spawn_stats_poller(stats, period, stop_rx, move |label, count| {
-            metrics.record(label, count)
-        });
-    Some((stop, handle))
-}
-
-#[cfg(not(all(feature = "xdp", target_os = "linux")))]
-fn start_xdp_stats(
-    _stats: Option<()>,
-    _metrics: Option<Arc<doggy_dns_observability::XdpMetrics>>,
-    _period: Duration,
-) -> Option<(
-    tokio::sync::watch::Sender<bool>,
-    tokio::task::JoinHandle<()>,
-)> {
-    None
 }
 
 async fn build_authority_chain(

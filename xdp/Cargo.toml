@@ -1,3 +1,18 @@
 [workspace]
 resolver = "2"
 members = ["doggy-dns-xdp-ebpf"]
+
+# Profiles must live at the workspace root; the member-level copy used to be
+# silently ignored by cargo.
+[profile.dev]
+opt-level = 2
+overflow-checks = false
+debug-assertions = false
+panic = "abort"
+
+[profile.release]
+lto = true
+# bpf-linker rejects -Os/-Oz, and before these profiles lived at the workspace
+# root they were silently ignored — so the effective value was always 3.
+opt-level = 3
+panic = "abort"

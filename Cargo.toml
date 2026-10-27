@@ -30,11 +30,8 @@ doggy-dns-xdp = { path = "crates/doggy-dns-xdp", optional = true }
 doggy-dns-mcp = { path = "crates/doggy-dns-mcp" }
 hickory-server = { workspace = true }
 tokio = { workspace = true }
-tokio-util = { workspace = true }
 tracing = { workspace = true }
-tracing-subscriber = { workspace = true }
 anyhow = { workspace = true }
-serde_json = { workspace = true }
 
 [dev-dependencies]
 dashmap = { workspace = true }
@@ -49,7 +46,6 @@ tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }
 toml = "1.1"
 dashmap = "6"
-arc-swap = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 anyhow = "1"
@@ -72,7 +68,6 @@ base64 = "0.23"
 
 # XDP / eBPF
 aya = "0.14"
-aya-log = "0.3"
 
 # MCP server
 rmcp = { version = "3.7", features = ["server", "transport-streamable-http-server"] }

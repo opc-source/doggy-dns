@@ -15,7 +15,6 @@ hickory-server = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 aya = { workspace = true }
-aya-log = { workspace = true }
 libc = "0.2"
 
 [dev-dependencies]
@@ -24,6 +23,3 @@ criterion = { workspace = true }
 [[bench]]
 name = "xdp_component_bench"
 harness = false
-
-[build-dependencies]
-aya-build = "0.2"
