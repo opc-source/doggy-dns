@@ -2,6 +2,11 @@
 
 This file provides guidance to AI Coding when working with code in this repository.
 
+Human-facing documentation lives in `README.md` and `docs/` (`architecture.md`,
+`configuration.md`, `observability.md`, `xdp.md`, `development.md`). The
+commands and conventions below mirror `docs/development.md`; when rules change,
+update both.
+
 ## Build & Test Commands
 
 ```bash
