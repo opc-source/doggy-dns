@@ -9,108 +9,23 @@ use aya_ebpf::{
     programs::XdpContext,
 };
 
-// ---------------------------------------------------------------------------
-// Shared types — must match crates/doggy-dns-xdp/src/types.rs exactly
-// ---------------------------------------------------------------------------
+mod protocol;
+mod types;
 
-pub const FLAG_NEGATIVE: u16 = 0x01;
-
-#[repr(C)]
-#[derive(Clone, Copy)]
-pub struct CacheKey {
-    pub name_hash: u64,
-    pub qtype_class: u32,
-    // The kernel hashes all key bytes, padding included, so it is spelled out
-    // to keep the value deterministic on both sides.
-    pub _pad: u32,
-}
-
-#[repr(C)]
-#[derive(Clone, Copy)]
-pub struct CacheValue {
-    pub resp_data: [u8; 512],
-    pub resp_len: u16,
-    pub flags: u16,
-    pub _pad: u32,
-    pub expires_at: u64,
-}
-
-/// Configuration written by the userspace loader before the program is
-/// attached. Must match crates/doggy-dns-xdp/src/types.rs exactly.
-#[repr(C)]
-#[derive(Clone, Copy)]
-pub struct XdpRuntimeConfig {
-    pub dns_port: u16,
-}
-
-/// Per-CPU fast-path counters. Must match crates/doggy-dns-xdp/src/types.rs exactly.
-#[repr(C)]
-#[derive(Clone, Copy)]
-pub struct XdpStats {
-    pub hit: u64,
-    pub negative_hit: u64,
-    pub miss: u64,
-    pub expired: u64,
-    pub drop: u64,
-}
-
-const _: () = {
-    assert!(core::mem::size_of::<XdpStats>() == 40);
+use protocol::{
+    COPY_CHUNK, ETH_HDR_LEN, ETH_P_IP, EthHdr, IPPROTO_UDP, IpHdr, UDP_HDR_LEN, UdpHdr, copy_chunk,
+    read_u16_be, swap_u8, write_u16_be,
 };
-
-// ---------------------------------------------------------------------------
-// Network header structs (aya-ebpf-bindings does not export usable definitions)
-// ---------------------------------------------------------------------------
-
-#[repr(C)]
-struct EthHdr {
-    dst: [u8; 6],
-    src: [u8; 6],
-    h_proto: u16,
-}
-
-#[repr(C)]
-struct IpHdr {
-    ihl_ver: u8, // version (4 bits) + IHL (4 bits)
-    tos: u8,
-    tot_len: u16,
-    id: u16,
-    frag_off: u16,
-    ttl: u8,
-    protocol: u8,
-    check: u16,
-    saddr: u32,
-    daddr: u32,
-}
-
-impl IpHdr {
-    #[inline]
-    fn ihl(&self) -> u8 {
-        self.ihl_ver & 0x0F
-    }
-}
-
-#[repr(C)]
-struct UdpHdr {
-    source: u16,
-    dest: u16,
-    len: u16,
-    check: u16,
-}
+use types::{CacheKey, CacheValue, FLAG_NEGATIVE, XdpRuntimeConfig, XdpStats};
 
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
 
-const ETH_P_IP: u16 = 0x0800;
-const IPPROTO_UDP: u8 = 17;
 // A QNAME is at most 255 bytes on the wire, including the root label.
 const MAX_QNAME_LEN: usize = 255;
-const ETH_HDR_LEN: usize = core::mem::size_of::<EthHdr>();
-const UDP_HDR_LEN: usize = core::mem::size_of::<UdpHdr>();
 const DNS_HDR_LEN: usize = 12;
 const MAX_DNS_LEN: usize = 512;
-const COPY_CHUNK: usize = 4;
 
 /// Why a packet fetched or matched nothing in the cache.
 enum Outcome {
@@ -122,7 +37,7 @@ enum Outcome {
 }
 
 // ---------------------------------------------------------------------------
-// BPF map
+// BPF maps
 // ---------------------------------------------------------------------------
 
 #[map]
@@ -529,47 +444,6 @@ fn finalize_headers(
     write_u16_be(udp, 6, 0);
 
     Ok(())
-}
-
-// ---------------------------------------------------------------------------
-// Helper: safe byte-level reads/writes for DNS header fields
-// ---------------------------------------------------------------------------
-
-/// Copy [`COPY_CHUNK`] bytes, all at constant offsets from `dst`.
-#[inline(always)]
-fn copy_chunk(dst: usize, src: *const u8, src_off: usize) {
-    unsafe {
-        *(dst as *mut u8) = *src.add(src_off);
-        *((dst + 1) as *mut u8) = *src.add(src_off + 1);
-        *((dst + 2) as *mut u8) = *src.add(src_off + 2);
-        *((dst + 3) as *mut u8) = *src.add(src_off + 3);
-    }
-}
-
-#[inline(always)]
-fn swap_u8(p: *mut u8, a: usize, b: usize) {
-    unsafe {
-        let tmp = *p.add(a);
-        *p.add(a) = *p.add(b);
-        *p.add(b) = tmp;
-    }
-}
-
-#[inline]
-fn read_u16_be(ptr: *const u8, offset: usize) -> u16 {
-    unsafe {
-        let hi = *ptr.add(offset) as u16;
-        let lo = *ptr.add(offset + 1) as u16;
-        (hi << 8) | lo
-    }
-}
-
-#[inline]
-fn write_u16_be(ptr: *mut u8, offset: usize, val: u16) {
-    unsafe {
-        *ptr.add(offset) = (val >> 8) as u8;
-        *ptr.add(offset + 1) = (val & 0xFF) as u8;
-    }
 }
 
 // ---------------------------------------------------------------------------

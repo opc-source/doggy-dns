@@ -1,4 +1,4 @@
-/// Must match xdp/doggy-dns-xdp-ebpf/src/main.rs exactly.
+/// Must match xdp/doggy-dns-xdp-ebpf/src/types.rs exactly.
 pub const FLAG_NEGATIVE: u16 = 0x01;
 
 /// Maximum DNS response size that fits in the eBPF map value.
@@ -28,7 +28,7 @@ pub struct CacheValue {
 /// Configuration written into the eBPF program's config map before attach.
 ///
 /// This is the channel for settings the program cannot know at compile time;
-/// add fields here (in lockstep with `xdp/doggy-dns-xdp-ebpf/src/main.rs`) as
+/// add fields here (in lockstep with `xdp/doggy-dns-xdp-ebpf/src/types.rs`) as
 /// the fast path grows new knobs.
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
@@ -39,7 +39,7 @@ pub struct XdpRuntimeConfig {
 
 /// Per-CPU fast-path counters written by the XDP program.
 ///
-/// Must match `xdp/doggy-dns-xdp-ebpf/src/main.rs` exactly.
+/// Must match `xdp/doggy-dns-xdp-ebpf/src/types.rs` exactly.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct XdpStats {
@@ -56,30 +56,27 @@ pub struct XdpStats {
 }
 
 impl CacheValue {
-    pub fn new_positive(resp_data: Vec<u8>, expires_at: u64) -> Self {
+    /// Pack a response into the map value, truncating to [`MAX_RESPONSE_SIZE`]
+    /// and stamping the negative flag when requested.
+    fn from_response(resp_data: Vec<u8>, expires_at: u64, negative: bool) -> Self {
         let len = resp_data.len().min(MAX_RESPONSE_SIZE);
         let mut data = [0u8; MAX_RESPONSE_SIZE];
         data[..len].copy_from_slice(&resp_data[..len]);
         Self {
             resp_data: data,
             resp_len: len as u16,
-            flags: 0,
+            flags: if negative { FLAG_NEGATIVE } else { 0 },
             _pad: 0,
             expires_at,
         }
     }
 
+    pub fn new_positive(resp_data: Vec<u8>, expires_at: u64) -> Self {
+        Self::from_response(resp_data, expires_at, false)
+    }
+
     pub fn new_negative(resp_data: Vec<u8>, expires_at: u64) -> Self {
-        let len = resp_data.len().min(MAX_RESPONSE_SIZE);
-        let mut data = [0u8; MAX_RESPONSE_SIZE];
-        data[..len].copy_from_slice(&resp_data[..len]);
-        Self {
-            resp_data: data,
-            resp_len: len as u16,
-            flags: FLAG_NEGATIVE,
-            _pad: 0,
-            expires_at,
-        }
+        Self::from_response(resp_data, expires_at, true)
     }
 
     pub fn is_negative(&self) -> bool {
@@ -95,14 +92,3 @@ const _: () = {
     assert!(core::mem::size_of::<XdpRuntimeConfig>() == 2);
     assert!(core::mem::size_of::<XdpStats>() == 40);
 };
-
-// aya::Pod is required for using these types as BPF map keys/values.
-// Only available on Linux where the `aya` crate is compiled.
-#[cfg(target_os = "linux")]
-unsafe impl aya::Pod for CacheKey {}
-#[cfg(target_os = "linux")]
-unsafe impl aya::Pod for CacheValue {}
-#[cfg(target_os = "linux")]
-unsafe impl aya::Pod for XdpRuntimeConfig {}
-#[cfg(target_os = "linux")]
-unsafe impl aya::Pod for XdpStats {}

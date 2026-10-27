@@ -1,30 +1,20 @@
 //! XDP program loader and lifecycle manager.
 //!
-//! This module is only available on Linux because it depends on the `aya`
-//! crate for loading and attaching eBPF programs.
+//! Linux-only: the module is gated once at `lib.rs` because it depends on the
+//! `aya` crate for loading and attaching eBPF programs, so no item inside
+//! needs its own `cfg` attribute.
 
-#[cfg(target_os = "linux")]
 use anyhow::{Context as _, Result};
-#[cfg(target_os = "linux")]
 use aya::EbpfLoader;
-#[cfg(target_os = "linux")]
 use aya::maps::{Array, MapData};
-#[cfg(target_os = "linux")]
 use aya::programs::{Xdp, XdpMode};
-#[cfg(target_os = "linux")]
 use std::fs;
-#[cfg(target_os = "linux")]
 use std::path::Path;
 
-#[cfg(target_os = "linux")]
 use crate::cache::DnsCacheMap;
-#[cfg(target_os = "linux")]
 use crate::interface::resolve_interface;
-#[cfg(target_os = "linux")]
 use crate::stats::XdpStatsReader;
-#[cfg(target_os = "linux")]
 use crate::types::XdpRuntimeConfig;
-#[cfg(target_os = "linux")]
 use doggy_dns_basic::XdpConfig;
 
 /// Manages the XDP eBPF program lifecycle: loading, map setup, and attach.
@@ -32,7 +22,6 @@ use doggy_dns_basic::XdpConfig;
 /// The [`XdpManager`] holds ownership of the loaded eBPF object and the
 /// optional link ID (if attached). It also exposes the [`DnsCacheMap`] for
 /// the middleware to write cache entries.
-#[cfg(target_os = "linux")]
 pub struct XdpManager {
     _ebpf: aya::Ebpf,
     _link: Option<aya::programs::xdp::XdpLinkId>,
@@ -41,7 +30,6 @@ pub struct XdpManager {
     pub interface: String,
 }
 
-#[cfg(target_os = "linux")]
 impl XdpManager {
     /// Load the XDP program from the embedded ELF, set up the BPF maps, and
     /// optionally attach to the configured network interface.
@@ -93,27 +81,17 @@ impl XdpManager {
             .set(0, XdpRuntimeConfig { dns_port }, 0)
             .context("failed to write XDP runtime configuration")?;
 
-        // Load and optionally attach the XDP program
+        // Load the program; attach only in auto mode (manual mode leaves it
+        // loaded but unattached for an external binder).
+        let program = load_dns_program(&mut ebpf)?;
+        program.load().context("failed to load XDP program")?;
         let link_id = if config.attach_mode == "auto" {
-            let program: &mut Xdp = ebpf
-                .program_mut("dns_xdp")
-                .context("dns_xdp program not found")?
-                .try_into()
-                .context("dns_xdp is not an XDP program")?;
-
-            program.load().context("failed to load XDP program")?;
-            let link_id = program
-                .attach(&iface, XdpMode::Default)
-                .context(format!("failed to attach XDP to interface {iface}"))?;
-            Some(link_id)
+            Some(
+                program
+                    .attach(&iface, XdpMode::Default)
+                    .context(format!("failed to attach XDP to interface {iface}"))?,
+            )
         } else {
-            // manual mode: program is loaded but not attached
-            let program: &mut Xdp = ebpf
-                .program_mut("dns_xdp")
-                .context("dns_xdp program not found")?
-                .try_into()
-                .context("dns_xdp is not an XDP program")?;
-            program.load().context("failed to load XDP program")?;
             None
         };
 
@@ -125,7 +103,6 @@ impl XdpManager {
             interface: iface,
         })
     }
-
     /// Take ownership of the [`DnsCacheMap`] so it can be moved into the
     /// middleware. Panics (via `expect`) if called more than once.
     pub fn take_cache(&mut self) -> DnsCacheMap {
@@ -141,4 +118,14 @@ impl XdpManager {
             .take()
             .expect("XDP stats reader already taken or was never initialized")
     }
+}
+
+/// Fetch the `dns_xdp` program from a loaded ELF object, verifying it is an
+/// XDP program. The program is returned unloaded; the caller decides whether
+/// to attach it after [`Xdp::load`].
+fn load_dns_program(ebpf: &mut aya::Ebpf) -> Result<&mut Xdp> {
+    ebpf.program_mut("dns_xdp")
+        .context("dns_xdp program not found")?
+        .try_into()
+        .context("dns_xdp is not an XDP program")
 }

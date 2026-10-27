@@ -44,7 +44,7 @@ fn xdp_stats_field_order_matches_across_workspaces() {
     let userspace_path = concat!(env!("CARGO_MANIFEST_DIR"), "/src/types.rs");
     let kernel_path = concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/../../xdp/doggy-dns-xdp-ebpf/src/main.rs"
+        "/../../xdp/doggy-dns-xdp-ebpf/src/types.rs"
     );
 
     let userspace_source = std::fs::read_to_string(userspace_path)
