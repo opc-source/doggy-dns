@@ -233,10 +233,13 @@ fn parse_dns_question(
         if labels >= MAX_LABELS {
             return None;
         }
-        if pos >= end {
+        // Compare packet-relative addresses, not bare offsets: the verifier
+        // only tracks bounds for pointers derived from the packet.
+        let cur = data + pos;
+        if cur >= end {
             return None;
         }
-        let label_len = unsafe { *(data as *const u8).add(pos) } as usize;
+        let label_len = unsafe { *(cur as *const u8) } as usize;
         pos += 1;
 
         if label_len == 0 {
@@ -249,10 +252,11 @@ fn parse_dns_question(
         // Copy label bytes to buffer (lowercased for case-insensitive matching)
         let mut i = 0;
         while i < label_len {
-            if pos + i >= end {
+            let cur = data + pos + i;
+            if cur >= end {
                 return None;
             }
-            let byte = unsafe { *(data as *const u8).add(pos + i) };
+            let byte = unsafe { *(cur as *const u8) };
             if name_len >= 255 {
                 return None;
             }
@@ -272,16 +276,17 @@ fn parse_dns_question(
     // After the loop, pos points to QTYPE (the 0x00 root label was consumed
     // inside the loop: we read it, then incremented pos past it).
     // Read QTYPE and QCLASS byte-by-byte to avoid misaligned reads.
-    if pos + 4 > end {
+    let q_ptr = data + pos;
+    if q_ptr + 4 > end {
         return None;
     }
     let qtype = unsafe {
-        let p = data as *const u8;
-        (u16::from(*p.add(pos)) << 8) | u16::from(*p.add(pos + 1))
+        let p = q_ptr as *const u8;
+        (u16::from(*p) << 8) | u16::from(*p.add(1))
     };
     let qclass = unsafe {
-        let p = data as *const u8;
-        (u16::from(*p.add(pos + 2)) << 8) | u16::from(*p.add(pos + 3))
+        let p = q_ptr as *const u8;
+        (u16::from(*p.add(2)) << 8) | u16::from(*p.add(3))
     };
 
     // question_len = total length of question section (QNAME + QTYPE + QCLASS)
