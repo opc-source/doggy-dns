@@ -172,7 +172,7 @@ fn init_xdp(
     if !config.xdp.enabled {
         return None;
     }
-    match XdpManager::new(&config.xdp) {
+    match XdpManager::new(&config.xdp, config.server.port) {
         Ok(mut mgr) => {
             let cache = mgr.take_cache();
             let middleware = XdpCacheMiddleware::new(cache, &config.xdp);
@@ -186,7 +186,7 @@ fn init_xdp(
         }
         Err(e) => {
             tracing::warn!(
-                error = %e,
+                error = %format!("{e:#}"),
                 "failed to initialize XDP fast path, continuing without it"
             );
             None

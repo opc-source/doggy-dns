@@ -8,6 +8,8 @@ use anyhow::{Context as _, Result};
 #[cfg(target_os = "linux")]
 use aya::EbpfLoader;
 #[cfg(target_os = "linux")]
+use aya::maps::{Array, MapData};
+#[cfg(target_os = "linux")]
 use aya::programs::{Xdp, XdpMode};
 #[cfg(target_os = "linux")]
 use std::fs;
@@ -18,6 +20,8 @@ use std::path::Path;
 use crate::cache::DnsCacheMap;
 #[cfg(target_os = "linux")]
 use crate::interface::resolve_interface;
+#[cfg(target_os = "linux")]
+use crate::types::XdpRuntimeConfig;
 #[cfg(target_os = "linux")]
 use doggy_dns_basic::XdpConfig;
 
@@ -36,9 +40,12 @@ pub struct XdpManager {
 
 #[cfg(target_os = "linux")]
 impl XdpManager {
-    /// Load the XDP program from the embedded ELF, set up the BPF map, and
+    /// Load the XDP program from the embedded ELF, set up the BPF maps, and
     /// optionally attach to the configured network interface.
-    pub fn new(config: &XdpConfig) -> Result<Self> {
+    ///
+    /// `dns_port` must be the UDP port the userspace server listens on: the
+    /// program only answers queries addressed to it.
+    pub fn new(config: &XdpConfig, dns_port: u16) -> Result<Self> {
         let iface =
             resolve_interface(&config.interface).context("failed to resolve XDP interface")?;
 
@@ -64,6 +71,17 @@ impl XdpManager {
         map.pin(pin_path).context("failed to pin DNS_CACHE map")?;
 
         let cache = DnsCacheMap::from_map(map)?;
+
+        // Fill in the runtime configuration before attach so the program never
+        // observes a half-initialised entry.
+        let mut config_map: Array<MapData, XdpRuntimeConfig> = Array::try_from(
+            ebpf.take_map("XDP_CONFIG")
+                .context("XDP_CONFIG map not found in ELF")?,
+        )
+        .context("XDP_CONFIG has an unexpected value type")?;
+        config_map
+            .set(0, XdpRuntimeConfig { dns_port }, 0)
+            .context("failed to write XDP runtime configuration")?;
 
         // Load and optionally attach the XDP program
         let link_id = if config.attach_mode == "auto" {

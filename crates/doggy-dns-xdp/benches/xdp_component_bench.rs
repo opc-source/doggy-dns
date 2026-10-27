@@ -3,6 +3,7 @@ use std::hint::black_box;
 use criterion::{Criterion, criterion_group, criterion_main};
 use doggy_dns_xdp::cache::{fnv1a_64, make_cache_key};
 use doggy_dns_xdp::types::CacheValue;
+use hickory_proto::rr::Name;
 
 fn bench_fnv1a_hash(c: &mut Criterion) {
     let names = [
@@ -21,14 +22,10 @@ fn bench_fnv1a_hash(c: &mut Criterion) {
 }
 
 fn bench_make_cache_key(c: &mut Criterion) {
+    let name = Name::from_ascii("svc-1.nacos.default.doggy.test.").expect("valid benchmark name");
+
     c.bench_function("make_cache_key", |b| {
-        b.iter(|| {
-            make_cache_key(
-                black_box("svc-1.nacos.default.doggy.test"),
-                black_box(1),
-                black_box(1),
-            )
-        })
+        b.iter(|| make_cache_key(black_box(&name), black_box(1), black_box(1)))
     });
 }
 

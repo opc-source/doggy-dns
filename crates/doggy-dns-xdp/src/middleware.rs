@@ -1,6 +1,7 @@
 use crate::cache::make_cache_key;
 use crate::types::{CacheKey, CacheValue};
 use hickory_proto::op::ResponseCode;
+use hickory_proto::rr::Name;
 
 /// Compute cache key and value for a DNS response.
 ///
@@ -13,7 +14,7 @@ use hickory_proto::op::ResponseCode;
 /// out before calling this function.
 #[allow(clippy::too_many_arguments)]
 pub fn compute_cache_entry(
-    qname: &str,
+    qname: &Name,
     qtype: u16,
     qclass: u16,
     response_code: ResponseCode,
@@ -109,7 +110,7 @@ impl Middleware for XdpCacheMiddleware {
             }
         };
 
-        let qname = request_info.query.name().to_string();
+        let qname = request_info.query.name();
         let qtype = u16::from(request_info.query.query_type());
         let qclass = u16::from(request_info.query.query_class());
 
@@ -117,7 +118,7 @@ impl Middleware for XdpCacheMiddleware {
         let now_ns = now_ktime_ns();
 
         let (key, value) = compute_cache_entry(
-            &qname,
+            qname,
             qtype,
             qclass,
             outcome.response_code,
