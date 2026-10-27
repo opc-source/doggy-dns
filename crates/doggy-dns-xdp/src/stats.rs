@@ -3,6 +3,11 @@
 //! The delta math compiles on every platform so it can be unit-tested without
 //! root or eBPF. The map reader and poller are Linux-only.
 
+#[cfg(target_os = "linux")]
+use anyhow::{Context as _, Result};
+#[cfg(target_os = "linux")]
+use aya::maps::{Map, MapData, PerCpuArray};
+
 use crate::types::XdpStats;
 
 /// Difference between two [`XdpStats`] snapshots.
@@ -62,5 +67,43 @@ impl XdpStats {
             drop,
             reset: hit_reset || negative_reset || miss_reset || expired_reset || drop_reset,
         }
+    }
+}
+
+/// Userspace view of the per-CPU [`XdpStats`] map.
+#[cfg(target_os = "linux")]
+pub struct XdpStatsReader {
+    inner: PerCpuArray<MapData, XdpStats>,
+}
+
+#[cfg(target_os = "linux")]
+impl XdpStatsReader {
+    /// Wrap the `XDP_STATS` map taken from the loaded ELF.
+    pub fn from_map(map: Map) -> Result<Self> {
+        Ok(Self {
+            inner: PerCpuArray::try_from(map)?,
+        })
+    }
+
+    /// Read every CPU slot and sum the counters.
+    ///
+    /// The slots are not read atomically with respect to each other, so a
+    /// snapshot can lag a few microseconds behind the "current" total. Each
+    /// slot only ever increases, so deltas stay non-negative.
+    pub fn snapshot(&self) -> Result<XdpStats> {
+        let values = self
+            .inner
+            .get(&0, 0)
+            .context("failed to read XDP stats map")?;
+
+        let mut total = XdpStats::default();
+        for value in values.iter() {
+            total.hit += value.hit;
+            total.negative_hit += value.negative_hit;
+            total.miss += value.miss;
+            total.expired += value.expired;
+            total.drop += value.drop;
+        }
+        Ok(total)
     }
 }
