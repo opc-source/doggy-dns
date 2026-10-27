@@ -287,7 +287,12 @@ fn parse_dns_question(
         let mut i = 0;
         while i < label_len {
             let cur = data + pos + i;
-            if cur + 1 > end {
+            // Two bytes, not one: the compiler folds `cur + 1 > end` into
+            // `end > cur`, and a comparison whose packet operand has no fixed
+            // offset yields the verifier no range. Every label body is followed
+            // by the root label and QTYPE/QCLASS, so asking for a second byte
+            // only rejects truncated messages.
+            if cur + 2 > end {
                 return None;
             }
             let byte = unsafe { *(cur as *const u8) };
