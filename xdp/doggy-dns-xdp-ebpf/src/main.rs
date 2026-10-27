@@ -83,6 +83,8 @@ const MAX_LABELS: usize = 128;
 const ETH_HDR_LEN: usize = core::mem::size_of::<EthHdr>();
 const UDP_HDR_LEN: usize = core::mem::size_of::<UdpHdr>();
 const DNS_HDR_LEN: usize = 12;
+const MAX_DNS_LEN: usize = 512;
+const COPY_CHUNK: usize = 4;
 
 // ---------------------------------------------------------------------------
 // BPF map
@@ -100,7 +102,9 @@ static DNS_CACHE: LruHashMap<CacheKey, CacheValue> =
 pub fn dns_xdp(ctx: XdpContext) -> u32 {
     match try_dns_xdp(&ctx) {
         Ok(action) => action,
-        Err(_) => xdp_action::XDP_PASS,
+        // Errors only happen after the frame has been resized, so the packet
+        // can no longer be handed on as the original query.
+        Err(_) => xdp_action::XDP_DROP,
     }
 }
 
@@ -140,32 +144,33 @@ fn try_dns_xdp(ctx: &XdpContext) -> Result<u32, ()> {
     if u16::from_be(udp.dest) != DNS_PORT {
         return Ok(xdp_action::XDP_PASS);
     }
+    let udp_len = u16::from_be(udp.len) as usize;
+    if udp_len < UDP_HDR_LEN {
+        return Ok(xdp_action::XDP_PASS);
+    }
+    // Current DNS message length, taken from the UDP length field. The packet
+    // length cannot be derived from `data_end - data`: the verifier rejects any
+    // arithmetic involving a PTR_TO_PACKET_END register.
+    let old_dns_len = udp_len - UDP_HDR_LEN;
 
     // 4. Parse DNS header
     let dns_offset = udp_offset + UDP_HDR_LEN;
     if data + dns_offset + DNS_HDR_LEN > end {
         return Ok(xdp_action::XDP_PASS);
     }
-    let dns_ptr = unsafe { (data + dns_offset) as *const u8 };
+    let dns_ptr = (data + dns_offset) as *const u8;
 
-    // Check QR bit (must be 0 = query)
+    // Query must have QR=0 and QDCOUNT=1
     let flags = read_u16_be(dns_ptr, 2);
-    if flags & 0x8000 != 0 {
-        return Ok(xdp_action::XDP_PASS);
-    }
-
-    // Check QDCOUNT == 1
-    let qdcount = read_u16_be(dns_ptr, 4);
-    if qdcount != 1 {
+    if flags & 0x8000 != 0 || read_u16_be(dns_ptr, 4) != 1 {
         return Ok(xdp_action::XDP_PASS);
     }
 
     // 5. Extract QNAME and compute hash
-    let (name_hash, qtype, qclass, question_len) =
-        match parse_dns_question(ctx, dns_offset) {
-            Some(v) => v,
-            None => return Ok(xdp_action::XDP_PASS),
-        };
+    let (name_hash, qtype, qclass, question_len) = match parse_dns_question(ctx, dns_offset) {
+        Some(v) => v,
+        None => return Ok(xdp_action::XDP_PASS),
+    };
 
     let key = CacheKey {
         name_hash,
@@ -173,8 +178,10 @@ fn try_dns_xdp(ctx: &XdpContext) -> Result<u32, ()> {
     };
 
     // 6. Cache lookup
-    let entry = unsafe { DNS_CACHE.get(&key) }
-        .ok_or(())?;
+    let entry = match unsafe { DNS_CACHE.get(&key) } {
+        Some(entry) => entry,
+        None => return Ok(xdp_action::XDP_PASS),
+    };
 
     // 7. TTL check
     let now = unsafe { bpf_ktime_get_ns() };
@@ -182,21 +189,47 @@ fn try_dns_xdp(ctx: &XdpContext) -> Result<u32, ()> {
         return Ok(xdp_action::XDP_PASS);
     }
 
-    // Save the original TXID (first 2 bytes of DNS header) before any modifications
-    let txid = read_u16_be(dns_ptr, 0);
-
-    // 8. Construct response
-    if entry.flags & FLAG_NEGATIVE != 0 {
-        build_nxdomain_response(ctx, dns_offset, question_len)?;
-    } else {
-        build_positive_response(ctx, dns_offset, entry, txid)?;
+    // The query must be fully contained in the frame before we resize it.
+    if data + dns_offset + old_dns_len > end {
+        return Ok(xdp_action::XDP_PASS);
     }
 
-    // 9. Swap headers for reply
-    swap_ethernet_headers(ctx);
-    swap_ip_headers(ctx, ip_offset);
-    swap_udp_headers(ctx, udp_offset);
-    recalculate_checksums(ctx, ip_offset, udp_offset);
+    let txid = read_u16_be(dns_ptr, 0);
+    let negative = entry.flags & FLAG_NEGATIVE != 0;
+    let resp_len = entry.resp_len as usize;
+    let new_dns_len = if negative {
+        DNS_HDR_LEN + question_len
+    } else {
+        if resp_len < DNS_HDR_LEN || resp_len > MAX_DNS_LEN {
+            return Ok(xdp_action::XDP_PASS);
+        }
+        resp_len
+    };
+
+    // 8. Resize the frame to the new DNS message length.
+    let delta = new_dns_len as i32 - old_dns_len as i32;
+    if unsafe { bpf_xdp_adjust_tail(ctx.ctx, delta) } != 0 {
+        return Ok(xdp_action::XDP_PASS);
+    }
+
+    // Past this point the frame has been resized, so every failure returns
+    // `Err` and the packet is dropped instead of being passed on: the original
+    // query no longer exists.
+    let data = ctx.data();
+    let end = ctx.data_end();
+    if data + dns_offset + new_dns_len > end {
+        return Err(());
+    }
+    let dns = data + dns_offset;
+
+    if negative {
+        write_nxdomain(dns, end)?;
+    } else {
+        write_positive(dns, end, entry, resp_len, txid)?;
+    }
+
+    // 9. Swap headers for reply, fix lengths, and recompute checksums.
+    finalize_headers(ctx, ip_hdr_len, udp_offset, new_dns_len)?;
 
     Ok(xdp_action::XDP_TX)
 }
@@ -290,157 +323,189 @@ fn parse_dns_question(
         (u16::from(*p.add(2)) << 8) | u16::from(*p.add(3))
     };
 
-    // question_len = total length of question section (QNAME + QTYPE + QCLASS)
-    let question_total_len = (pos + 4) - dns_offset;
+    // Length of the question section itself (QNAME + QTYPE + QCLASS), which
+    // starts right after the DNS header.
+    let question_len = (pos + 4) - (dns_offset + DNS_HDR_LEN);
 
     let name_hash = fnv1a_64(&name_buf[..name_len]);
-    Some((name_hash, qtype, qclass, question_total_len))
+    Some((name_hash, qtype, qclass, question_len))
 }
 
 // ---------------------------------------------------------------------------
 // Response construction
 // ---------------------------------------------------------------------------
 
-fn build_positive_response(
-    ctx: &XdpContext,
-    dns_offset: usize,
+/// Rewrite the DNS header for a cached NXDOMAIN answer.
+#[inline(always)]
+fn write_nxdomain(dns: usize, end: usize) -> Result<(), ()> {
+    // A constant offset keeps the packet register's id, so the range proven by
+    // this comparison also covers every access below.
+    if dns + DNS_HDR_LEN > end {
+        return Err(());
+    }
+
+    // Keep the RD bit from the query, set QR=1 and RCODE=3 (NXDomain).
+    let orig_flags = read_u16_be(dns as *const u8, 2);
+    let new_flags = 0x8000 | (orig_flags & 0x0100) | 0x0003;
+    write_u16_be(dns as *mut u8, 2, new_flags);
+
+    // ANCOUNT, NSCOUNT, ARCOUNT = 0
+    write_u16_be(dns as *mut u8, 6, 0);
+    write_u16_be(dns as *mut u8, 8, 0);
+    write_u16_be(dns as *mut u8, 10, 0);
+
+    Ok(())
+}
+
+/// Copy the cached reply into the packet, keeping the query's transaction id.
+///
+/// The copy runs in [`COPY_CHUNK`]-sized pieces, each guarded by a
+/// `p + COPY_CHUNK > end` comparison. The constant addend is what makes the
+/// guard useful to the verifier: it derives a packet range from the pointer's
+/// fixed offset, and a chunk larger than one byte keeps the compiler from
+/// folding the comparison into the rangeless `p >= end` form.
+#[inline(always)]
+fn write_positive(
+    dns: usize,
+    end: usize,
     entry: &CacheValue,
+    resp_len: usize,
     txid: u16,
 ) -> Result<(), ()> {
-    let resp_len = entry.resp_len as usize;
-    if resp_len == 0 || resp_len > 512 {
+    if resp_len < DNS_HDR_LEN || resp_len > MAX_DNS_LEN {
         return Err(());
     }
 
-    let new_packet_len = dns_offset + resp_len;
-    if new_packet_len > 1500 {
-        return Err(());
+    let src = entry.resp_data.as_ptr();
+    // Copy the leading chunk so that the loop below is aligned to it and ends
+    // exactly at resp_len. resp_len >= DNS_HDR_LEN, so four bytes are always
+    // available.
+    let lead = resp_len & (COPY_CHUNK - 1);
+    let mut i = lead;
+    if lead != 0 {
+        if dns + COPY_CHUNK > end {
+            return Err(());
+        }
+        copy_chunk(dns, src, 0);
     }
-
-    let current_len = unsafe { ctx.data_end() - ctx.data() };
-    let adjust = new_packet_len as i32 - current_len as i32;
-    let ret = unsafe { bpf_xdp_adjust_tail(ctx.ctx, adjust) };
-    if ret != 0 {
-        return Err(());
-    }
-
-    // Re-read data/data_end after tail adjustment
-    let data = ctx.data();
-    let dst = unsafe { (data + dns_offset) as *mut u8 };
-
-    // Copy cached response data into DNS payload
-    let src = &entry.resp_data;
-    let mut i = 0;
     while i < resp_len {
-        unsafe { *dst.add(i) = src[i] };
-        i += 1;
+        let p = dns + i;
+        if p + COPY_CHUNK > end {
+            return Err(());
+        }
+        copy_chunk(p, src, i);
+        i += COPY_CHUNK;
     }
 
-    // Preserve the original query's TXID (bytes 0-1 of DNS header)
-    // The cached response has its own TXID; overwrite with the query's.
-    unsafe {
-        *dst.add(0) = (txid >> 8) as u8;
-        *dst.add(1) = (txid & 0xFF) as u8;
-    }
-
-    Ok(())
-}
-
-fn build_nxdomain_response(
-    ctx: &XdpContext,
-    dns_offset: usize,
-    question_len: usize,
-) -> Result<(), ()> {
-    // Truncate packet to just DNS header + question section
-    let new_dns_len = DNS_HDR_LEN + question_len;
-    let new_packet_len = dns_offset + new_dns_len;
-    let current_len = unsafe { ctx.data_end() - ctx.data() };
-
-    let adjust = new_packet_len as i32 - current_len as i32;
-    let ret = unsafe { bpf_xdp_adjust_tail(ctx.ctx, adjust) };
-    if ret != 0 {
+    // The cached reply carries the transaction id of the query that populated
+    // the cache; overwrite it with the current query's id.
+    if dns + 2 > end {
         return Err(());
     }
-
-    // Re-read data after tail adjustment
-    let data = ctx.data();
-    let dns_ptr = unsafe { (data + dns_offset) as *mut u8 };
-
-    // Set QR=1, OPCODE=0, AA=0, TC=0, RD=1 (preserve), RA=0, Z=0, RCODE=3 (NXDomain)
-    // Flags word at offset 2: 0x8003 = QR=1, RCODE=3
-    // Preserve the RD (Recursion Desired) bit from the original query.
-    let orig_flags = read_u16_be(dns_ptr as *const u8, 2);
-    let rd_bit = orig_flags & 0x0100; // RD is bit 8
-    let new_flags = 0x8000 | rd_bit | 0x0003; // QR=1, RCODE=3
-    write_u16_be(dns_ptr, 2, new_flags);
-
-    // Set ANCOUNT=0, NSCOUNT=0, ARCOUNT=0
-    write_u16_be(dns_ptr, 6, 0);
-    write_u16_be(dns_ptr, 8, 0);
-    write_u16_be(dns_ptr, 10, 0);
+    write_u16_be(dns as *mut u8, 0, txid);
 
     Ok(())
 }
 
 // ---------------------------------------------------------------------------
-// Header swap + checksum recalculation
+// Header swap + length fixups + checksum recalculation
 // ---------------------------------------------------------------------------
 
-fn swap_ethernet_headers(ctx: &XdpContext) {
+#[inline(always)]
+fn finalize_headers(
+    ctx: &XdpContext,
+    ip_hdr_len: usize,
+    udp_offset: usize,
+    new_dns_len: usize,
+) -> Result<(), ()> {
     let data = ctx.data();
-    let eth = unsafe { &mut *(data as *mut EthHdr) };
-    let tmp = eth.src;
-    eth.src = eth.dst;
-    eth.dst = tmp;
-}
+    let end = ctx.data_end();
 
-fn swap_ip_headers(ctx: &XdpContext, ip_offset: usize) {
-    let data = ctx.data();
-    let ip = unsafe { &mut *((data + ip_offset) as *mut IpHdr) };
-    let tmp = ip.saddr;
-    ip.saddr = ip.daddr;
-    ip.daddr = tmp;
-    // Set DF flag (Don't Fragment)
-    ip.frag_off = (ip.frag_off & 0x00FF) | 0x4000;
-}
-
-fn swap_udp_headers(ctx: &XdpContext, udp_offset: usize) {
-    let data = ctx.data();
-    let udp = unsafe { &mut *((data + udp_offset) as *mut UdpHdr) };
-    let tmp = udp.source;
-    udp.source = udp.dest;
-    udp.dest = tmp;
-}
-
-fn recalculate_checksums(ctx: &XdpContext, ip_offset: usize, udp_offset: usize) {
-    // Recalculate IPv4 header checksum
-    let data = ctx.data();
-    let ip = unsafe { &mut *((data + ip_offset) as *mut IpHdr) };
-    ip.check = 0;
-    let ip_hdr_len = (ip.ihl() as usize) * 4;
-
-    // Simple Internet checksum (RFC 1071) over the IP header
-    let mut sum: u32 = 0;
-    let ip_bytes = unsafe { core::slice::from_raw_parts(ip as *const IpHdr as *const u8, ip_hdr_len) };
-    let mut i = 0;
-    while i + 1 < ip_hdr_len {
-        sum += ((ip_bytes[i] as u32) << 8) | (ip_bytes[i + 1] as u32);
-        i += 2;
+    // Ethernet: swap source and destination MAC addresses. Every access below
+    // has a constant offset, so this single check covers all of them.
+    if data + ETH_HDR_LEN > end {
+        return Err(());
     }
-    // Fold 32-bit sum into 16 bits
-    while (sum >> 16) != 0 {
-        sum = (sum & 0xFFFF) + (sum >> 16);
-    }
-    ip.check = !(sum as u16);
+    let eth = data as *mut u8;
+    swap_u8(eth, 0, 6);
+    swap_u8(eth, 1, 7);
+    swap_u8(eth, 2, 8);
+    swap_u8(eth, 3, 9);
+    swap_u8(eth, 4, 10);
+    swap_u8(eth, 5, 11);
 
-    // Zero UDP checksum (optional for IPv4/UDP per RFC 768)
-    let udp = unsafe { &mut *((data + udp_offset) as *mut UdpHdr) };
-    udp.check = 0;
+    // IPv4: swap addresses, set DF, fix the total length and update the header
+    // checksum. The checksum is updated incrementally (RFC 1624) rather than
+    // recomputed over the whole header: a header walk needs a variable offset,
+    // and the verifier only accepts variable offsets that are re-checked
+    // against data_end on every iteration.
+    if data + ETH_HDR_LEN + core::mem::size_of::<IpHdr>() > end {
+        return Err(());
+    }
+    let ip = (data + ETH_HDR_LEN) as *mut u8;
+    let old_tot_len = read_u16_be(ip, 2);
+    let old_frag_off = read_u16_be(ip, 6);
+    let old_check = read_u16_be(ip, 10);
+
+    // Swapping the two addresses leaves the one's complement sum unchanged.
+    swap_u8(ip, 12, 16);
+    swap_u8(ip, 13, 17);
+    swap_u8(ip, 14, 18);
+    swap_u8(ip, 15, 19);
+
+    let new_tot_len = (ip_hdr_len + UDP_HDR_LEN + new_dns_len) as u16;
+    let new_frag_off = old_frag_off | 0x4000; // Don't Fragment
+    write_u16_be(ip, 2, new_tot_len);
+    write_u16_be(ip, 6, new_frag_off);
+
+    // HC' = ~(~HC + ~m + m') over the two words that changed (RFC 1624 §3).
+    let mut sum = (!old_check) as u32
+        + (!old_tot_len) as u32
+        + new_tot_len as u32
+        + (!old_frag_off) as u32
+        + new_frag_off as u32;
+    // Five addends of at most 16 bits each, so two folds are enough.
+    sum = (sum & 0xFFFF) + (sum >> 16);
+    sum = (sum & 0xFFFF) + (sum >> 16);
+    write_u16_be(ip, 10, !(sum as u16));
+
+    // UDP: swap ports, fix the datagram length, zero the checksum (optional
+    // for IPv4, see RFC 768).
+    if data + udp_offset + UDP_HDR_LEN > end {
+        return Err(());
+    }
+    let udp = (data + udp_offset) as *mut u8;
+    swap_u8(udp, 0, 2);
+    swap_u8(udp, 1, 3);
+    write_u16_be(udp, 4, (UDP_HDR_LEN + new_dns_len) as u16);
+    write_u16_be(udp, 6, 0);
+
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
 // Helper: safe byte-level reads/writes for DNS header fields
 // ---------------------------------------------------------------------------
+
+/// Copy [`COPY_CHUNK`] bytes, all at constant offsets from `dst`.
+#[inline(always)]
+fn copy_chunk(dst: usize, src: *const u8, src_off: usize) {
+    unsafe {
+        *(dst as *mut u8) = *src.add(src_off);
+        *((dst + 1) as *mut u8) = *src.add(src_off + 1);
+        *((dst + 2) as *mut u8) = *src.add(src_off + 2);
+        *((dst + 3) as *mut u8) = *src.add(src_off + 3);
+    }
+}
+
+#[inline(always)]
+fn swap_u8(p: *mut u8, a: usize, b: usize) {
+    unsafe {
+        let tmp = *p.add(a);
+        *p.add(a) = *p.add(b);
+        *p.add(b) = tmp;
+    }
+}
 
 #[inline]
 fn read_u16_be(ptr: *const u8, offset: usize) -> u16 {
