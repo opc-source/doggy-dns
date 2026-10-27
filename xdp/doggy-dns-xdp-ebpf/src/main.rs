@@ -234,9 +234,10 @@ fn parse_dns_question(
             return None;
         }
         // Compare packet-relative addresses, not bare offsets: the verifier
-        // only tracks bounds for pointers derived from the packet.
+        // only tracks bounds for pointers derived from the packet, and only
+        // for a strict `>` comparison against data_end.
         let cur = data + pos;
-        if cur >= end {
+        if cur + 1 > end {
             return None;
         }
         let label_len = unsafe { *(cur as *const u8) } as usize;
@@ -253,7 +254,7 @@ fn parse_dns_question(
         let mut i = 0;
         while i < label_len {
             let cur = data + pos + i;
-            if cur >= end {
+            if cur + 1 > end {
                 return None;
             }
             let byte = unsafe { *(cur as *const u8) };
