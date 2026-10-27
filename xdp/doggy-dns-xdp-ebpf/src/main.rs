@@ -5,7 +5,7 @@ use aya_ebpf::{
     bindings::xdp_action,
     helpers::{bpf_ktime_get_ns, bpf_xdp_adjust_tail},
     macros::{map, xdp},
-    maps::{Array, LruHashMap},
+    maps::{Array, LruHashMap, PerCpuArray},
     programs::XdpContext,
 };
 
@@ -41,6 +41,17 @@ pub struct CacheValue {
 #[derive(Clone, Copy)]
 pub struct XdpRuntimeConfig {
     pub dns_port: u16,
+}
+
+/// Per-CPU fast-path counters. Must match crates/doggy-dns-xdp/src/types.rs exactly.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct XdpStats {
+    pub hit: u64,
+    pub negative_hit: u64,
+    pub miss: u64,
+    pub expired: u64,
+    pub drop: u64,
 }
 
 // ---------------------------------------------------------------------------
@@ -97,6 +108,15 @@ const DNS_HDR_LEN: usize = 12;
 const MAX_DNS_LEN: usize = 512;
 const COPY_CHUNK: usize = 4;
 
+/// Why a packet fetched or matched nothing in the cache.
+enum Outcome {
+    Hit,
+    NegativeHit,
+    Miss,
+    Expired,
+    Drop,
+}
+
 // ---------------------------------------------------------------------------
 // BPF map
 // ---------------------------------------------------------------------------
@@ -108,64 +128,92 @@ static DNS_CACHE: LruHashMap<CacheKey, CacheValue> = LruHashMap::with_max_entrie
 #[map]
 static XDP_CONFIG: Array<XdpRuntimeConfig> = Array::with_max_entries(1, 0);
 
+/// Per-CPU counters classified at the single exit point of the program.
+#[map]
+static XDP_STATS: PerCpuArray<XdpStats> = PerCpuArray::with_max_entries(1, 0);
+
 // ---------------------------------------------------------------------------
 // XDP entry point
 // ---------------------------------------------------------------------------
 
 #[xdp]
 pub fn dns_xdp(ctx: XdpContext) -> u32 {
-    match try_dns_xdp(&ctx) {
-        Ok(action) => action,
+    let (action, outcome) = match try_dns_xdp(&ctx) {
+        Ok(result) => result,
         // Errors only happen after the frame has been resized, so the packet
         // can no longer be handed on as the original query.
-        Err(_) => xdp_action::XDP_DROP,
+        Err(()) => (xdp_action::XDP_DROP, Some(Outcome::Drop)),
+    };
+    if let Some(outcome) = outcome {
+        record(outcome);
+    }
+    action
+}
+
+/// Increment the current CPU's counter. One map lookup per classified packet;
+/// non-DNS traffic never reaches this path.
+#[inline(always)]
+fn record(outcome: Outcome) {
+    let Some(stats) = XDP_STATS.get_ptr_mut(0) else {
+        return;
+    };
+    // Safety: the per-CPU map value belongs to the current CPU, and XDP runs
+    // with bottom halves disabled, so no other instance can write this slot.
+    unsafe {
+        match outcome {
+            Outcome::Hit => (*stats).hit += 1,
+            Outcome::NegativeHit => (*stats).negative_hit += 1,
+            Outcome::Miss => (*stats).miss += 1,
+            Outcome::Expired => (*stats).expired += 1,
+            Outcome::Drop => (*stats).drop += 1,
+        }
     }
 }
 
-fn try_dns_xdp(ctx: &XdpContext) -> Result<u32, ()> {
+fn try_dns_xdp(ctx: &XdpContext) -> Result<(u32, Option<Outcome>), ()> {
     let data = ctx.data();
     let end = ctx.data_end();
 
     // 1. Parse Ethernet header
     if data + ETH_HDR_LEN > end {
-        return Ok(xdp_action::XDP_PASS);
+        return Ok((xdp_action::XDP_PASS, None));
     }
     let eth = unsafe { &*(data as *const EthHdr) };
     if u16::from_be(eth.h_proto) != ETH_P_IP {
-        return Ok(xdp_action::XDP_PASS);
+        return Ok((xdp_action::XDP_PASS, None));
     }
 
     // 2. Parse IPv4 header
     let ip_offset = ETH_HDR_LEN;
     if data + ip_offset + core::mem::size_of::<IpHdr>() > end {
-        return Ok(xdp_action::XDP_PASS);
+        return Ok((xdp_action::XDP_PASS, None));
     }
     let ip = unsafe { &*((data + ip_offset) as *const IpHdr) };
     if ip.protocol != IPPROTO_UDP {
-        return Ok(xdp_action::XDP_PASS);
+        return Ok((xdp_action::XDP_PASS, None));
     }
     let ip_hdr_len = (ip.ihl() as usize) * 4;
     if ip_hdr_len < 20 || data + ip_offset + ip_hdr_len > end {
-        return Ok(xdp_action::XDP_PASS);
+        return Ok((xdp_action::XDP_PASS, None));
     }
 
     // 3. Parse UDP header
     let udp_offset = ip_offset + ip_hdr_len;
     if data + udp_offset + UDP_HDR_LEN > end {
-        return Ok(xdp_action::XDP_PASS);
+        return Ok((xdp_action::XDP_PASS, None));
     }
     let udp = unsafe { &*((data + udp_offset) as *const UdpHdr) };
     // The userspace server may listen on any port, so it is read from the
     // configuration map the loader fills in before attaching.
     let Some(config) = XDP_CONFIG.get(0) else {
-        return Ok(xdp_action::XDP_PASS);
+        return Ok((xdp_action::XDP_PASS, None));
     };
     if u16::from_be(udp.dest) != config.dns_port {
-        return Ok(xdp_action::XDP_PASS);
+        return Ok((xdp_action::XDP_PASS, None));
     }
     let udp_len = u16::from_be(udp.len) as usize;
     if udp_len < UDP_HDR_LEN {
-        return Ok(xdp_action::XDP_PASS);
+        return Ok((xdp_action::XDP_PASS, None));
     }
     // Current DNS message length, taken from the UDP length field. The packet
     // length cannot be derived from `data_end - data`: the verifier rejects any
@@ -175,20 +223,20 @@ fn try_dns_xdp(ctx: &XdpContext) -> Result<u32, ()> {
     // 4. Parse DNS header
     let dns_offset = udp_offset + UDP_HDR_LEN;
     if data + dns_offset + DNS_HDR_LEN > end {
-        return Ok(xdp_action::XDP_PASS);
+        return Ok((xdp_action::XDP_PASS, None));
     }
     let dns_ptr = (data + dns_offset) as *const u8;
 
     // Query must have QR=0 and QDCOUNT=1
     let flags = read_u16_be(dns_ptr, 2);
     if flags & 0x8000 != 0 || read_u16_be(dns_ptr, 4) != 1 {
-        return Ok(xdp_action::XDP_PASS);
+        return Ok((xdp_action::XDP_PASS, None));
     }
 
     // 5. Extract QNAME and compute hash
     let (name_hash, qtype, qclass, question_len) = match parse_dns_question(ctx, dns_offset) {
         Some(v) => v,
-        None => return Ok(xdp_action::XDP_PASS),
+        None => return Ok((xdp_action::XDP_PASS, None)),
     };
 
     let key = CacheKey {
@@ -200,18 +248,18 @@ fn try_dns_xdp(ctx: &XdpContext) -> Result<u32, ()> {
     // 6. Cache lookup
     let entry = match unsafe { DNS_CACHE.get(&key) } {
         Some(entry) => entry,
-        None => return Ok(xdp_action::XDP_PASS),
+        None => return Ok((xdp_action::XDP_PASS, Some(Outcome::Miss))),
     };
 
     // 7. TTL check
     let now = unsafe { bpf_ktime_get_ns() };
     if entry.expires_at <= now {
-        return Ok(xdp_action::XDP_PASS);
+        return Ok((xdp_action::XDP_PASS, Some(Outcome::Expired)));
     }
 
     // The query must be fully contained in the frame before we resize it.
     if data + dns_offset + old_dns_len > end {
-        return Ok(xdp_action::XDP_PASS);
+        return Ok((xdp_action::XDP_PASS, None));
     }
 
     let txid = read_u16_be(dns_ptr, 0);
@@ -221,7 +269,7 @@ fn try_dns_xdp(ctx: &XdpContext) -> Result<u32, ()> {
         DNS_HDR_LEN + question_len
     } else {
         if resp_len < DNS_HDR_LEN || resp_len > MAX_DNS_LEN {
-            return Ok(xdp_action::XDP_PASS);
+            return Ok((xdp_action::XDP_PASS, None));
         }
         resp_len
     };
@@ -229,7 +277,7 @@ fn try_dns_xdp(ctx: &XdpContext) -> Result<u32, ()> {
     // 8. Resize the frame to the new DNS message length.
     let delta = new_dns_len as i32 - old_dns_len as i32;
     if unsafe { bpf_xdp_adjust_tail(ctx.ctx, delta) } != 0 {
-        return Ok(xdp_action::XDP_PASS);
+        return Ok((xdp_action::XDP_PASS, None));
     }
 
     // Past this point the frame has been resized, so every failure returns
@@ -251,7 +299,13 @@ fn try_dns_xdp(ctx: &XdpContext) -> Result<u32, ()> {
     // 9. Swap headers for reply, fix lengths, and recompute checksums.
     finalize_headers(ctx, ip_hdr_len, udp_offset, new_dns_len)?;
 
-    Ok(xdp_action::XDP_TX)
+    let outcome = if negative {
+        Outcome::NegativeHit
+    } else {
+        Outcome::Hit
+    };
+
+    Ok((xdp_action::XDP_TX, Some(outcome)))
 }
 
 // ---------------------------------------------------------------------------
