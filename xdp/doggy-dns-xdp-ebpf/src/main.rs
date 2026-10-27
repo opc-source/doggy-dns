@@ -102,8 +102,7 @@ const COPY_CHUNK: usize = 4;
 // ---------------------------------------------------------------------------
 
 #[map]
-static DNS_CACHE: LruHashMap<CacheKey, CacheValue> =
-    LruHashMap::with_max_entries(65536, 0);
+static DNS_CACHE: LruHashMap<CacheKey, CacheValue> = LruHashMap::with_max_entries(65536, 0);
 
 /// Single-entry map holding the settings the userspace loader supplies.
 #[map]
@@ -262,10 +261,7 @@ fn try_dns_xdp(ctx: &XdpContext) -> Result<u32, ()> {
 const FNV_OFFSET_BASIS: u64 = 0xcbf29ce484222325;
 const FNV_PRIME: u64 = 0x100000001b3;
 
-fn parse_dns_question(
-    ctx: &XdpContext,
-    dns_offset: usize,
-) -> Option<(u64, u16, u16, usize)> {
+fn parse_dns_question(ctx: &XdpContext, dns_offset: usize) -> Option<(u64, u16, u16, usize)> {
     let data = ctx.data();
     let end = ctx.data_end();
     // The QNAME is hashed as one flat stream of wire bytes (length-prefixed
