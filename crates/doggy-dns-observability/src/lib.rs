@@ -25,7 +25,7 @@ use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::{Layer, Registry, fmt};
 
-pub use metrics::DnsMetrics;
+pub use metrics::{DnsMetrics, XdpMetrics};
 
 /// Holds the OTel providers and the profile task. Drop (or call
 /// [`Observability::shutdown`]) flushes pending telemetry.
@@ -35,6 +35,7 @@ pub struct Observability {
     meter_provider: Option<SdkMeterProvider>,
     tracer_provider: Option<SdkTracerProvider>,
     metrics: Option<Arc<DnsMetrics>>,
+    xdp: Option<Arc<XdpMetrics>>,
     profile_exporter: Option<profiles::ProfileExporter>,
     profile_task: Option<JoinHandle<()>>,
     profile_stopper: Option<Arc<profiles::ProfileStopper>>,
@@ -51,6 +52,7 @@ impl Observability {
             meter_provider: None,
             tracer_provider: None,
             metrics: None,
+            xdp: None,
             profile_exporter: None,
             profile_task: None,
             profile_stopper: None,
@@ -68,9 +70,10 @@ impl Observability {
             }
 
             if config.metrics.enabled {
-                let (provider, metrics) =
+                let (provider, metrics, xdp_metrics) =
                     metrics::build_meter_provider(config, built_resource.clone())?;
                 observability.metrics = Some(Arc::new(metrics));
+                observability.xdp = Some(Arc::new(xdp_metrics));
                 observability.meter_provider = Some(provider);
             }
 
@@ -102,6 +105,11 @@ impl Observability {
     /// Middleware that records DNS query metrics. `None` when OTLP metrics are disabled.
     pub fn metrics_middleware(&self) -> Option<Arc<dyn Middleware>> {
         self.metrics.clone().map(|metrics| metrics.middleware())
+    }
+
+    /// Recorder for kernel-side XDP counters. `None` when OTLP metrics are disabled.
+    pub fn xdp_metrics(&self) -> Option<Arc<XdpMetrics>> {
+        self.xdp.clone()
     }
 
     /// Start the background CPU profiler. Must be called from within a Tokio runtime.

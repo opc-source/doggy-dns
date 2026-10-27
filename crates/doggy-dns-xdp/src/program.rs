@@ -21,6 +21,8 @@ use crate::cache::DnsCacheMap;
 #[cfg(target_os = "linux")]
 use crate::interface::resolve_interface;
 #[cfg(target_os = "linux")]
+use crate::stats::XdpStatsReader;
+#[cfg(target_os = "linux")]
 use crate::types::XdpRuntimeConfig;
 #[cfg(target_os = "linux")]
 use doggy_dns_basic::XdpConfig;
@@ -35,6 +37,7 @@ pub struct XdpManager {
     _ebpf: aya::Ebpf,
     _link: Option<aya::programs::xdp::XdpLinkId>,
     cache: Option<DnsCacheMap>,
+    stats: Option<XdpStatsReader>,
     pub interface: String,
 }
 
@@ -71,6 +74,13 @@ impl XdpManager {
         map.pin(pin_path).context("failed to pin DNS_CACHE map")?;
 
         let cache = DnsCacheMap::from_map(map)?;
+
+        // Take the stats map and wrap it before attach so the reader is ready
+        // as soon as the program starts counting.
+        let stats = ebpf
+            .take_map("XDP_STATS")
+            .context("XDP_STATS map not found in ELF")?;
+        let stats = XdpStatsReader::from_map(stats).context("failed to read XDP_STATS map")?;
 
         // Fill in the runtime configuration before attach so the program never
         // observes a half-initialised entry.
@@ -111,6 +121,7 @@ impl XdpManager {
             _ebpf: ebpf,
             _link: link_id,
             cache: Some(cache),
+            stats: Some(stats),
             interface: iface,
         })
     }
@@ -121,5 +132,13 @@ impl XdpManager {
         self.cache
             .take()
             .expect("XDP cache already taken or was never initialized")
+    }
+
+    /// Take ownership of the [`XdpStatsReader`]. Panics (via `expect`) if called
+    /// more than once, matching [`Self::take_cache`].
+    pub fn take_stats(&mut self) -> XdpStatsReader {
+        self.stats
+            .take()
+            .expect("XDP stats reader already taken or was never initialized")
     }
 }

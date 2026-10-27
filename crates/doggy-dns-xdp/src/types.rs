@@ -37,6 +37,24 @@ pub struct XdpRuntimeConfig {
     pub dns_port: u16,
 }
 
+/// Per-CPU fast-path counters written by the XDP program.
+///
+/// Must match `xdp/doggy-dns-xdp-ebpf/src/main.rs` exactly.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct XdpStats {
+    /// Queries answered from the cache (`XDP_TX`, positive entry).
+    pub hit: u64,
+    /// Queries answered from the cache with a cached NXDOMAIN.
+    pub negative_hit: u64,
+    /// Queries whose key was absent from the cache.
+    pub miss: u64,
+    /// Queries whose key was present but already expired.
+    pub expired: u64,
+    /// Packets dropped after the frame was resized (rewrite failure).
+    pub drop: u64,
+}
+
 impl CacheValue {
     pub fn new_positive(resp_data: Vec<u8>, expires_at: u64) -> Self {
         let len = resp_data.len().min(MAX_RESPONSE_SIZE);
@@ -75,6 +93,7 @@ const _: () = {
     assert!(core::mem::size_of::<CacheKey>() == 16);
     assert!(core::mem::size_of::<CacheValue>() == 528);
     assert!(core::mem::size_of::<XdpRuntimeConfig>() == 2);
+    assert!(core::mem::size_of::<XdpStats>() == 40);
 };
 
 // aya::Pod is required for using these types as BPF map keys/values.
@@ -85,3 +104,5 @@ unsafe impl aya::Pod for CacheKey {}
 unsafe impl aya::Pod for CacheValue {}
 #[cfg(target_os = "linux")]
 unsafe impl aya::Pod for XdpRuntimeConfig {}
+#[cfg(target_os = "linux")]
+unsafe impl aya::Pod for XdpStats {}

@@ -3,6 +3,7 @@ pub mod interface;
 pub mod middleware;
 #[cfg(target_os = "linux")]
 pub mod program;
+pub mod stats;
 pub mod types;
 
 #[cfg(target_os = "linux")]
