@@ -107,3 +107,77 @@ impl XdpStatsReader {
         Ok(total)
     }
 }
+
+/// Apply a snapshot to the running baseline and forward non-zero deltas.
+pub fn emit_delta(
+    previous: &mut XdpStats,
+    current: XdpStats,
+    sink: &mut impl FnMut(&'static str, u64),
+) {
+    let delta = current.delta_from(previous);
+    if delta.reset {
+        tracing::debug!("XDP stats counters reset (program reloaded)");
+    }
+    for (label, count) in delta.entries() {
+        sink(label, count);
+    }
+    *previous = current;
+}
+
+#[cfg(target_os = "linux")]
+use std::time::Duration;
+#[cfg(target_os = "linux")]
+use tokio::sync::watch;
+#[cfg(target_os = "linux")]
+use tokio::task::JoinHandle;
+
+/// Spawn the periodic map reader.
+///
+/// `sink` receives `(dns.xdp.result label, delta)` for every non-zero field.
+/// The task performs one final read when `stop` flips to `true`, then returns,
+/// so the last partial window is not lost on shutdown.
+#[cfg(target_os = "linux")]
+pub fn spawn_stats_poller(
+    reader: XdpStatsReader,
+    period: Duration,
+    mut stop: watch::Receiver<bool>,
+    mut sink: impl FnMut(&'static str, u64) + Send + 'static,
+) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut previous = XdpStats::default();
+        let mut ticker = tokio::time::interval(period);
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        // The first tick fires immediately; consume it so the first emit lands
+        // one full period after startup.
+        ticker.tick().await;
+
+        let mut warned = false;
+        loop {
+            tokio::select! {
+                _ = ticker.tick() => {}
+                _ = stop.changed() => break,
+            }
+
+            match reader.snapshot() {
+                Ok(current) => {
+                    warned = false;
+                    emit_delta(&mut previous, current, &mut sink);
+                }
+                Err(error) => {
+                    // Keep the previous baseline so the next successful read
+                    // still reports everything that happened in between.
+                    if warned {
+                        tracing::debug!(%error, "failed to read XDP stats map; skipping window");
+                    } else {
+                        tracing::warn!(%error, "failed to read XDP stats map; skipping window");
+                        warned = true;
+                    }
+                }
+            }
+        }
+
+        if let Ok(current) = reader.snapshot() {
+            emit_delta(&mut previous, current, &mut sink);
+        }
+    })
+}

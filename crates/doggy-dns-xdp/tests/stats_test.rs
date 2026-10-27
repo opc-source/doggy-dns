@@ -90,3 +90,37 @@ fn entries_skip_zero_counters() {
 
     assert_eq!(entries, vec![("hit", 2), ("miss", 1)]);
 }
+
+#[test]
+fn emit_delta_reports_only_non_zero_changes() {
+    use doggy_dns_xdp::stats::emit_delta;
+
+    let mut previous = XdpStats::default();
+    let mut recorded = Vec::new();
+
+    emit_delta(
+        &mut previous,
+        XdpStats {
+            hit: 1,
+            ..Default::default()
+        },
+        &mut |label, count| recorded.push((label, count)),
+    );
+
+    assert_eq!(recorded, vec![("hit", 1)]);
+    assert_eq!(previous.hit, 1);
+
+    recorded.clear();
+    emit_delta(
+        &mut previous,
+        XdpStats {
+            hit: 3,
+            miss: 2,
+            ..Default::default()
+        },
+        &mut |label, count| recorded.push((label, count)),
+    );
+
+    assert_eq!(recorded, vec![("hit", 2), ("miss", 2)]);
+    assert_eq!(previous.hit, 3);
+}
