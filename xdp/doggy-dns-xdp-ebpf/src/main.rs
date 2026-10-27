@@ -79,7 +79,10 @@ struct UdpHdr {
 const ETH_P_IP: u16 = 0x0800;
 const IPPROTO_UDP: u8 = 17;
 const DNS_PORT: u16 = 53;
-const MAX_LABELS: usize = 128;
+// The verifier unrolls the label loop once per possible path, so this bound
+// trades fast-path coverage for a program that fits the 1M-instruction budget.
+// Names with more labels than this are simply handed to userspace.
+const MAX_LABELS: usize = 16;
 const ETH_HDR_LEN: usize = core::mem::size_of::<EthHdr>();
 const UDP_HDR_LEN: usize = core::mem::size_of::<UdpHdr>();
 const DNS_HDR_LEN: usize = 12;
