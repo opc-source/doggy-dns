@@ -3,6 +3,7 @@ use doggy_dns_core::config::{DoggyDnsConfig, PluginKind, load_config};
 use doggy_dns_core::handler::DoggyDnsHandler;
 use doggy_dns_core::middleware::logging::LoggingMiddleware;
 use doggy_dns_core::server::build_server;
+use doggy_dns_mcp::live::LiveState;
 use doggy_dns_nacos::authority::NacosAuthority;
 use doggy_dns_nacos::watcher::NacosServiceWatcher;
 use doggy_dns_observability::Observability;
@@ -12,6 +13,7 @@ use doggy_dns_plugin::builtin::forward::ForwardAuthority;
 use doggy_dns_plugin::builtin::native::NativeAuthority;
 use hickory_server::zone_handler::ZoneHandler;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 use tokio::signal;
 
@@ -111,8 +113,9 @@ async fn async_main(
         Duration::from_secs(config.observability.metrics.interval_secs.max(1)),
     );
 
-    // Build authority chain from plugins (watchers kept alive for subscriptions)
-    let (_watchers, authority_chain) = build_authority_chain(&config).await?;
+    // Build authority chain from plugins (watchers kept alive for subscriptions
+    // and for the control plane's live cache signals).
+    let (watchers, authority_chain) = build_authority_chain(&config).await?;
 
     // Create handler
     let handler = DoggyDnsHandler::new(middlewares, Arc::new(authority_chain), xdp.enabled());
@@ -122,8 +125,11 @@ async fn async_main(
 
     tracing::info!("doggy-dns is ready");
 
-    // Start MCP server if enabled (non-fatal on failure)
-    let mcp_handle = start_mcp_server(&config, config_content).await;
+    // Start the control plane if enabled (non-fatal on failure). The XDP
+    // attach flag is fixed after startup — the manager lives as long as this
+    // function and dropping it detaches the program.
+    let live = build_live_state(&watchers, xdp.enabled());
+    let mcp_handle = start_control_plane(&config, config_content, live).await;
 
     // Run server until shutdown signal
     let shutdown_timeout = Duration::from_secs(config.server.shutdown_timeout);
@@ -162,7 +168,7 @@ async fn async_main(
         await_shutdown("xdp stats poller", handle).await;
     }
 
-    // Shut down MCP server
+    // Shut down the control plane listener
     if let Some(handle) = mcp_handle {
         handle.cancel.cancel();
         await_shutdown("mcp server", handle.wait()).await;
@@ -187,9 +193,9 @@ where
 
 async fn build_authority_chain(
     config: &DoggyDnsConfig,
-) -> Result<(Vec<NacosServiceWatcher>, AuthorityChain)> {
+) -> Result<(Vec<(String, NacosServiceWatcher)>, AuthorityChain)> {
     let mut handlers: Vec<(String, Arc<dyn ZoneHandler>)> = Vec::new();
-    let mut watchers: Vec<NacosServiceWatcher> = Vec::new();
+    let mut watchers: Vec<(String, NacosServiceWatcher)> = Vec::new();
 
     if config.plugins.is_empty() {
         // Default: forward to 8.8.8.8 and 1.1.1.1
@@ -225,7 +231,7 @@ async fn build_authority_chain(
                 let name = format!("nacos[{}]", zone);
                 let authority = NacosAuthority::new(cache, zone, plugin.ttl);
                 handlers.push((name.clone(), Arc::new(authority)));
-                watchers.push(watcher);
+                watchers.push((zone.to_string(), watcher));
                 tracing::info!(plugin = %name, zone = zone, addr = addr, "loaded plugin");
             }
             PluginKind::Native => {
@@ -262,11 +268,34 @@ async fn build_authority_chain(
     Ok((watchers, AuthorityChain::new(handlers)))
 }
 
-async fn start_mcp_server(
+/// Register the live runtime signals the control plane reports: one per
+/// Nacos zone (cache occupancy + push freshness) plus the XDP attach state.
+/// Forward/native upstream health is deliberately not probed here — active
+/// upstream checks are a separate concern.
+fn build_live_state(
+    watchers: &[(String, NacosServiceWatcher)],
+    xdp_attached: bool,
+) -> Arc<LiveState> {
+    let mut live = LiveState::new();
+    for (zone, watcher) in watchers {
+        let cache = watcher.cache();
+        let last_push = watcher.last_push();
+        live.register_nacos_zone(
+            zone,
+            move || cache.len() as u64,
+            move || last_push.load(Ordering::Relaxed),
+        );
+    }
+    live.register_xdp(move || xdp_attached);
+    Arc::new(live)
+}
+
+async fn start_control_plane(
     config: &DoggyDnsConfig,
     config_content: &str,
+    live: Arc<LiveState>,
 ) -> Option<doggy_dns_mcp::McpServerHandle> {
-    if !config.mcp.enabled {
+    if !config.control.enabled {
         return None;
     }
 
@@ -281,17 +310,17 @@ async fn start_mcp_server(
         config_content,
     ));
 
-    let mcp_config = config.mcp.clone();
+    let control_config = config.control.clone();
 
     // start() only binds the listener and spawns the serve task; a failure
     // here must stay non-fatal so DNS service continues alone.
-    match doggy_dns_mcp::start(state, mcp_config).await {
+    match doggy_dns_mcp::start(state, live, control_config).await {
         Ok(handle) => {
-            tracing::info!(addr = %handle.addr, "mcp server listening");
+            tracing::info!(addr = %handle.addr, "control plane listening");
             Some(handle)
         }
         Err(error) => {
-            tracing::error!(%error, "failed to start mcp server; continuing with dns only");
+            tracing::error!(%error, "failed to start control plane; continuing with dns only");
             None
         }
     }

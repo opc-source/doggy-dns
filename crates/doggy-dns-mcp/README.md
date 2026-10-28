@@ -1,41 +1,58 @@
 # doggy-dns-mcp
 
-Read-only MCP (Model Context Protocol) server for doggy-dns instance introspection.
+Node-side service control plane for doggy-dns: one HTTP listener exposing the
+read-only MCP (Model Context Protocol) introspection endpoint plus plain
+health probes backed by live runtime signals.
 
 ## Overview
 
-This crate provides a lightweight, read-only MCP server that exposes the running doggy-dns instance's status, plugin configuration, and redacted configuration file. It is designed for integration with the doggy-dns console and other AI-powered management tools.
+This crate provides the control plane listener. The MCP protocol side serves
+read-only tools over Streamable HTTP; the health endpoints report live runtime
+signals sampled at request time. It is designed for integration with the
+doggy-dns-console project and other AI-powered management tools, and as a
+Kubernetes probe target.
 
 **Key properties:**
 
-- **Disabled by default** — set `[mcp].enabled = true` to activate.
-- **Read-only** — all three tools carry `readOnlyHint = true`, `destructiveHint = false`.
-- **Non-fatal** — if the MCP port is already in use, the DNS server continues running.
+- **Disabled by default** — set `[control].enabled = true` to activate.
+- **Endpoint selection** — `control.endpoints` decides which routes exist
+  (`mcp`, `healthz`, `readyz`); everything else 404s.
+- **Read-only** — all four tools carry `readOnlyHint = true`, `destructiveHint = false`.
+- **Non-fatal** — if the control plane port is already in use, the DNS server continues running.
 - **Config redaction** — `get_config` recursively replaces sensitive values (`password`, `token`, `secret`, `authorization`, `api_key`, `apikey`, `passwd`) with `"***"`.
-- **Optional Bearer auth** — set `[mcp].token` to require `Authorization: Bearer <token>` on all requests.
+- **Optional Bearer auth** — set `[control].token` to require `Authorization: Bearer <token>` on `/mcp`; health endpoints never require it.
 
 ## Configuration
 
 ```toml
-[mcp]
+[control]
 enabled = true
 listen_addr = "127.0.0.1"
 port = 19090
-token = "change-me"                    # omit for no auth
+token = "change-me"                    # omit for no auth; guards /mcp only
 allowed_hosts = ["dns-node-1", "10.0.0.5:19090"]
+endpoints = ["mcp", "healthz", "readyz"]
 ```
 
 | Field | Default | Description |
 |-------|---------|-------------|
-| `enabled` | `false` | Enable the MCP server |
+| `enabled` | `false` | Enable the control plane listener |
 | `listen_addr` | `"127.0.0.1"` | Bind address; IPv4 or IPv6 literal (`[::1]` also accepted) |
 | `port` | `19090` | Bind port |
-| `token` | `None` | Bearer token for authentication |
-| `allowed_hosts` | `[]` | Allowed `Host` header values for DNS rebinding protection |
+| `token` | `None` | Bearer token for `/mcp` |
+| `allowed_hosts` | `[]` | Allowed `Host` header values for DNS rebinding protection (`/mcp` only) |
+| `endpoints` | `["mcp", "healthz", "readyz"]` | Which routes the listener serves |
 
-## Endpoint
+## Endpoints
 
-The MCP server listens on `http://<listen_addr>:<port>/mcp` using the **Streamable HTTP** transport (JSON-RPC 2.0 over HTTP POST with optional SSE streaming).
+| Route | Method | Auth | Purpose |
+|-------|--------|------|---------|
+| `/mcp` | POST (JSON-RPC 2.0, optional SSE) | Bearer token when set | MCP tools |
+| `/healthz` | GET | none | Liveness; `{"status":"ok"}`, 200 while the process is up |
+| `/readyz` | GET | none | Live runtime signals report; always 200 — a report, not a verdict |
+
+The MCP server listens on `http://<listen_addr>:<port>/mcp` using the
+**Streamable HTTP** transport.
 
 ## Tools
 
@@ -131,15 +148,44 @@ validation normally prevents this):
 }
 ```
 
+### `get_runtime_status`
+
+Returns live runtime signals sampled at call time — the same payload
+`/readyz` serves over GET. One signal per registered source:
+
+**Input:** `{}` (no arguments)
+
+**Output:**
+
+```json
+{
+  "signals": {
+    "nacos.nacos.local": {
+      "cachedServices": 42,
+      "lastPushSecondsAgo": 3
+    },
+    "xdp": {
+      "attached": true
+    }
+  }
+}
+```
+
+`lastPushSecondsAgo` is `null` when no push has ever arrived for that zone.
+`xdp.attached` is only reported by builds with the fast path wired in; the
+flag is fixed after startup because dropping the manager detaches the
+program.
+
 ## Authentication
 
-When `[mcp].token` is set, all requests must include:
+When `[control].token` is set, requests to `/mcp` must include:
 
 ```
 Authorization: Bearer <token>
 ```
 
-Requests without a valid token receive `401 Unauthorized`.
+`/mcp` requests without a valid token receive `401 Unauthorized`.
+`/healthz` and `/readyz` never require auth — kubelets must not hold secrets.
 
 ## Contract Stability
 
@@ -148,12 +194,18 @@ The following JSON field names are part of the stable contract and must not be r
 - `get_status` → `instanceId`, `host`, `version`, `pid`, `uptimeSeconds`, `startedAt`, `listenAddr`, `protocols`, `status`
 - `list_plugins` → `plugins[].order`, `kind`, `enabled`, `details`
 - `get_config` → `format`, `content`, `redactedKeys`
+- `get_runtime_status` / `GET /readyz` → `signals`
+- `GET /healthz` → `status`
 
 ## Smoke Test
 
 ```bash
-# Start doggy-dns with MCP enabled
+# Enable the control plane in config/doggy-dns.toml ([control] enabled = true), then:
 cargo run -- config/doggy-dns.toml
+
+# Liveness and readiness probes (no auth, always 200)
+curl -s http://127.0.0.1:19090/healthz
+curl -s http://127.0.0.1:19090/readyz
 
 # Initialize MCP session
 curl -s http://127.0.0.1:19090/mcp \

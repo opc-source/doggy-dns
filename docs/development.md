@@ -80,7 +80,7 @@ All jobs use dependency caching (`Swatinem/rust-cache@v2`).
 
 | Test File | Tests | Description |
 |-----------|-------|-------------|
-| `crates/doggy-dns-basic/tests/config_test.rs` | 45 | Config parsing, defaults, validation (plugins/TLS/HTTPS/remote_config/observability/xdp/mcp) |
+| `crates/doggy-dns-basic/tests/config_test.rs` | 49 | Config parsing, defaults, validation (plugins/TLS/HTTPS/remote_config/observability/xdp/control plane) |
 | `crates/doggy-dns-basic/tests/env_test.rs` | 8 | `${ENV_VAR}` expansion across tables and arrays, malformed references |
 | `crates/doggy-dns-basic/tests/net_test.rs` | 5 | IPv4/IPv6 listen-address parsing, bracketed literals, rejects hostnames |
 | `crates/doggy-dns-core/tests/handler_test.rs` | 17 | Handler pipeline: NoError, NXDomain, NODATA, ServFail, Refused, middleware callbacks, EDNS cache admission, AA/RA flags, SOA on negatives |
@@ -88,11 +88,12 @@ All jobs use dependency caching (`Swatinem/rust-cache@v2`).
 | `crates/doggy-dns-core/tests/server_test.rs` | 2 | UDP/TCP listener binding for bare and bracketed IPv6 addresses |
 | `crates/doggy-dns-nacos/tests/authority_test.rs` | 12 | Nacos authority: hit, dotted names, NOERROR/NXDOMAIN/NODATA, family filtering, zone boundaries |
 | `crates/doggy-dns-nacos/tests/mapping_test.rs` | 10 | DNS name parsing (zone boundaries, dotted services), family-filtered record creation |
-| `crates/doggy-dns-nacos/tests/watcher_test.rs` | 6 | Instance cache: insert, filter, remove, replace, lowercase keys |
+| `crates/doggy-dns-nacos/tests/watcher_test.rs` | 7 | Instance cache: insert, filter, remove, replace, lowercase keys, push-freshness stamp |
 | `crates/doggy-dns-plugin/tests/authority_chain_test.rs` | 11 | Chain resolution: empty, hit, authoritative miss, zone fallthrough, all-skip, Break, error, is_empty |
 | `crates/doggy-dns-plugin/tests/forward_test.rs` | 8 | Forward resolver: local mock upstream, custom/bare IP parsing, validation, NXDOMAIN/NODATA/SERVFAIL mapping |
 | `crates/doggy-dns-plugin/tests/native_test.rs` | 1 | Native resolver (requires network) |
 | `crates/doggy-dns-xdp/tests/*` | 22 + 6 ignored | Userspace cache/interface/middleware/stats; XDP attach tests need root + Linux |
+| `crates/doggy-dns-mcp/tests/*` | 28 | Control plane: HTTP contract, endpoint selection, token scoping, live signals, state snapshots, redaction |
 | `tests/integration_test.rs` | 3 | End-to-end chain: Nacos hit, outside-zone fallthrough, in-zone miss stays authoritative |
 
 Forward tests run against a local mock upstream, native tests make real

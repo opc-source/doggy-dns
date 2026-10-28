@@ -109,7 +109,7 @@ key_path = "/tmp/c.key"
             remote_config: Default::default(),
             observability: Default::default(),
             xdp: Default::default(),
-            mcp: Default::default(),
+            control: Default::default(),
         };
         McpState::enabled_protocols(&config)
     }

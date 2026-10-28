@@ -4,6 +4,8 @@ use nacos_sdk::api::naming::{
 };
 use nacos_sdk::api::props::ClientProps;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicI64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Key for the service instance cache.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -35,12 +37,22 @@ pub struct InstanceChangeListener {
     pub cache: Arc<DashMap<ServiceKey, Vec<CachedInstance>>>,
     pub group: String,
     pub namespace: String,
+    /// Unix seconds of the most recent push; 0 means "never received one".
+    pub last_push: Arc<AtomicI64>,
+}
+
+fn unix_now_secs() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
 }
 
 impl NamingEventListener for InstanceChangeListener {
     fn event(&self, event: Arc<NamingChangeEvent>) {
         let service_name = event.service_name.clone();
         tracing::info!("nacos service changed: {}", service_name);
+        self.last_push.store(unix_now_secs(), Ordering::Relaxed);
 
         let key = ServiceKey {
             service_name: service_name.to_lowercase(),
@@ -71,6 +83,7 @@ pub struct NacosServiceWatcher {
     cache: Arc<DashMap<ServiceKey, Vec<CachedInstance>>>,
     namespace: String,
     group: String,
+    last_push: Arc<AtomicI64>,
 }
 
 impl NacosServiceWatcher {
@@ -87,6 +100,7 @@ impl NacosServiceWatcher {
             cache: Arc::new(DashMap::new()),
             namespace: namespace.to_string(),
             group: group.to_string(),
+            last_push: Arc::new(AtomicI64::new(0)),
         })
     }
 
@@ -96,6 +110,7 @@ impl NacosServiceWatcher {
             cache: Arc::clone(&self.cache),
             group: self.group.clone(),
             namespace: self.namespace.clone(),
+            last_push: Arc::clone(&self.last_push),
         };
 
         self.naming_service
@@ -144,5 +159,11 @@ impl NacosServiceWatcher {
     /// Get a reference to the cache.
     pub fn cache(&self) -> Arc<DashMap<ServiceKey, Vec<CachedInstance>>> {
         Arc::clone(&self.cache)
+    }
+
+    /// Unix seconds of the most recent push event shared with all listeners
+    /// of this watcher; 0 means no push has ever arrived.
+    pub fn last_push(&self) -> Arc<AtomicI64> {
+        Arc::clone(&self.last_push)
     }
 }

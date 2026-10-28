@@ -90,12 +90,15 @@ namespace = "public"
 group = "DOGGY_DNS"
 data_id = "doggy-dns.toml"
 
-# Optional: read-only MCP introspection server
-[mcp]
+# Optional: node-side service control plane (one HTTP listener).
+# `endpoints` selects what is exposed: "mcp" (read-only JSON-RPC tools at
+# /mcp), "healthz" (liveness probe), "readyz" (live runtime signals report).
+[control]
 enabled = true
 listen_addr = "127.0.0.1"
 port = 19090
-token = "change-me"                    # optional Bearer auth
+token = "change-me"                    # optional Bearer auth; guards /mcp only
+endpoints = ["mcp", "healthz", "readyz"]
 
 # Optional: XDP kernel fast path (Linux, requires `--features xdp` build).
 # Usage, semantics and limits: docs/xdp.md
@@ -108,7 +111,7 @@ attach_mode = "auto"        # "auto" attaches at startup, "manual" loads only
 pin_path = "/sys/fs/bpf/doggy-dns/dns_cache"
 ```
 
-`listen_addr` (`[server]` and `[mcp]`) takes an IPv4 or IPv6 literal. IPv6 may
+`listen_addr` (`[server]` and `[control]`) takes an IPv4 or IPv6 literal. IPv6 may
 be written bare (`::1`, `::`) or bracketed (`[::1]`); `::` listens on all
 interfaces. TLS and HTTPS reuse `[server].listen_addr` with their own port.
 
@@ -139,12 +142,20 @@ syntactically valid and unique zone, `min_ttl <= max_ttl` for native/forward,
 and forward `upstream` entries parse as IP or IP:port; observability signal
 ranges, profile duration/frequency, log level and endpoint format;
 `xdp.cache_size > 0`, `xdp.negative_ttl > 0` and `xdp.attach_mode` is `auto` or
-`manual` when the fast path is enabled; `mcp.listen_addr` is a valid IP literal
-when the MCP server is enabled.
+`manual` when the fast path is enabled; `control.listen_addr` is a valid IP
+literal, `control.endpoints` is non-empty and contains only `mcp`, `healthz`
+and `readyz` (no duplicates) when the control plane is enabled.
 
-## MCP server
+## Control plane
 
-Serves read-only tools over Streamable HTTP at `/mcp`; disabled by default.
-Three tools: `get_status` (instance identity/uptime), `list_plugins` (authority
-chain), `get_config` (TOML with secrets redacted). Full contract:
-[crates/doggy-dns-mcp/README.md](../crates/doggy-dns-mcp/README.md).
+One HTTP listener whose exposed surface is chosen by `control.endpoints`;
+disabled by default. `mcp` nests the read-only JSON-RPC tools at `/mcp` over
+Streamable HTTP — `get_status` (instance identity/uptime), `list_plugins`
+(authority chain), `get_config` (TOML with secrets redacted) and
+`get_runtime_status` (live signals sampled at call time); the Bearer token
+guards this endpoint only. `healthz` is a trivial liveness probe and `readyz`
+reports live runtime signals (per-zone Nacos cache occupancy and push
+freshness, XDP attach state); both are plain GET, never require auth and
+always answer 200 — `readyz` is a report, not a verdict, so deciding what
+counts as "not ready" stays with the operator or doggy-dns-console. Full
+contract: [crates/doggy-dns-mcp/README.md](../crates/doggy-dns-mcp/README.md).

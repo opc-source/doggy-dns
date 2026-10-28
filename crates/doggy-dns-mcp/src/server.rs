@@ -8,16 +8,18 @@ use rmcp::{
 use serde_json::Value;
 
 use crate::ConfigSnapshot;
+use crate::live::LiveState;
 use crate::state::McpState;
 
 #[derive(Clone)]
 pub struct DoggyMcpServer {
     state: Arc<McpState>,
+    live: Arc<LiveState>,
 }
 
 impl DoggyMcpServer {
-    pub fn new(state: Arc<McpState>) -> Self {
-        Self { state }
+    pub fn new(state: Arc<McpState>, live: Arc<LiveState>) -> Self {
+        Self { state, live }
     }
 
     pub fn tool_declarations(&self) -> Vec<rmcp::model::Tool> {
@@ -128,6 +130,23 @@ impl DoggyMcpServer {
             ConfigSnapshot::Error { code, message } => error_json(code, message),
         };
         Ok(CallToolResult::success(vec![ContentBlock::text(json)]))
+    }
+
+    #[tool(
+        name = "get_runtime_status",
+        description = "Return live runtime signals (plugin cache sizes, push freshness, fast-path state) sampled at call time.",
+        annotations(
+            title = "Get live runtime signals",
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    pub async fn get_runtime_status(&self) -> Result<CallToolResult, ErrorData> {
+        Ok(CallToolResult::success(vec![ContentBlock::text(
+            self.live.snapshot().to_string(),
+        )]))
     }
 }
 

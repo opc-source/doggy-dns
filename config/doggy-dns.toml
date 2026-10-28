@@ -97,11 +97,15 @@ data_id = "doggy-dns.toml"
 # attach_mode = "auto"        # "auto" or "manual"
 # pin_path = "/sys/fs/bpf/doggy-dns/dns_cache"
 
-# Read-only MCP server for the console. Disabled by default.
-# When enabled, serves JSON-RPC over Streamable HTTP at /mcp.
-# [mcp]
+# Node-side service control plane. Disabled by default.
+# One HTTP listener; `endpoints` chooses what it exposes:
+#   "mcp"     JSON-RPC over Streamable HTTP at /mcp (Bearer token guarded)
+#   "healthz" liveness probe, always 200, no auth
+#   "readyz"  readiness + live runtime signals report, always 200, no auth
+# [control]
 # enabled = false
 # listen_addr = "127.0.0.1"
 # port = 19090
-# token = "change-me"          # Bearer token; omit for no auth
+# token = "change-me"          # Bearer token; guards /mcp only; omit for no auth
 # allowed_hosts = ["dns-node-1", "10.0.0.5:19090"]
+# endpoints = ["mcp", "healthz", "readyz"]
