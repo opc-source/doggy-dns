@@ -1,15 +1,8 @@
+use doggy_dns_basic::time::unix_now_secs;
 use serde_json::{Map, Value};
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 type Probe = dyn Fn() -> Value + Send + Sync;
-
-fn unix_now() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
-}
 
 /// Registry of live runtime signals behind the control plane's `/readyz`
 /// endpoint and the MCP `get_runtime_status` tool.
@@ -52,7 +45,7 @@ impl LiveState {
             let freshness = if ts == 0 {
                 Value::Null
             } else {
-                Value::from(unix_now().saturating_sub(ts))
+                Value::from(unix_now_secs().saturating_sub(ts))
             };
             // Built by hand: `json!` expands through `Result::unwrap`, which
             // .clippy.toml disallows.

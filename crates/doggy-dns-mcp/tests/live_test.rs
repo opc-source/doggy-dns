@@ -1,14 +1,7 @@
 #![allow(clippy::disallowed_methods)]
 
+use doggy_dns_basic::time::unix_now_secs as now_unix;
 use doggy_dns_mcp::live::LiveState;
-use std::time::{SystemTime, UNIX_EPOCH};
-
-fn now_unix() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
-}
 
 #[test]
 fn nacos_zone_signal_reports_cache_size_and_push_freshness() {

@@ -736,6 +736,7 @@ dependencies = [
  "async-trait",
  "criterion",
  "dashmap",
+ "doggy-dns-basic",
  "doggy-dns-plugin",
  "hickory-proto",
  "hickory-server",

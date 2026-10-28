@@ -5,6 +5,7 @@ edition = "2024"
 license = "Apache-2.0"
 
 [dependencies]
+doggy-dns-basic = { path = "../doggy-dns-basic" }
 doggy-dns-plugin = { path = "../doggy-dns-plugin" }
 hickory-server = { workspace = true }
 hickory-proto = { workspace = true }

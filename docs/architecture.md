@@ -6,7 +6,7 @@ Part of [README](../README.md).
 
 - `doggy-dns` (binary) -> `doggy-dns-core`, `doggy-dns-plugin`, `doggy-dns-nacos`, `doggy-dns-observability`, `doggy-dns-mcp`
 - `doggy-dns-core` -> `doggy-dns-basic`, `doggy-dns-plugin`
-- `doggy-dns-nacos` -> `doggy-dns-plugin`
+- `doggy-dns-nacos` -> `doggy-dns-basic`, `doggy-dns-plugin`
 - `doggy-dns-observability` -> `doggy-dns-basic`, `doggy-dns-plugin`
 - `doggy-dns-mcp` -> `doggy-dns-basic`
 - `doggy-dns-basic` is the config leaf crate (no internal deps)

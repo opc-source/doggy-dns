@@ -1,11 +1,11 @@
 use dashmap::DashMap;
+use doggy_dns_basic::time::unix_now_secs;
 use nacos_sdk::api::naming::{
     NamingChangeEvent, NamingEventListener, NamingService, NamingServiceBuilder, ServiceInstance,
 };
 use nacos_sdk::api::props::ClientProps;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicI64, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Key for the service instance cache.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -39,13 +39,6 @@ pub struct InstanceChangeListener {
     pub namespace: String,
     /// Unix seconds of the most recent push; 0 means "never received one".
     pub last_push: Arc<AtomicI64>,
-}
-
-fn unix_now_secs() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
 }
 
 impl NamingEventListener for InstanceChangeListener {

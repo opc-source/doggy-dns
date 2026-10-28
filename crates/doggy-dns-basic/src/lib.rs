@@ -2,7 +2,8 @@
 //!
 //! This crate holds every TOML config struct and validation rule, with no
 //! transitive dependency on hickory, tokio, rustls, or the DNS runtime itself.
-//! Consumers (observability, xdp, mcp, tests) can depend on it alone.
+//! Consumers (observability, xdp, the control plane, tests) can depend on it
+//! alone.
 
 pub mod control;
 pub mod env;
@@ -13,6 +14,7 @@ pub mod observability;
 pub mod plugin;
 pub mod remote;
 pub mod server;
+pub mod time;
 pub mod validate;
 pub mod xdp;
 

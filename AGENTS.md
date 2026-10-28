@@ -41,13 +41,14 @@ doggy-dns (binary)
   │     ├── doggy-dns-basic
   │     └── doggy-dns-plugin
   ├── doggy-dns-nacos           (Nacos service discovery backend)
+  │     ├── doggy-dns-basic
   │     └── doggy-dns-plugin
   ├── doggy-dns-observability   (OTLP logs/metrics/traces/profiles)
   │     ├── doggy-dns-basic
   │     └── doggy-dns-plugin
   ├── doggy-dns-mcp             (service control plane: MCP tools + health probes)
   │     └── doggy-dns-basic
-  ├── doggy-dns-basic           (all TOML config types, load & validate — serde/toml/anyhow only)
+  ├── doggy-dns-basic           (TOML config types, load & validate, wall-clock helpers — serde/toml/anyhow only)
   ├── doggy-dns-plugin          (traits, authority chain, built-in authorities — leaf crate)
   └── doggy-dns-xdp (optional, feature = "xdp")
         ├── doggy-dns-basic
