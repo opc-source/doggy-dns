@@ -112,6 +112,10 @@ attach_mode = "auto"        # "auto" attaches at startup, "manual" loads only
 pin_path = "/sys/fs/bpf/doggy-dns/dns_cache"
 ```
 
+`listen_addr` (`[server]` and `[mcp]`) takes an IPv4 or IPv6 literal. IPv6 may
+be written bare (`::1`, `::`) or bracketed (`[::1]`); `::` listens on all
+interfaces. TLS and HTTPS reuse `[server].listen_addr` with their own port.
+
 If no `[[plugins]]` are configured, defaults to forwarding to `8.8.8.8` and
 `1.1.1.1`.
 
@@ -139,7 +143,8 @@ syntactically valid and unique zone, `min_ttl <= max_ttl` for native/forward,
 and forward `upstream` entries parse as IP or IP:port; observability signal
 ranges, profile duration/frequency, log level and endpoint format;
 `xdp.cache_size > 0`, `xdp.negative_ttl > 0` and `xdp.attach_mode` is `auto` or
-`manual` when the fast path is enabled.
+`manual` when the fast path is enabled; `mcp.listen_addr` is a valid IP literal
+when the MCP server is enabled.
 
 ## MCP server
 

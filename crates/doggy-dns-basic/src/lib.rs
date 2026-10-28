@@ -8,6 +8,7 @@ pub mod env;
 pub mod load;
 pub mod mcp;
 pub mod middleware;
+pub mod net;
 pub mod observability;
 pub mod plugin;
 pub mod remote;
