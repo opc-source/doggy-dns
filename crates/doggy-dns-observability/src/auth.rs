@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use base64::Engine as _;
 use doggy_dns_basic::ObservabilityConfig;
+use doggy_dns_basic::env::expand_env;
 use reqwest::header::{HeaderName, HeaderValue};
 use std::collections::HashMap;
 
@@ -127,32 +128,6 @@ fn hex_value(byte: u8) -> Result<u8> {
         b'A'..=b'F' => Ok(byte - b'A' + 10),
         _ => anyhow::bail!("invalid hex digit in percent escape"),
     }
-}
-
-fn expand_env(value: &str, env: &impl Fn(&str) -> Option<String>) -> Result<String> {
-    let mut output = String::with_capacity(value.len());
-    let mut rest = value;
-
-    while let Some(start) = rest.find("${") {
-        output.push_str(&rest[..start]);
-        let after = &rest[start + 2..];
-        let end = after
-            .find('}')
-            .context("unterminated ${...} environment reference")?;
-        let name = &after[..end];
-        anyhow::ensure!(
-            !name.is_empty(),
-            "empty environment reference in observability config"
-        );
-        let resolved = env(name).with_context(|| {
-            format!("environment variable {name} referenced by observability config is not set")
-        })?;
-        output.push_str(&resolved);
-        rest = &after[end + 1..];
-    }
-
-    output.push_str(rest);
-    Ok(output)
 }
 
 #[cfg(test)]

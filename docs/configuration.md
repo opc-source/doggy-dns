@@ -106,7 +106,7 @@ token = "change-me"                    # optional Bearer auth
 [xdp]
 enabled = false
 interface = ""              # empty = XDP_INTERFACE env, else default-route interface
-cache_size = 65536          # informational; the BPF map size is fixed by the program
+cache_size = 65536          # kernel cache entries; applied when the map is created
 negative_ttl = 30           # seconds, default 30
 attach_mode = "auto"        # "auto" attaches at startup, "manual" loads only
 pin_path = "/sys/fs/bpf/doggy-dns/dns_cache"
@@ -120,13 +120,26 @@ If no `[[plugins]]` are configured, defaults to forwarding to `8.8.8.8` and
 The base endpoint is `<host>/api/<org>` for OpenObserve and `http://host:4318`
 for Collector/Vector; doggy-dns appends `/v1/<signal>`.
 
+## Environment expansion
+
+Every string value may reference the environment as `${NAME}`. References are
+resolved when the config is loaded; a missing variable aborts startup and the
+error names the offending key (e.g. `observability.basic_auth.password`).
+Expansion happens before deserialisation, so numeric fields cannot be sourced
+from the environment (`port = "${PORT}"` fails to parse). The MCP `get_config`
+tool returns the file as written, so expanded secrets never leave the process.
+
 ## Validation
 
 Startup validation (`validate_config()`) checks: `worker_threads > 0`; TLS and
 HTTPS cert files exist when enabled; `remote_config` fields non-empty when
-enabled; observability signal ranges, profile duration/frequency, log level and
-endpoint format; `xdp.cache_size > 0`, `xdp.negative_ttl > 0` and
-`xdp.attach_mode` is `auto` or `manual` when the fast path is enabled.
+enabled; plugin rules — at least one enabled plugin when `[[plugins]]` is
+present, Nacos `server_addr`/`namespace`/`group`/`dns_zone` present with a
+syntactically valid and unique zone, `min_ttl <= max_ttl` for native/forward,
+and forward `upstream` entries parse as IP or IP:port; observability signal
+ranges, profile duration/frequency, log level and endpoint format;
+`xdp.cache_size > 0`, `xdp.negative_ttl > 0` and `xdp.attach_mode` is `auto` or
+`manual` when the fast path is enabled.
 
 ## MCP server
 

@@ -109,7 +109,7 @@ Cache updates replace the entire Vec for a key (never mutate in place). Config s
 
 TOML config at `config/doggy-dns.toml`. Key structs in `crates/doggy-dns-basic` (`doggy_dns_basic`): `DoggyDnsConfig`, `ServerConfig`, `PluginConfig` (flat — fields per kind), `PluginKind` enum (`Nacos`, `Native`, `Forward`). `doggy-dns-core` re-exports the module as `config`.
 
-`validate_config()` checks: worker_threads > 0, TLS/HTTPS cert files exist when enabled, remote_config fields non-empty when enabled, and observability ranges/URLs (observability enabled, signal ranges, profile duration/frequency, log level, endpoint format).
+`validate_config()` checks: worker_threads > 0, TLS/HTTPS cert files exist when enabled, remote_config fields non-empty when enabled, plugin rules (one enabled plugin when `[[plugins]]` exists; Nacos connection fields, valid unique zone; `min_ttl <= max_ttl`; forward upstream is IP or IP:port), and observability ranges/URLs (observability enabled, signal ranges, profile duration/frequency, log level, endpoint format). Every config string may use `${ENV_VAR}`; expansion happens in `load_config()` before deserialisation and a missing variable is fatal (the raw, unexpanded file content is what the MCP `get_config` tool sees).
 
 ## Test Conventions
 

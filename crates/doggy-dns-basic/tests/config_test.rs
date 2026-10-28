@@ -1,6 +1,6 @@
 #![allow(clippy::disallowed_methods)]
 
-use doggy_dns_basic::{DoggyDnsConfig, PluginKind, validate_config};
+use doggy_dns_basic::{DoggyDnsConfig, PluginKind, load_config, validate_config};
 
 #[test]
 fn parse_full_config() {
@@ -775,4 +775,230 @@ port = 19090
     let config: DoggyDnsConfig = toml::from_str(toml_str).unwrap();
     let err = validate_config(&config).unwrap_err().to_string();
     assert!(err.contains("mcp.listen_addr"), "unexpected error: {err}");
+}
+
+fn validation_error(toml_str: &str) -> String {
+    let config: DoggyDnsConfig = toml::from_str(toml_str).expect("parse failed");
+    validate_config(&config).unwrap_err().to_string()
+}
+
+#[test]
+fn validate_rejects_plugins_when_all_disabled() {
+    let err = validation_error(
+        r#"
+[server]
+listen_addr = "0.0.0.0"
+port = 53
+
+[[plugins]]
+kind = "native"
+enabled = false
+"#,
+    );
+    assert!(
+        err.contains("at least one plugin must be enabled"),
+        "unexpected error: {err}"
+    );
+}
+
+#[test]
+fn validate_nacos_requires_connection_fields() {
+    let err = validation_error(
+        r#"
+[server]
+listen_addr = "0.0.0.0"
+port = 53
+
+[[plugins]]
+kind = "nacos"
+enabled = true
+server_addr = "127.0.0.1:8848"
+"#,
+    );
+    assert!(err.contains("namespace"), "unexpected error: {err}");
+}
+
+#[test]
+fn validate_nacos_rejects_malformed_zone() {
+    let err = validation_error(
+        r#"
+[server]
+listen_addr = "0.0.0.0"
+port = 53
+
+[[plugins]]
+kind = "nacos"
+enabled = true
+server_addr = "127.0.0.1:8848"
+namespace = "public"
+group = "DEFAULT_GROUP"
+dns_zone = "nacos..local"
+"#,
+    );
+    assert!(err.contains("dns_zone"), "unexpected error: {err}");
+}
+
+#[test]
+fn validate_nacos_accepts_trailing_dot_zone() {
+    let toml_str = r#"
+[server]
+listen_addr = "0.0.0.0"
+port = 53
+
+[[plugins]]
+kind = "nacos"
+enabled = true
+server_addr = "127.0.0.1:8848"
+namespace = "public"
+group = "DEFAULT_GROUP"
+dns_zone = "nacos.local."
+"#;
+    let config: DoggyDnsConfig = toml::from_str(toml_str).expect("parse failed");
+    validate_config(&config).expect("trailing-dot zone should be accepted");
+}
+
+#[test]
+fn validate_nacos_rejects_duplicate_zones() {
+    let err = validation_error(
+        r#"
+[server]
+listen_addr = "0.0.0.0"
+port = 53
+
+[[plugins]]
+kind = "nacos"
+enabled = true
+server_addr = "127.0.0.1:8848"
+namespace = "public"
+group = "DEFAULT_GROUP"
+dns_zone = "Nacos.Local"
+
+[[plugins]]
+kind = "nacos"
+enabled = true
+server_addr = "127.0.0.1:8849"
+namespace = "public"
+group = "OTHER_GROUP"
+dns_zone = "nacos.local"
+"#,
+    );
+    assert!(err.contains("duplicate"), "unexpected error: {err}");
+}
+
+#[test]
+fn validate_forward_rejects_empty_upstream() {
+    let err = validation_error(
+        r#"
+[server]
+listen_addr = "0.0.0.0"
+port = 53
+
+[[plugins]]
+kind = "forward"
+enabled = true
+upstream = []
+"#,
+    );
+    assert!(err.contains("upstream"), "unexpected error: {err}");
+}
+
+#[test]
+fn validate_forward_rejects_invalid_upstream() {
+    let err = validation_error(
+        r#"
+[server]
+listen_addr = "0.0.0.0"
+port = 53
+
+[[plugins]]
+kind = "forward"
+enabled = true
+upstream = ["dns.google"]
+"#,
+    );
+    assert!(err.contains("upstream"), "unexpected error: {err}");
+}
+
+#[test]
+fn validate_forward_accepts_ip_and_ip_port() {
+    let toml_str = r#"
+[server]
+listen_addr = "0.0.0.0"
+port = 53
+
+[[plugins]]
+kind = "forward"
+enabled = true
+upstream = ["8.8.8.8", "1.1.1.1:5353", "2001:4860:4860::8888", "[2001:4860:4860::8844]:53"]
+"#;
+    let config: DoggyDnsConfig = toml::from_str(toml_str).expect("parse failed");
+    validate_config(&config).expect("IP and IP:port upstreams should be accepted");
+}
+
+#[test]
+fn validate_resolver_rejects_min_ttl_above_max_ttl() {
+    let err = validation_error(
+        r#"
+[server]
+listen_addr = "0.0.0.0"
+port = 53
+
+[[plugins]]
+kind = "native"
+enabled = true
+min_ttl = 300
+max_ttl = 10
+"#,
+    );
+    assert!(err.contains("min_ttl"), "unexpected error: {err}");
+}
+
+#[test]
+fn load_config_expands_env_but_returns_raw_content() {
+    let path = std::env::temp_dir().join(format!("doggy-dns-env-test-{}.toml", std::process::id()));
+    std::fs::write(
+        &path,
+        r#"
+[server]
+listen_addr = "127.0.0.1"
+port = 15353
+
+[observability]
+service_name = "${PATH}"
+"#,
+    )
+    .unwrap();
+
+    let (config, raw) = load_config(path.to_str().unwrap()).unwrap();
+    std::fs::remove_file(&path).ok();
+
+    let expected = std::env::var("PATH").unwrap();
+    assert_eq!(
+        config.observability.service_name.as_deref(),
+        Some(expected.as_str())
+    );
+    assert!(
+        raw.contains("${PATH}"),
+        "raw content must stay unexpanded for MCP redaction"
+    );
+}
+
+#[test]
+fn validate_skips_disabled_plugin_fields() {
+    let toml_str = r#"
+[server]
+listen_addr = "0.0.0.0"
+port = 53
+
+[[plugins]]
+kind = "nacos"
+enabled = false
+dns_zone = "not a zone"
+
+[[plugins]]
+kind = "native"
+enabled = true
+"#;
+    let config: DoggyDnsConfig = toml::from_str(toml_str).expect("parse failed");
+    validate_config(&config).expect("disabled plugin fields should not be validated");
 }

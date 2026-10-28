@@ -48,7 +48,7 @@ queries within the TTL are then answered by the kernel (`XDP_TX`).
 |-----|---------|---------|
 | `enabled` | `false` | Master switch; a failed init degrades to running without the fast path. |
 | `interface` | `""` | Resolve order: config value → `XDP_INTERFACE` env → default route parsed from `/proc/net/route`. |
-| `cache_size` | `65536` | **Currently informational** — the map size is fixed by the eBPF program (`DNS_CACHE` is declared with 65536 entries) and the loader does not override it. |
+| `cache_size` | `65536` | Maximum entries in the kernel cache. Applied when the map is created at load time (`EbpfLoader::map_max_entries`); the eBPF program only declares the default size. |
 | `negative_ttl` | `30` | Seconds a cached NXDOMAIN is served. Also the fallback TTL when a positive answer exposes none. |
 | `attach_mode` | `"auto"` | `auto`: attach to the interface at startup. `manual`: load only, leaving attachment to an external tool. |
 | `pin_path` | `/sys/fs/bpf/doggy-dns/dns_cache` | Where the cache map is pinned so it survives (and can be re-attached across) restarts. |
@@ -193,7 +193,8 @@ drops the packet rather than passing a truncated frame upward.
 - **Keyed by 64-bit FNV-1a hash, not the name itself** — a collision would
   serve another name's answer. Acceptable for a private resolver cache, worth
   knowing before exposing it publicly.
-- `cache_size` does not currently resize the map (see the table above).
+- **`cache_size` is fixed once the map is created** — it is applied at load
+  time, not resized in place; restart to change it.
 - The kernel program has no logging today; silent passes are observable only
   through the `miss` / `expired` / `drop` counters.
 
