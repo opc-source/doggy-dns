@@ -80,10 +80,12 @@ All jobs use dependency caching (`Swatinem/rust-cache@v2`).
 
 | Test File | Tests | Description |
 |-----------|-------|-------------|
-| `crates/doggy-dns-basic/tests/config_test.rs` | 44 | Config parsing, defaults, validation (plugins/TLS/HTTPS/remote_config/observability/xdp/mcp) |
+| `crates/doggy-dns-basic/tests/config_test.rs` | 45 | Config parsing, defaults, validation (plugins/TLS/HTTPS/remote_config/observability/xdp/mcp) |
 | `crates/doggy-dns-basic/tests/env_test.rs` | 8 | `${ENV_VAR}` expansion across tables and arrays, malformed references |
+| `crates/doggy-dns-basic/tests/net_test.rs` | 5 | IPv4/IPv6 listen-address parsing, bracketed literals, rejects hostnames |
 | `crates/doggy-dns-core/tests/handler_test.rs` | 17 | Handler pipeline: NoError, NXDomain, NODATA, ServFail, Refused, middleware callbacks, EDNS cache admission, AA/RA flags, SOA on negatives |
 | `crates/doggy-dns-core/tests/middleware_test.rs` | 6 | Metrics counter, logging middleware, return values |
+| `crates/doggy-dns-core/tests/server_test.rs` | 2 | UDP/TCP listener binding for bare and bracketed IPv6 addresses |
 | `crates/doggy-dns-nacos/tests/authority_test.rs` | 12 | Nacos authority: hit, dotted names, NOERROR/NXDOMAIN/NODATA, family filtering, zone boundaries |
 | `crates/doggy-dns-nacos/tests/mapping_test.rs` | 10 | DNS name parsing (zone boundaries, dotted services), family-filtered record creation |
 | `crates/doggy-dns-nacos/tests/watcher_test.rs` | 6 | Instance cache: insert, filter, remove, replace, lowercase keys |

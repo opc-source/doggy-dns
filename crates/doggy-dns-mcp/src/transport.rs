@@ -38,7 +38,8 @@ impl McpServerHandle {
 /// If the port is already in use, returns an error.
 pub async fn start(state: Arc<McpState>, cfg: McpConfig) -> anyhow::Result<McpServerHandle> {
     let cancel = CancellationToken::new();
-    let listener = TcpListener::bind(format!("{}:{}", cfg.listen_addr, cfg.port)).await?;
+    let addr = doggy_dns_basic::net::socket_addr(&cfg.listen_addr, cfg.port)?;
+    let listener = TcpListener::bind(addr).await?;
     let addr = listener.local_addr()?;
 
     let router = build_router(state, &cfg, cancel.clone());

@@ -1,9 +1,9 @@
+use crate::config::net::socket_addr;
 use crate::config::{DoggyDnsConfig, HttpsConfig, TlsConfig};
 use anyhow::{Context, Result};
 use hickory_server::Server;
 use hickory_server::server::RequestHandler;
 use std::fs;
-use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::net::{TcpListener, UdpSocket};
@@ -15,8 +15,7 @@ pub async fn build_server<H: RequestHandler>(
     let mut server = Server::new(handler);
 
     // UDP
-    let addr: SocketAddr = format!("{}:{}", config.server.listen_addr, config.server.port)
-        .parse()
+    let addr = socket_addr(&config.server.listen_addr, config.server.port)
         .context("invalid server address")?;
     let udp_socket = UdpSocket::bind(addr)
         .await
@@ -54,8 +53,8 @@ async fn register_tls<H: RequestHandler>(
     config: &DoggyDnsConfig,
     tls_config: &TlsConfig,
 ) -> Result<()> {
-    let tls_addr: SocketAddr =
-        format!("{}:{}", config.server.listen_addr, tls_config.port).parse()?;
+    let tls_addr = socket_addr(&config.server.listen_addr, tls_config.port)
+        .context("invalid TLS listen address")?;
 
     let cert_pem = fs::read(&tls_config.cert_path).context("failed to read TLS certificate")?;
     let key_pem = fs::read(&tls_config.key_path).context("failed to read TLS private key")?;
@@ -86,8 +85,8 @@ async fn register_https<H: RequestHandler>(
     config: &DoggyDnsConfig,
     https_config: &HttpsConfig,
 ) -> Result<()> {
-    let https_addr: SocketAddr =
-        format!("{}:{}", config.server.listen_addr, https_config.port).parse()?;
+    let https_addr = socket_addr(&config.server.listen_addr, https_config.port)
+        .context("invalid HTTPS listen address")?;
 
     let cert_pem = fs::read(&https_config.cert_path).context("failed to read HTTPS certificate")?;
     let key_pem = fs::read(&https_config.key_path).context("failed to read HTTPS private key")?;

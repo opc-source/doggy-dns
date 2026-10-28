@@ -42,6 +42,29 @@ async fn occupied_port_returns_error_without_panicking() {
 }
 
 #[tokio::test]
+async fn start_binds_ipv6_loopback() {
+    let probe = TcpListener::bind("[::1]:0").await.unwrap();
+    let port = probe.local_addr().unwrap().port();
+    drop(probe);
+
+    let handle = transport::start(
+        test_state(),
+        McpConfig {
+            listen_addr: "::1".into(),
+            port,
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("IPv6 loopback should bind");
+    assert_eq!(
+        handle.addr,
+        std::net::SocketAddr::from((std::net::Ipv6Addr::LOCALHOST, port))
+    );
+    handle.cancel.cancel();
+}
+
+#[tokio::test]
 async fn start_with_port_zero_assigns_random_port() {
     let handle = transport::start(
         test_state(),

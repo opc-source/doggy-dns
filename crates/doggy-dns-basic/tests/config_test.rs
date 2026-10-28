@@ -761,6 +761,26 @@ allowed_hosts = ["dns-node-1", "10.0.0.5:19091"]
 }
 
 #[test]
+fn validate_accepts_ipv6_mcp_address() {
+    for listen_addr in ["::1", "[::1]"] {
+        let toml_str = format!(
+            r#"
+[server]
+listen_addr = "127.0.0.1"
+port = 15353
+
+[mcp]
+enabled = true
+listen_addr = "{listen_addr}"
+port = 19090
+"#
+        );
+        let config: DoggyDnsConfig = toml::from_str(&toml_str).expect("parse failed");
+        validate_config(&config).expect("IPv6 mcp.listen_addr should validate");
+    }
+}
+
+#[test]
 fn validate_rejects_invalid_mcp_address() {
     let toml_str = r#"
 [server]

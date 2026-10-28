@@ -273,7 +273,9 @@ async fn start_mcp_server(
     let state = Arc::new(doggy_dns_mcp::build_state(
         doggy_dns_mcp::state::McpState::detect_hostname(),
         env!("CARGO_PKG_VERSION").to_string(),
-        format!("{}:{}", config.server.listen_addr, config.server.port),
+        doggy_dns_core::config::net::socket_addr(&config.server.listen_addr, config.server.port)
+            .map(|addr| addr.to_string())
+            .unwrap_or_else(|_| format!("{}:{}", config.server.listen_addr, config.server.port)),
         doggy_dns_mcp::state::McpState::enabled_protocols(config),
         doggy_dns_mcp::snapshots_from(&config.plugins),
         config_content,

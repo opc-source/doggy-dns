@@ -70,9 +70,12 @@ pub fn validate_config(config: &DoggyDnsConfig) -> anyhow::Result<()> {
         );
     }
     if config.mcp.enabled {
-        let addr = format!("{}:{}", config.mcp.listen_addr, config.mcp.port);
-        addr.parse::<SocketAddr>()
-            .map_err(|_| anyhow::anyhow!("mcp.listen_addr is not a valid IP address: {}", addr))?;
+        crate::net::socket_addr(&config.mcp.listen_addr, config.mcp.port).map_err(|_| {
+            anyhow::anyhow!(
+                "mcp.listen_addr is not a valid IP address: {}",
+                config.mcp.listen_addr
+            )
+        })?;
     }
     Ok(())
 }
