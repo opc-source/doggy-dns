@@ -80,7 +80,8 @@ All jobs use dependency caching (`Swatinem/rust-cache@v2`).
 
 | Test File | Tests | Description |
 |-----------|-------|-------------|
-| `crates/doggy-dns-basic/tests/config_test.rs` | 33 | Config parsing, defaults, validation (TLS/HTTPS/remote_config/observability/xdp/mcp) |
+| `crates/doggy-dns-basic/tests/config_test.rs` | 44 | Config parsing, defaults, validation (plugins/TLS/HTTPS/remote_config/observability/xdp/mcp) |
+| `crates/doggy-dns-basic/tests/env_test.rs` | 8 | `${ENV_VAR}` expansion across tables and arrays, malformed references |
 | `crates/doggy-dns-core/tests/handler_test.rs` | 12 | Handler pipeline: NoError, NXDomain, NODATA, ServFail, Refused, middleware callbacks, EDNS cache admission, authoritative negative caching |
 | `crates/doggy-dns-core/tests/middleware_test.rs` | 6 | Metrics counter, logging middleware, return values |
 | `crates/doggy-dns-nacos/tests/authority_test.rs` | 11 | Nacos authority: hit, dotted names, NOERROR/NXDOMAIN/NODATA, family filtering, zone boundaries |

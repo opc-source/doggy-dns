@@ -4,6 +4,7 @@
 //! transitive dependency on hickory, tokio, rustls, or the DNS runtime itself.
 //! Consumers (observability, xdp, mcp, tests) can depend on it alone.
 
+pub mod env;
 pub mod load;
 pub mod mcp;
 pub mod middleware;

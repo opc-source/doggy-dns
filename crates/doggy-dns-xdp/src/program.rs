@@ -46,6 +46,9 @@ impl XdpManager {
         }
 
         let mut ebpf = EbpfLoader::new()
+            // Apply the configured cache capacity at map-creation time; the
+            // eBPF program only declares the default size.
+            .map_max_entries("DNS_CACHE", config.cache_size)
             .load(elf_bytes)
             .context("failed to load eBPF ELF")?;
 

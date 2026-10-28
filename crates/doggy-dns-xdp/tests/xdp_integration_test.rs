@@ -142,6 +142,11 @@ mod linux_tests {
 
         let mut manager = XdpManager::new(&config, port).expect("load and attach XDP");
         let mut cache = manager.take_cache();
+        assert_eq!(
+            cache.max_entries().expect("read map info"),
+            config.cache_size,
+            "DNS_CACHE must use the configured capacity"
+        );
         let stats = manager.take_stats();
         let now = now_ktime_ns();
 

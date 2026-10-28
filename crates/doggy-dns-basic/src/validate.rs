@@ -2,7 +2,9 @@
 
 use crate::DoggyDnsConfig;
 use crate::observability::ObservabilityConfig;
-use std::net::SocketAddr;
+use crate::plugin::{PluginConfig, PluginKind};
+use std::collections::HashSet;
+use std::net::{IpAddr, SocketAddr};
 
 pub fn validate_config(config: &DoggyDnsConfig) -> anyhow::Result<()> {
     anyhow::ensure!(
@@ -47,6 +49,7 @@ pub fn validate_config(config: &DoggyDnsConfig) -> anyhow::Result<()> {
             "remote_config.data_id is required when remote_config is enabled"
         );
     }
+    validate_plugins(&config.plugins)?;
     validate_observability(&config.observability)?;
     if config.xdp.enabled {
         anyhow::ensure!(
@@ -70,6 +73,114 @@ pub fn validate_config(config: &DoggyDnsConfig) -> anyhow::Result<()> {
         let addr = format!("{}:{}", config.mcp.listen_addr, config.mcp.port);
         addr.parse::<SocketAddr>()
             .map_err(|_| anyhow::anyhow!("mcp.listen_addr is not a valid IP address: {}", addr))?;
+    }
+    Ok(())
+}
+
+fn validate_plugins(plugins: &[PluginConfig]) -> anyhow::Result<()> {
+    if plugins.is_empty() {
+        return Ok(());
+    }
+    anyhow::ensure!(
+        plugins.iter().any(|plugin| plugin.enabled),
+        "at least one plugin must be enabled when [[plugins]] is configured"
+    );
+
+    let mut zones: HashSet<String> = HashSet::new();
+    for (index, plugin) in plugins.iter().enumerate() {
+        if !plugin.enabled {
+            continue;
+        }
+        let label = format!("plugins[{index}] ({})", kind_name(&plugin.kind));
+        match plugin.kind {
+            PluginKind::Nacos => {
+                for (field, value) in [
+                    ("server_addr", &plugin.server_addr),
+                    ("namespace", &plugin.namespace),
+                    ("group", &plugin.group),
+                    ("dns_zone", &plugin.dns_zone),
+                ] {
+                    anyhow::ensure!(
+                        value
+                            .as_deref()
+                            .is_some_and(|value| !value.trim().is_empty()),
+                        "{label}.{field} is required for an enabled nacos plugin"
+                    );
+                }
+                let configured = plugin.dns_zone.as_deref().unwrap_or_default();
+                let zone = configured.strip_suffix('.').unwrap_or(configured);
+                validate_dns_zone(&label, zone)?;
+                let zone = zone.to_ascii_lowercase();
+                anyhow::ensure!(
+                    zones.insert(zone.clone()),
+                    "duplicate nacos dns_zone '{zone}' at {label}; each enabled nacos plugin needs its own zone"
+                );
+            }
+            PluginKind::Native => validate_resolver_ttls(&label, plugin)?,
+            PluginKind::Forward => {
+                validate_resolver_ttls(&label, plugin)?;
+                validate_upstream(&label, plugin)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn kind_name(kind: &PluginKind) -> &'static str {
+    match kind {
+        PluginKind::Nacos => "nacos",
+        PluginKind::Native => "native",
+        PluginKind::Forward => "forward",
+    }
+}
+
+fn validate_dns_zone(label: &str, zone: &str) -> anyhow::Result<()> {
+    anyhow::ensure!(!zone.is_empty(), "{label}.dns_zone must not be empty");
+    anyhow::ensure!(
+        zone.len() <= 253,
+        "{label}.dns_zone must be at most 253 bytes"
+    );
+    for part in zone.split('.') {
+        anyhow::ensure!(
+            !part.is_empty(),
+            "{label}.dns_zone must not contain empty labels"
+        );
+        anyhow::ensure!(
+            part.len() <= 63,
+            "{label}.dns_zone label '{part}' must be at most 63 bytes"
+        );
+        anyhow::ensure!(
+            part.bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_'),
+            "{label}.dns_zone label '{part}' may only contain letters, digits, '-' and '_'"
+        );
+    }
+    Ok(())
+}
+
+fn validate_resolver_ttls(label: &str, plugin: &PluginConfig) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        plugin.min_ttl <= plugin.max_ttl,
+        "{label}.min_ttl ({}) must not exceed max_ttl ({})",
+        plugin.min_ttl,
+        plugin.max_ttl
+    );
+    Ok(())
+}
+
+fn validate_upstream(label: &str, plugin: &PluginConfig) -> anyhow::Result<()> {
+    let Some(upstream) = &plugin.upstream else {
+        return Ok(());
+    };
+    anyhow::ensure!(
+        !upstream.is_empty(),
+        "{label}.upstream must not be empty; omit it to use the default servers"
+    );
+    for address in upstream {
+        anyhow::ensure!(
+            address.parse::<SocketAddr>().is_ok() || address.parse::<IpAddr>().is_ok(),
+            "{label}.upstream entry '{address}' is not an IP address or IP:port"
+        );
     }
     Ok(())
 }

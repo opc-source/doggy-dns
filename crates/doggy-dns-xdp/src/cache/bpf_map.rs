@@ -4,7 +4,7 @@
 //! `libc` freely without per-item `cfg` attributes.
 
 use anyhow::Result;
-use aya::maps::{HashMap, Map, MapData};
+use aya::maps::{HashMap, IterableMap, Map, MapData};
 
 use crate::types::{CacheKey, CacheValue};
 
@@ -36,6 +36,11 @@ impl DnsCacheMap {
             Ok(value) => Ok(Some(value)),
             Err(_) => Ok(None),
         }
+    }
+
+    /// Capacity the map was created with, as reported by the kernel.
+    pub fn max_entries(&self) -> Result<u32> {
+        Ok(self.inner.map().info()?.max_entries())
     }
 }
 
