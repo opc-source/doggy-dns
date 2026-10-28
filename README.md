@@ -40,7 +40,7 @@ doggy-dns/                    # Binary entrypoint
     doggy-dns-core/           # Server runtime, handler, middleware (config re-exported from basic)
     doggy-dns-nacos/          # Nacos service discovery backend
     doggy-dns-observability/  # OTLP logs/metrics/traces/profiles export
-    doggy-dns-mcp/            # Node-side service control plane (MCP tools + health probes)
+    doggy-dns-control/            # Node-side service control plane (MCP tools + health probes)
     doggy-dns-xdp/            # Optional XDP kernel fast path (feature = "xdp", Linux only)
   xdp/                        # eBPF program (separate workspace, target bpfel-unknown-none)
 ```
@@ -56,7 +56,7 @@ doggy-dns/                    # Binary entrypoint
 - **Service control plane**: one HTTP listener with selectable endpoints —
   read-only MCP introspection (`get_status`, `list_plugins`, `get_config`,
   `get_runtime_status`) at `/mcp`, plus unauthenticated `/healthz` and
-  `/readyz` probes. → [crates/doggy-dns-mcp/README.md](crates/doggy-dns-mcp/README.md)
+  `/readyz` probes. → [crates/doggy-dns-control/README.md](crates/doggy-dns-control/README.md)
 - **XDP fast path** (optional, Linux): answers cached DNS queries in the kernel
   via an aya eBPF program. → [docs/xdp.md](docs/xdp.md)
 

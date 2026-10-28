@@ -158,4 +158,4 @@ reports live runtime signals (per-zone Nacos cache occupancy and push
 freshness, XDP attach state); both are plain GET, never require auth and
 always answer 200 — `readyz` is a report, not a verdict, so deciding what
 counts as "not ready" stays with the operator or doggy-dns-console. Full
-contract: [crates/doggy-dns-mcp/README.md](../crates/doggy-dns-mcp/README.md).
+contract: [crates/doggy-dns-control/README.md](../crates/doggy-dns-control/README.md).

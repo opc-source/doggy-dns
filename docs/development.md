@@ -93,7 +93,7 @@ All jobs use dependency caching (`Swatinem/rust-cache@v2`).
 | `crates/doggy-dns-plugin/tests/forward_test.rs` | 8 | Forward resolver: local mock upstream, custom/bare IP parsing, validation, NXDOMAIN/NODATA/SERVFAIL mapping |
 | `crates/doggy-dns-plugin/tests/native_test.rs` | 1 | Native resolver (requires network) |
 | `crates/doggy-dns-xdp/tests/*` | 22 + 6 ignored | Userspace cache/interface/middleware/stats; XDP attach tests need root + Linux |
-| `crates/doggy-dns-mcp/tests/*` | 28 | Control plane: HTTP contract, endpoint selection, token scoping, live signals, state snapshots, redaction |
+| `crates/doggy-dns-control/tests/*` | 28 | Control plane: HTTP contract, endpoint selection, token scoping, live signals, state snapshots, redaction |
 | `tests/integration_test.rs` | 3 | End-to-end chain: Nacos hit, outside-zone fallthrough, in-zone miss stays authoritative |
 
 Forward tests run against a local mock upstream, native tests make real

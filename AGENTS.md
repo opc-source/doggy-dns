@@ -46,7 +46,7 @@ doggy-dns (binary)
   ├── doggy-dns-observability   (OTLP logs/metrics/traces/profiles)
   │     ├── doggy-dns-basic
   │     └── doggy-dns-plugin
-  ├── doggy-dns-mcp             (service control plane: MCP tools + health probes)
+  ├── doggy-dns-control         (service control plane: MCP tools + health probes)
   │     └── doggy-dns-basic
   ├── doggy-dns-basic           (TOML config types, load & validate, wall-clock helpers — serde/toml/anyhow only)
   ├── doggy-dns-plugin          (traits, authority chain, built-in authorities — leaf crate)

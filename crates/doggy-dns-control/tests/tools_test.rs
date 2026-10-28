@@ -1,10 +1,10 @@
 #![allow(clippy::disallowed_methods)]
 
 use chrono::Utc;
-use doggy_dns_mcp::PluginSnapshot;
-use doggy_dns_mcp::live::LiveState;
-use doggy_dns_mcp::server::DoggyMcpServer;
-use doggy_dns_mcp::state::McpState;
+use doggy_dns_control::PluginSnapshot;
+use doggy_dns_control::live::LiveState;
+use doggy_dns_control::server::DoggyMcpServer;
+use doggy_dns_control::state::McpState;
 use std::sync::Arc;
 
 fn test_state() -> McpState {

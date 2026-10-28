@@ -22,13 +22,13 @@ use crate::state::McpState;
 
 /// Handle to a running control plane listener.
 #[derive(Debug)]
-pub struct McpServerHandle {
+pub struct ControlPlaneHandle {
     pub addr: SocketAddr,
     pub cancel: CancellationToken,
     join: tokio::task::JoinHandle<()>,
 }
 
-impl McpServerHandle {
+impl ControlPlaneHandle {
     /// Wait for the server to finish.
     pub async fn wait(self) -> Result<(), tokio::task::JoinError> {
         self.join.await
@@ -46,7 +46,7 @@ pub async fn start(
     state: Arc<McpState>,
     live: Arc<LiveState>,
     cfg: ControlConfig,
-) -> anyhow::Result<McpServerHandle> {
+) -> anyhow::Result<ControlPlaneHandle> {
     let cancel = CancellationToken::new();
     let addr = doggy_dns_basic::net::socket_addr(&cfg.listen_addr, cfg.port)?;
     let listener = TcpListener::bind(addr).await?;
@@ -64,7 +64,7 @@ pub async fn start(
             .ok();
     });
 
-    Ok(McpServerHandle { addr, cancel, join })
+    Ok(ControlPlaneHandle { addr, cancel, join })
 }
 
 /// Build the axum router for the control plane, exposing only the

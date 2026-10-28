@@ -668,8 +668,8 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "dashmap",
+ "doggy-dns-control",
  "doggy-dns-core",
- "doggy-dns-mcp",
  "doggy-dns-nacos",
  "doggy-dns-observability",
  "doggy-dns-plugin",
@@ -686,6 +686,24 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "serde",
+ "toml",
+]
+
+[[package]]
+name = "doggy-dns-control"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "chrono",
+ "doggy-dns-basic",
+ "reqwest 0.13.5",
+ "rmcp",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "tokio-util",
  "toml",
 ]
 
@@ -708,24 +726,6 @@ dependencies = [
  "toml",
  "tracing",
  "tracing-subscriber",
-]
-
-[[package]]
-name = "doggy-dns-mcp"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "axum",
- "chrono",
- "doggy-dns-basic",
- "reqwest 0.13.5",
- "rmcp",
- "serde",
- "serde_json",
- "thiserror",
- "tokio",
- "tokio-util",
- "toml",
 ]
 
 [[package]]

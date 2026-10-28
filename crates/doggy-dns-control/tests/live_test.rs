@@ -1,7 +1,7 @@
 #![allow(clippy::disallowed_methods)]
 
 use doggy_dns_basic::time::unix_now_secs as now_unix;
-use doggy_dns_mcp::live::LiveState;
+use doggy_dns_control::live::LiveState;
 
 #[test]
 fn nacos_zone_signal_reports_cache_size_and_push_freshness() {

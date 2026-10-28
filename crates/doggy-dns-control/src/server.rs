@@ -159,12 +159,12 @@ fn error_json(code: &str, message: &str) -> String {
     Value::Object(map).to_string()
 }
 
-#[tool_handler(name = "doggy-dns-mcp", version = "0.1.0")]
+#[tool_handler(name = "doggy-dns-control", version = "0.1.0")]
 impl ServerHandler for DoggyMcpServer {
     fn get_info(&self) -> ServerConfig {
         ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(rmcp::model::Implementation::new(
-                "doggy-dns-mcp",
+                "doggy-dns-control",
                 env!("CARGO_PKG_VERSION"),
             ))
             .with_instructions("Read-only introspection of a doggy-dns instance.")

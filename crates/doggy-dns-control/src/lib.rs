@@ -9,7 +9,7 @@ pub mod server;
 pub mod state;
 pub mod transport;
 
-pub use transport::{McpServerHandle, start};
+pub use transport::{ControlPlaneHandle, start};
 
 use serde::{Deserialize, Serialize};
 

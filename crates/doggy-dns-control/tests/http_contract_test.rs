@@ -1,10 +1,10 @@
 #![allow(clippy::disallowed_methods)]
 
 use chrono::Utc;
-use doggy_dns_mcp::live::LiveState;
-use doggy_dns_mcp::state::McpState;
-use doggy_dns_mcp::transport;
-use doggy_dns_mcp::{ControlConfig, PluginSnapshot};
+use doggy_dns_control::live::LiveState;
+use doggy_dns_control::state::McpState;
+use doggy_dns_control::transport;
+use doggy_dns_control::{ControlConfig, PluginSnapshot};
 use std::sync::Arc;
 
 fn test_state() -> Arc<McpState> {
@@ -168,7 +168,7 @@ async fn rejects_missing_or_wrong_token() {
 }
 
 #[tokio::test]
-async fn initialize_returns_doggy_dns_mcp_server_info() {
+async fn initialize_returns_doggy_dns_control_server_info() {
     let state = test_state();
     let cfg = ControlConfig {
         port: 0,
@@ -181,7 +181,7 @@ async fn initialize_returns_doggy_dns_mcp_server_info() {
     let body = resp.text().await.unwrap();
     let json: serde_json::Value = parse_sse_or_json(&body);
     let server_info = &json["result"]["serverInfo"];
-    assert_eq!(server_info["name"], "doggy-dns-mcp");
+    assert_eq!(server_info["name"], "doggy-dns-control");
 
     handle.cancel.cancel();
 }

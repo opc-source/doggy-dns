@@ -7,7 +7,7 @@ members = [
     "crates/doggy-dns-nacos",
     "crates/doggy-dns-observability",
     "crates/doggy-dns-xdp",
-    "crates/doggy-dns-mcp",
+    "crates/doggy-dns-control",
 ]
 
 [package]
@@ -27,7 +27,7 @@ doggy-dns-plugin = { path = "crates/doggy-dns-plugin" }
 doggy-dns-nacos = { path = "crates/doggy-dns-nacos" }
 doggy-dns-observability = { path = "crates/doggy-dns-observability" }
 doggy-dns-xdp = { path = "crates/doggy-dns-xdp", optional = true }
-doggy-dns-mcp = { path = "crates/doggy-dns-mcp" }
+doggy-dns-control = { path = "crates/doggy-dns-control" }
 hickory-server = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }

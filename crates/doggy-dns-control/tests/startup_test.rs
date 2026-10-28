@@ -1,10 +1,10 @@
 #![allow(clippy::disallowed_methods)]
 
 use chrono::Utc;
-use doggy_dns_mcp::ControlConfig;
-use doggy_dns_mcp::live::LiveState;
-use doggy_dns_mcp::state::McpState;
-use doggy_dns_mcp::transport;
+use doggy_dns_control::ControlConfig;
+use doggy_dns_control::live::LiveState;
+use doggy_dns_control::state::McpState;
+use doggy_dns_control::transport;
 use std::sync::Arc;
 use tokio::net::TcpListener;
 

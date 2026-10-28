@@ -1,9 +1,9 @@
 use anyhow::{Context, Result};
+use doggy_dns_control::live::LiveState;
 use doggy_dns_core::config::{DoggyDnsConfig, PluginKind, load_config};
 use doggy_dns_core::handler::DoggyDnsHandler;
 use doggy_dns_core::middleware::logging::LoggingMiddleware;
 use doggy_dns_core::server::build_server;
-use doggy_dns_mcp::live::LiveState;
 use doggy_dns_nacos::authority::NacosAuthority;
 use doggy_dns_nacos::watcher::NacosServiceWatcher;
 use doggy_dns_observability::Observability;
@@ -294,19 +294,19 @@ async fn start_control_plane(
     config: &DoggyDnsConfig,
     config_content: &str,
     live: Arc<LiveState>,
-) -> Option<doggy_dns_mcp::McpServerHandle> {
+) -> Option<doggy_dns_control::ControlPlaneHandle> {
     if !config.control.enabled {
         return None;
     }
 
-    let state = Arc::new(doggy_dns_mcp::build_state(
-        doggy_dns_mcp::state::McpState::detect_hostname(),
+    let state = Arc::new(doggy_dns_control::build_state(
+        doggy_dns_control::state::McpState::detect_hostname(),
         env!("CARGO_PKG_VERSION").to_string(),
         doggy_dns_core::config::net::socket_addr(&config.server.listen_addr, config.server.port)
             .map(|addr| addr.to_string())
             .unwrap_or_else(|_| format!("{}:{}", config.server.listen_addr, config.server.port)),
-        doggy_dns_mcp::state::McpState::enabled_protocols(config),
-        doggy_dns_mcp::snapshots_from(&config.plugins),
+        doggy_dns_control::state::McpState::enabled_protocols(config),
+        doggy_dns_control::snapshots_from(&config.plugins),
         config_content,
     ));
 
@@ -314,7 +314,7 @@ async fn start_control_plane(
 
     // start() only binds the listener and spawns the serve task; a failure
     // here must stay non-fatal so DNS service continues alone.
-    match doggy_dns_mcp::start(state, live, control_config).await {
+    match doggy_dns_control::start(state, live, control_config).await {
         Ok(handle) => {
             tracing::info!(addr = %handle.addr, "control plane listening");
             Some(handle)

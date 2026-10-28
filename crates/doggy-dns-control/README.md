@@ -1,4 +1,4 @@
-# doggy-dns-mcp
+# doggy-dns-control
 
 Node-side service control plane for doggy-dns: one HTTP listener exposing the
 read-only MCP (Model Context Protocol) introspection endpoint plus plain
