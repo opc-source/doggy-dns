@@ -1,14 +1,16 @@
 use anyhow::Result;
 use async_trait::async_trait;
+use hickory_proto::op::ResponseCode;
 use hickory_proto::rr::{LowerName, Name, RecordType, TSigResponseContext};
 use hickory_resolver::Resolver;
-use hickory_resolver::config::{NameServerConfig, ResolverConfig, ResolverOpts};
+use hickory_resolver::config::{ConnectionConfig, NameServerConfig, ResolverConfig, ResolverOpts};
 use hickory_resolver::net::runtime::TokioRuntimeProvider;
+use hickory_server::net::{DnsError, NetError};
 use hickory_server::server::{Request, RequestInfo};
 use hickory_server::zone_handler::{
-    AuthLookup, AxfrPolicy, LookupControlFlow, LookupOptions, ZoneHandler, ZoneType,
+    AuthLookup, AxfrPolicy, LookupControlFlow, LookupError, LookupOptions, ZoneHandler, ZoneType,
 };
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::time::Duration;
 use tracing::Instrument;
 
@@ -25,15 +27,24 @@ impl ForwardAuthority {
         min_ttl: Duration,
         max_ttl: Duration,
     ) -> Result<Self> {
+        if upstream.is_empty() {
+            anyhow::bail!("forward authority requires at least one upstream server");
+        }
+
         let upstream_count = upstream.len();
         let name_servers: Vec<NameServerConfig> = upstream
             .iter()
             .map(|addr| {
-                let socket_addr: SocketAddr = addr
-                    .parse()
-                    .or_else(|_| format!("{}:53", addr).parse())
-                    .map_err(|e| anyhow::anyhow!("invalid upstream address '{}': {}", addr, e))?;
-                Ok(NameServerConfig::udp_and_tcp(socket_addr.ip()))
+                let socket_addr = parse_upstream(addr)?;
+                let mut udp = ConnectionConfig::udp();
+                udp.port = socket_addr.port();
+                let mut tcp = ConnectionConfig::tcp();
+                tcp.port = socket_addr.port();
+                Ok(NameServerConfig::new(
+                    socket_addr.ip(),
+                    true,
+                    vec![udp, tcp],
+                ))
             })
             .collect::<Result<Vec<_>>>()?;
 
@@ -55,6 +66,39 @@ impl ForwardAuthority {
             upstream_count,
         })
     }
+}
+
+/// Parse `IP` or `IP:port`, defaulting to port 53.
+fn parse_upstream(addr: &str) -> Result<SocketAddr> {
+    if let Ok(socket_addr) = addr.parse::<SocketAddr>() {
+        return Ok(socket_addr);
+    }
+    if let Ok(ip) = addr.parse::<IpAddr>() {
+        return Ok(SocketAddr::new(ip, 53));
+    }
+    anyhow::bail!(
+        "invalid upstream address '{}': expected IP or IP:port",
+        addr
+    )
+}
+
+/// Map a resolver failure to the DNS result it represents.
+fn classify_error(error: &NetError) -> (ResponseCode, LookupError) {
+    if error.is_nx_domain() {
+        return (
+            ResponseCode::NXDomain,
+            LookupError::ResponseCode(ResponseCode::NXDomain),
+        );
+    }
+    if error.is_no_records_found() {
+        return (ResponseCode::NoError, LookupError::NameExists);
+    }
+
+    let code = match error {
+        NetError::Dns(DnsError::ResponseCode(code)) => *code,
+        _ => ResponseCode::ServFail,
+    };
+    (code, LookupError::ResponseCode(code))
 }
 
 #[async_trait]
@@ -99,20 +143,41 @@ impl ZoneHandler for ForwardAuthority {
                 span.record("dns.answers", tracing::field::display(answers));
                 span.record("otel.status_code", "OK");
                 if answers == 0 {
-                    LookupControlFlow::Skip
+                    tracing::debug!(
+                        query = %name_str,
+                        qtype = ?rtype,
+                        "upstream returned an empty answer"
+                    );
+                    LookupControlFlow::Continue(Err(LookupError::NameExists))
                 } else {
                     LookupControlFlow::Continue(Ok(AuthLookup::Resolved(lookup)))
                 }
             }
             Err(e) => {
-                span.record("otel.status_code", "ERROR");
-                tracing::error!(
-                    query = %name_str,
-                    qtype = ?rtype,
-                    error = %e,
-                    "upstream forward lookup failed"
+                let (response_code, lookup_error) = classify_error(&e);
+                let negative = matches!(
+                    response_code,
+                    ResponseCode::NoError | ResponseCode::NXDomain
                 );
-                LookupControlFlow::Skip
+                span.record("otel.status_code", if negative { "OK" } else { "ERROR" });
+                if negative {
+                    tracing::debug!(
+                        query = %name_str,
+                        qtype = ?rtype,
+                        response_code = ?response_code,
+                        detail = %e,
+                        "upstream returned a negative answer"
+                    );
+                } else {
+                    tracing::warn!(
+                        query = %name_str,
+                        qtype = ?rtype,
+                        response_code = ?response_code,
+                        error = %e,
+                        "upstream forward lookup failed"
+                    );
+                }
+                LookupControlFlow::Continue(Err(lookup_error))
             }
         }
     }

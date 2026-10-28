@@ -37,9 +37,15 @@ Part of [README](../README.md).
 |------|-------------|
 | `nacos` | Resolves service names from Nacos registry via DashMap cache. Format: `<service>.<group>.<namespace>.<zone>.` |
 | `native` | Resolves using the OS system resolver (`/etc/resolv.conf`) |
-| `forward` | Resolves using explicit upstream DNS servers (e.g., `8.8.8.8:53`) |
+| `forward` | Resolves using explicit upstream DNS servers. Accepts `IP` or `IP:port` (port defaults to 53) and uses the configured port for both UDP and TCP |
 
 Plugins are evaluated in the order defined in the `[[plugins]]` config array. The first handler that returns a non-Skip result wins.
+
+`ForwardAuthority` keeps upstream semantics: `NXDOMAIN` and `NODATA` responses
+are returned as authoritative negatives, upstream `SERVFAIL`/`REFUSED` keep
+their code, and transport failures (timeout, I/O) become `SERVFAIL` rather than
+silently falling through or turning into `NXDOMAIN`. `NativeAuthority` falls
+through on lookup failure so a later `forward` plugin can still answer.
 
 ## Nacos integration
 
