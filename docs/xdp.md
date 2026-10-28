@@ -185,8 +185,11 @@ drops the packet rather than passing a truncated frame upward.
   userspace.
 - **One XDP program per interface** in default mode — a second attach fails
   with `EBUSY`.
-- **Cached replies are truncated to 512 bytes** (classic DNS without EDNS0);
-  larger answers cannot be served from the kernel cache.
+- **Cache admission is limited to 512-byte replies** — the response is
+  serialized with the client's EDNS payload size, then cached only if the
+  actual wire length is ≤512 bytes and the reply is not truncated. EDNS
+  queries with small answers are cached; larger or truncated answers are
+  served from userspace and never cached.
 - **Keyed by 64-bit FNV-1a hash, not the name itself** — a collision would
   serve another name's answer. Acceptable for a private resolver cache, worth
   knowing before exposing it publicly.
