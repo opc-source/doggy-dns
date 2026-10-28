@@ -99,7 +99,7 @@ fn bench_to_dns_records_10_ips(c: &mut Criterion) {
     let name = Name::from_str("my-svc.nacos.local.").unwrap();
     let ips: Vec<String> = (0..10).map(|i| format!("10.0.0.{}", i)).collect();
     c.bench_function("to_dns_records_10_ips", |b| {
-        b.iter(|| black_box(to_dns_records(&name, &ips, 60)));
+        b.iter(|| black_box(to_dns_records(&name, &ips, 60, RecordType::A)));
     });
 }
 

@@ -5,7 +5,7 @@ use hickory_proto::op::{Header, HeaderCounts, MessageType, Metadata, OpCode, Res
 use hickory_proto::serialize::binary::BinEncoder;
 use hickory_server::net::xfer::Protocol;
 use hickory_server::server::{Request, RequestHandler, ResponseHandler, ResponseInfo};
-use hickory_server::zone_handler::{LookupControlFlow, MessageResponseBuilder};
+use hickory_server::zone_handler::{LookupControlFlow, LookupError, MessageResponseBuilder};
 use std::sync::Arc;
 use tokio::time::Instant;
 use tracing::Instrument;
@@ -221,21 +221,49 @@ impl RequestHandler for DoggyDnsHandler {
                     }
                 }
                 LookupControlFlow::Continue(Err(e)) | LookupControlFlow::Break(Err(e)) => {
-                    tracing::warn!(
-                        request_id = request_id,
-                        query = %query_display,
-                        qtype = ?query_type,
-                        authority = handler_name,
-                        error = %e,
-                        response_code = ?ResponseCode::ServFail,
-                        "authority returned error"
+                    let response_code = response_code_for_lookup_error(&e);
+                    let negative_cacheable = matches!(
+                        response_code,
+                        ResponseCode::NoError | ResponseCode::NXDomain
                     );
+                    let resp_bytes = if self.xdp_enabled && negative_cacheable {
+                        serialize_for_xdp(request, |probe| {
+                            let b = MessageResponseBuilder::from_message_request(request);
+                            b.error_msg(&request.metadata, response_code)
+                                .destructive_emit(probe)
+                                .is_ok()
+                        })
+                    } else {
+                        None
+                    };
+
+                    if response_code == ResponseCode::ServFail {
+                        tracing::warn!(
+                            request_id = request_id,
+                            query = %query_display,
+                            qtype = ?query_type,
+                            authority = handler_name,
+                            error = %e,
+                            response_code = ?response_code,
+                            "authority returned error"
+                        );
+                    } else {
+                        tracing::debug!(
+                            request_id = request_id,
+                            query = %query_display,
+                            qtype = ?query_type,
+                            authority = handler_name,
+                            response_code = ?response_code,
+                            "authority returned negative response"
+                        );
+                    }
+
+                    let mut outcome =
+                        RequestOutcome::authority_error(response_code, handler_name.to_string());
+                    outcome.response_bytes = resp_bytes;
                     (
-                        send_error(request, &mut response_handle, ResponseCode::ServFail).await,
-                        RequestOutcome::authority_error(
-                            ResponseCode::ServFail,
-                            handler_name.to_string(),
-                        ),
+                        send_error(request, &mut response_handle, response_code).await,
+                        outcome,
                     )
                 }
                 LookupControlFlow::Skip => {
@@ -271,6 +299,17 @@ impl RequestHandler for DoggyDnsHandler {
         }
         .instrument(span)
         .await
+    }
+}
+
+/// Map an authority lookup error to the DNS response code it represents.
+fn response_code_for_lookup_error(error: &LookupError) -> ResponseCode {
+    match error {
+        LookupError::NameExists => ResponseCode::NoError,
+        LookupError::ResponseCode(code) => *code,
+        LookupError::NetError(e) if e.is_nx_domain() => ResponseCode::NXDomain,
+        LookupError::NetError(e) if e.is_no_records_found() => ResponseCode::NoError,
+        _ => ResponseCode::ServFail,
     }
 }
 

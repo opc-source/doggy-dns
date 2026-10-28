@@ -16,7 +16,7 @@ use hickory_server::net::runtime::TokioTime;
 use hickory_server::net::xfer::Protocol;
 use hickory_server::server::{Request, RequestHandler, ResponseHandler, ResponseInfo};
 use hickory_server::zone_handler::{
-    AuthLookup, LookupControlFlow, LookupOptions, MessageResponse, ZoneHandler,
+    AuthLookup, LookupControlFlow, LookupError, LookupOptions, MessageResponse, ZoneHandler,
 };
 use std::net::{Ipv4Addr, SocketAddr};
 use std::str::FromStr;
@@ -123,6 +123,75 @@ impl ZoneHandler for ErrorZoneHandler {
         LookupControlFlow::Continue(Err(
             hickory_server::zone_handler::LookupError::ResponseCode(ResponseCode::ServFail),
         ))
+    }
+
+    async fn search(
+        &self,
+        _request: &Request,
+        _lookup_options: LookupOptions,
+    ) -> (
+        LookupControlFlow<AuthLookup>,
+        Option<hickory_proto::rr::TSigResponseContext>,
+    ) {
+        (LookupControlFlow::Skip, None)
+    }
+
+    async fn nsec_records(
+        &self,
+        _name: &hickory_proto::rr::LowerName,
+        _lookup_options: LookupOptions,
+    ) -> LookupControlFlow<AuthLookup> {
+        LookupControlFlow::Skip
+    }
+}
+
+/// A ZoneHandler that returns a specific authoritative negative result.
+struct LookupErrorZoneHandler {
+    kind: ExpectedLookupError,
+}
+
+#[derive(Clone, Copy)]
+enum ExpectedLookupError {
+    NxDomain,
+    NameExists,
+}
+
+impl LookupErrorZoneHandler {
+    fn new(kind: ExpectedLookupError) -> Self {
+        Self { kind }
+    }
+}
+
+#[async_trait]
+impl ZoneHandler for LookupErrorZoneHandler {
+    fn zone_type(&self) -> hickory_server::zone_handler::ZoneType {
+        hickory_server::zone_handler::ZoneType::Primary
+    }
+
+    fn axfr_policy(&self) -> hickory_server::zone_handler::AxfrPolicy {
+        hickory_server::zone_handler::AxfrPolicy::Deny
+    }
+
+    fn origin(&self) -> &hickory_proto::rr::LowerName {
+        static ORIGIN: std::sync::LazyLock<hickory_proto::rr::LowerName> =
+            std::sync::LazyLock::new(|| {
+                hickory_proto::rr::LowerName::from(Name::from_str("nacos.local.").unwrap())
+            });
+        &ORIGIN
+    }
+
+    async fn lookup(
+        &self,
+        _name: &hickory_proto::rr::LowerName,
+        _rtype: RecordType,
+        _request_info: Option<&hickory_server::server::RequestInfo<'_>>,
+        _lookup_options: LookupOptions,
+    ) -> LookupControlFlow<AuthLookup> {
+        let error = match self.kind {
+            ExpectedLookupError::NxDomain => LookupError::ResponseCode(ResponseCode::NXDomain),
+            ExpectedLookupError::NameExists => LookupError::NameExists,
+        };
+        LookupControlFlow::Continue(Err(error))
     }
 
     async fn search(
@@ -424,4 +493,66 @@ async fn handler_truncated_response_is_not_cached() {
         outcome.response_bytes.is_none(),
         "truncated responses must not be cached"
     );
+}
+
+#[tokio::test]
+async fn handler_authority_nxdomain_maps_to_nxdomain() {
+    let chain = AuthorityChain::new(vec![(
+        "nacos".to_string(),
+        Arc::new(LookupErrorZoneHandler::new(ExpectedLookupError::NxDomain)),
+    )]);
+    let handler = DoggyDnsHandler::new(vec![], Arc::new(chain), false);
+
+    let request = make_dns_request("missing.DEFAULT_GROUP.public.nacos.local.", RecordType::A);
+    let mock = MockResponseHandler::new();
+    let _info = handler
+        .handle_request::<_, TokioTime>(&request, mock.clone())
+        .await;
+
+    assert_eq!(mock.response_code(), Some(ResponseCode::NXDomain));
+}
+
+#[tokio::test]
+async fn handler_authority_name_exists_returns_nodata() {
+    let chain = AuthorityChain::new(vec![(
+        "nacos".to_string(),
+        Arc::new(LookupErrorZoneHandler::new(ExpectedLookupError::NameExists)),
+    )]);
+    let handler = DoggyDnsHandler::new(vec![], Arc::new(chain), false);
+
+    let request = make_dns_request("my-svc.DEFAULT_GROUP.public.nacos.local.", RecordType::AAAA);
+    let mock = MockResponseHandler::new();
+    let _info = handler
+        .handle_request::<_, TokioTime>(&request, mock.clone())
+        .await;
+
+    assert_eq!(mock.response_code(), Some(ResponseCode::NoError));
+}
+
+#[tokio::test]
+async fn handler_authoritative_nxdomain_is_cached_for_xdp() {
+    let chain = AuthorityChain::new(vec![(
+        "nacos".to_string(),
+        Arc::new(LookupErrorZoneHandler::new(ExpectedLookupError::NxDomain)),
+    )]);
+    let capture = Arc::new(OutcomeCaptureMiddleware::new());
+    let handler = DoggyDnsHandler::new(
+        vec![capture.clone() as Arc<dyn Middleware>],
+        Arc::new(chain),
+        true,
+    );
+
+    let request = make_dns_request("missing.DEFAULT_GROUP.public.nacos.local.", RecordType::A);
+    let mock = MockResponseHandler::new();
+    let _info = handler
+        .handle_request::<_, TokioTime>(&request, mock.clone())
+        .await;
+
+    assert_eq!(mock.response_code(), Some(ResponseCode::NXDomain));
+    let outcome = capture.outcome().expect("outcome not captured");
+    let bytes = outcome
+        .response_bytes
+        .expect("authoritative NXDOMAIN should be cached");
+    let decoded = Message::from_vec(&bytes).expect("cached bytes must be a valid DNS message");
+    assert_eq!(decoded.metadata.response_code, ResponseCode::NXDomain);
 }
