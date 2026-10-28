@@ -7,7 +7,9 @@ use doggy_dns_nacos::authority::NacosAuthority;
 use doggy_dns_nacos::watcher::{CachedInstance, ServiceKey};
 use doggy_dns_plugin::authority_chain::AuthorityChain;
 use doggy_dns_plugin::{Middleware, MiddlewareAction, RequestOutcome};
-use hickory_proto::op::{Header, HeaderCounts, Message, MessageType, OpCode, Query, ResponseCode};
+use hickory_proto::op::{
+    Edns, Header, HeaderCounts, Message, MessageType, OpCode, Query, ResponseCode,
+};
 use hickory_proto::rr::{Name, Record, RecordType};
 use hickory_server::net::NetError;
 use hickory_server::net::runtime::TokioTime;
@@ -24,6 +26,16 @@ use std::sync::atomic::{AtomicU64, Ordering};
 // --- Helpers ---
 
 fn make_dns_request(domain: &str, rtype: RecordType) -> Request {
+    build_request(domain, rtype, None)
+}
+
+fn make_edns_dns_request(domain: &str, rtype: RecordType, max_payload: u16) -> Request {
+    let mut edns = Edns::new();
+    edns.set_max_payload(max_payload);
+    build_request(domain, rtype, Some(edns))
+}
+
+fn build_request(domain: &str, rtype: RecordType, edns: Option<Edns>) -> Request {
     let mut message = Message::new(1234, MessageType::Query, OpCode::Query);
     message.metadata.recursion_desired = true;
 
@@ -31,6 +43,9 @@ fn make_dns_request(domain: &str, rtype: RecordType) -> Request {
     query.set_name(Name::from_str(domain).unwrap());
     query.set_query_type(rtype);
     message.add_query(query);
+    if let Some(edns) = edns {
+        message.set_edns(edns);
+    }
 
     let bytes = message.to_vec().unwrap();
     let src = SocketAddr::from((Ipv4Addr::LOCALHOST, 12345));
@@ -164,6 +179,10 @@ impl Middleware for ShortCircuitMiddleware {
 }
 
 fn make_nacos_authority_with_hit() -> NacosAuthority {
+    make_nacos_authority_with_ips(&["10.0.0.1"])
+}
+
+fn make_nacos_authority_with_ips(ips: &[&str]) -> NacosAuthority {
     let cache = Arc::new(DashMap::new());
     cache.insert(
         ServiceKey {
@@ -171,13 +190,43 @@ fn make_nacos_authority_with_hit() -> NacosAuthority {
             group: "default_group".to_string(),
             namespace: "public".to_string(),
         },
-        vec![CachedInstance {
-            ip: "10.0.0.1".to_string(),
-            port: 8080,
-            healthy: true,
-        }],
+        ips.iter()
+            .map(|ip| CachedInstance {
+                ip: (*ip).to_string(),
+                port: 8080,
+                healthy: true,
+            })
+            .collect(),
     );
     NacosAuthority::new(cache, "nacos.local", 60)
+}
+
+/// Captures the final `RequestOutcome` so tests can inspect the XDP cache payload.
+struct OutcomeCaptureMiddleware {
+    outcome: Arc<std::sync::Mutex<Option<RequestOutcome>>>,
+}
+
+impl OutcomeCaptureMiddleware {
+    fn new() -> Self {
+        Self {
+            outcome: Arc::new(std::sync::Mutex::new(None)),
+        }
+    }
+
+    fn outcome(&self) -> Option<RequestOutcome> {
+        self.outcome.lock().unwrap().clone()
+    }
+}
+
+#[async_trait]
+impl Middleware for OutcomeCaptureMiddleware {
+    async fn before_request(&self, _request: &Request) -> MiddlewareAction {
+        MiddlewareAction::Continue
+    }
+
+    async fn after_request(&self, _request: &Request, _duration_ms: u64, outcome: &RequestOutcome) {
+        *self.outcome.lock().unwrap() = Some(outcome.clone());
+    }
 }
 
 // --- Tests ---
@@ -277,4 +326,102 @@ async fn handler_no_middlewares_resolves_normally() {
         .await;
 
     assert_eq!(mock.response_code(), Some(ResponseCode::NoError));
+}
+
+fn many_ips() -> Vec<String> {
+    (1..=40).map(|i| format!("10.0.0.{i}")).collect()
+}
+
+#[tokio::test]
+async fn handler_edns_query_caches_small_response() {
+    let authority = make_nacos_authority_with_hit();
+    let chain = AuthorityChain::new(vec![("nacos".to_string(), Arc::new(authority))]);
+    let capture = Arc::new(OutcomeCaptureMiddleware::new());
+    let handler = DoggyDnsHandler::new(
+        vec![capture.clone() as Arc<dyn Middleware>],
+        Arc::new(chain),
+        true,
+    );
+
+    let request = make_edns_dns_request(
+        "my-svc.DEFAULT_GROUP.public.nacos.local.",
+        RecordType::A,
+        1232,
+    );
+    let mock = MockResponseHandler::new();
+    let _info = handler
+        .handle_request::<_, TokioTime>(&request, mock.clone())
+        .await;
+
+    assert_eq!(mock.response_code(), Some(ResponseCode::NoError));
+    let outcome = capture.outcome().expect("outcome not captured");
+    let bytes = outcome
+        .response_bytes
+        .expect("small EDNS response should be cached");
+    assert!(bytes.len() <= 512, "cached payload exceeds XDP capacity");
+    let decoded = Message::from_vec(&bytes).expect("cached bytes must be a valid DNS message");
+    assert_eq!(decoded.metadata.response_code, ResponseCode::NoError);
+    assert_eq!(decoded.answers.len(), 1);
+}
+
+#[tokio::test]
+async fn handler_oversized_response_is_not_cached() {
+    let ips = many_ips();
+    let refs: Vec<&str> = ips.iter().map(String::as_str).collect();
+    let authority = make_nacos_authority_with_ips(&refs);
+    let chain = AuthorityChain::new(vec![("nacos".to_string(), Arc::new(authority))]);
+    let capture = Arc::new(OutcomeCaptureMiddleware::new());
+    let handler = DoggyDnsHandler::new(
+        vec![capture.clone() as Arc<dyn Middleware>],
+        Arc::new(chain),
+        true,
+    );
+
+    let request = make_edns_dns_request(
+        "my-svc.DEFAULT_GROUP.public.nacos.local.",
+        RecordType::A,
+        1232,
+    );
+    let mock = MockResponseHandler::new();
+    let _info = handler
+        .handle_request::<_, TokioTime>(&request, mock.clone())
+        .await;
+
+    assert_eq!(mock.response_code(), Some(ResponseCode::NoError));
+    let outcome = capture.outcome().expect("outcome not captured");
+    assert!(
+        outcome.response_bytes.is_none(),
+        "response larger than 512 bytes must not be cached"
+    );
+}
+
+#[tokio::test]
+async fn handler_truncated_response_is_not_cached() {
+    let ips = many_ips();
+    let refs: Vec<&str> = ips.iter().map(String::as_str).collect();
+    let authority = make_nacos_authority_with_ips(&refs);
+    let chain = AuthorityChain::new(vec![("nacos".to_string(), Arc::new(authority))]);
+    let capture = Arc::new(OutcomeCaptureMiddleware::new());
+    let handler = DoggyDnsHandler::new(
+        vec![capture.clone() as Arc<dyn Middleware>],
+        Arc::new(chain),
+        true,
+    );
+
+    let request = make_edns_dns_request(
+        "my-svc.DEFAULT_GROUP.public.nacos.local.",
+        RecordType::A,
+        512,
+    );
+    let mock = MockResponseHandler::new();
+    let _info = handler
+        .handle_request::<_, TokioTime>(&request, mock.clone())
+        .await;
+
+    assert_eq!(mock.response_code(), Some(ResponseCode::NoError));
+    let outcome = capture.outcome().expect("outcome not captured");
+    assert!(
+        outcome.response_bytes.is_none(),
+        "truncated responses must not be cached"
+    );
 }

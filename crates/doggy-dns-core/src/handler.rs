@@ -302,44 +302,60 @@ const XDP_CACHE_MAX_SIZE: usize = 512;
 /// Serialize a DNS response to wire format for the XDP cache.
 ///
 /// The caller supplies a closure that builds and emits the response into the
-/// provided [`BinEncoder`]. Returns `None` if the max message size exceeds
-/// [`XDP_CACHE_MAX_SIZE`] (those responses fall through to userspace) or if
-/// serialization fails.
+/// provided [`BinEncoder`]. The response is serialized with the client's
+/// advertised max size, then admitted to the cache only when the actual wire
+/// length fits [`XDP_CACHE_MAX_SIZE`] and the response is not truncated.
+/// Returns `None` in all other cases (those responses fall through to userspace).
 fn serialize_for_xdp(
     request: &Request,
     emit_fn: impl FnOnce(&mut BinEncoder<'_>) -> bool,
 ) -> Option<Vec<u8>> {
     let max_size = max_message_size(request.protocol(), request.edns.as_ref());
-    if max_size > XDP_CACHE_MAX_SIZE as u16 {
-        if let Ok(info) = request.request_info() {
-            tracing::warn!(
-                request_id = request.metadata.id,
-                query = %info.query.name(),
-                qtype = %info.query.query_type(),
-                protocol = ?info.protocol,
-                client = %info.src,
-                max_size = max_size,
-                limit = XDP_CACHE_MAX_SIZE,
-                "response max_size exceeds XDP cache capacity, skipping cache"
-            );
-        } else {
-            tracing::warn!(
-                request_id = request.metadata.id,
-                max_size = max_size,
-                limit = XDP_CACHE_MAX_SIZE,
-                "response max_size exceeds XDP cache capacity, skipping cache"
-            );
-        }
-        return None;
-    }
 
     let mut bytes = Vec::with_capacity(XDP_CACHE_MAX_SIZE);
     let mut encoder = BinEncoder::new(&mut bytes);
     encoder.set_max_size(max_size);
     if !emit_fn(&mut encoder) {
-        tracing::warn!("failed to serialize response for XDP cache");
+        tracing::warn!(
+            request_id = request.metadata.id,
+            "failed to serialize response for XDP cache"
+        );
         return None;
     }
+
+    let skip_reason = if bytes.len() > XDP_CACHE_MAX_SIZE {
+        Some("response exceeds XDP cache capacity")
+    } else if bytes.get(2).is_some_and(|flags| flags & 0x02 != 0) {
+        // TC bit: a partial answer must never be served from cache.
+        Some("response is truncated")
+    } else {
+        None
+    };
+    if let Some(reason) = skip_reason {
+        if let Ok(info) = request.request_info() {
+            tracing::debug!(
+                request_id = request.metadata.id,
+                query = %info.query.name(),
+                qtype = %info.query.query_type(),
+                protocol = ?info.protocol,
+                client = %info.src,
+                bytes = bytes.len(),
+                limit = XDP_CACHE_MAX_SIZE,
+                reason,
+                "skipping XDP cache"
+            );
+        } else {
+            tracing::debug!(
+                request_id = request.metadata.id,
+                bytes = bytes.len(),
+                limit = XDP_CACHE_MAX_SIZE,
+                reason,
+                "skipping XDP cache"
+            );
+        }
+        return None;
+    }
+
     Some(bytes)
 }
 
