@@ -95,7 +95,9 @@ jobs:
           sudo env "PATH=$PATH" cargo bench -p doggy-dns-xdp --bench xdp_component_bench -- --save-baseline base | tee /tmp/bench-base.txt
       - name: Checkout PR head
         if: github.event_name == 'pull_request'
-        run: git checkout "${github.event.pull_request.head.sha}"
+        run: git checkout "$HEAD_SHA"
+        env:
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
       - name: Build eBPF program (PR)
         if: github.event_name == 'pull_request'
         run: cd xdp && cargo build -Z build-std=core,alloc --release --target bpfel-unknown-none
