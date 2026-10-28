@@ -91,6 +91,13 @@ jobs:
         if: github.event_name == 'pull_request'
         run: |
           git checkout origin/main
+          # Drop the cache-restored criterion dir: its baseline dirs can
+          # exist (root-owned, from previous sudo runs) while their
+          # sample.json files were not preserved, which makes this pass
+          # try to compare against the missing files before overwriting
+          # them — printing criterion AccessError noise. A fresh dir also
+          # guarantees the base baseline is exactly what this run measured.
+          sudo rm -rf target/criterion
           (cd xdp && cargo build -Z build-std=core,alloc --release --target bpfel-unknown-none)
           sudo env "PATH=$PATH" cargo bench -p doggy-dns-xdp --bench xdp_component_bench -- --save-baseline base | tee /tmp/bench-base.txt
       - name: Checkout PR head
@@ -110,6 +117,7 @@ jobs:
       - name: Run benchmarks (main)
         if: github.event_name != 'pull_request'
         run: |
+          sudo rm -rf target/criterion
           sudo env "PATH=$PATH" cargo bench -p doggy-dns-xdp --bench xdp_component_bench -- --save-baseline base | tee /tmp/bench-main.txt
       - name: Write job summary
         if: always()
