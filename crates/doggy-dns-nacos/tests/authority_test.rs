@@ -160,7 +160,7 @@ async fn zone_apex_soa_query_returns_soa_record() {
             assert_eq!(&record.name, &Name::from_str("nacos.local.").unwrap());
             assert_eq!(record.ttl, 6);
             let RData::SOA(soa) = &record.data else {
-                panic!("expected SOA rdata, got {:?}", &record.data);
+                panic!("expected SOA rdata, got {:?}", record.data);
             };
             assert_eq!(soa.minimum, 6);
             assert_eq!(&soa.mname, &Name::from_str("nacos.local.").unwrap());
