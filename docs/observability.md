@@ -70,16 +70,10 @@ sanitizes stream names: a `stream-name` of `doggy-dns` appears as
 (`dns_queries`, `dns_query_duration_bucket`, `dns_query_duration_count`,
 `dns_query_duration_sum`, ...).
 
-The endpoint is the OpenObserve **base** URL:
-
-```
-http://<host>:5080/api/<org>
-```
-
-doggy-dns appends `/v1/logs`, `/v1/metrics`, `/v1/traces`, or `/v1/profiles`.
-Do not include a trailing slash or a `/v1` or `/v1/<signal>` suffix in
-`endpoint`; use the per-signal `endpoint` for a full URL override. Trailing
-slashes on full per-signal URLs are normalized.
+The endpoint is the OpenObserve **base** URL, `http://<host>:5080/api/<org>`;
+doggy-dns appends `/v1/<signal>`. Do not put a trailing slash or a `/v1` suffix
+in `[observability] endpoint` — use the per-signal `endpoint` for a full URL
+(trailing slashes there are normalized).
 
 ## Configuration reference
 
@@ -222,9 +216,9 @@ sources:
       codec: otlp
 ```
 
-Vector outputs logs/metrics/traces, **not profiles**; keep profiles disabled.
-Forward the three signals from Vector to OpenObserve (or another backend) using
-Vector's own sinks. This keeps doggy-dns a single-target OTLP producer.
+Vector receives logs/metrics/traces (not profiles) and forwards them to
+OpenObserve or another backend with its own sinks, so doggy-dns stays a
+single-target OTLP producer. Keep `observability.profiles.enabled = false`.
 
 ## Metrics
 
@@ -239,18 +233,16 @@ Buckets: `0.1, 0.25, 0.5, 1, 2.5, 5, 10, 25, 50, 100, 250, 500, 1000, 2500,
 5000` ms. Query names and client IPs are intentionally **not** metric
 attributes (cardinality); use logs/traces for those.
 
-The `dns.xdp.queries` instrument is created whenever metrics are enabled; its data
-points appear only when both `xdp.enabled` and `observability.metrics.enabled` are
-true (and the process is Linux with the `xdp` feature built in). Userspace reads a
-per-CPU BPF map once per metrics interval, so values lag by up to one poll period
-plus one export interval; within an interval that saw no reload they are exact, not
-sampled. Kernel-served answers never appear in
-`dns.queries`, so total demand is `dns.queries` plus
-`dns.xdp.queries{result=hit|negative_hit}`. Do not add `miss`/`expired` again — those
-queries also appear in `dns.queries`. Reloading the XDP program resets the kernel
-counters; a counter that went backwards is counted fresh from its post-reset value,
-so a reload never yields a negative delta or a spurious spike, but counts accumulated
-between the last successful poll and the reload are lost.
+The `dns.xdp.queries` instrument is created whenever metrics are enabled, but
+only emits data points when `xdp.enabled` is also true on Linux with the `xdp`
+feature built in. Kernel-served answers never appear in `dns.queries`, so total
+demand is `dns.queries` plus `dns.xdp.queries{result=hit|negative_hit}`; do not
+add `miss`/`expired`, which also appear in `dns.queries`. Values come from a
+per-CPU map polled once per `interval_secs`, so they lag by up to one poll plus
+one export interval but are exact counts, not a sample, unless the program was
+reloaded (a counter that went backwards starts fresh, so deltas stay
+non-negative while the counts since the last poll are lost). See
+[xdp.md](xdp.md) for the kernel side.
 
 ## Traces
 
@@ -263,24 +255,14 @@ between the last successful poll and the reload are lost.
 
 Sampling is parent-based trace-ID ratio for normal traffic.
 
-**Every `tracing::error!` event is force-captured.** The observability layer
-converts it into a dedicated `dns.error` span regardless of `sample_ratio`,
-including `sample_ratio = 0`. The span is a **child of the current request
-span**, so it keeps the original `trace_id` even when the request root was
-dropped by head sampling (the root may be absent, leaving an orphan child in
-the same trace). If the ERROR event occurs outside any span, `dns.error`
-becomes a root span. It carries:
-
-- `otel.status_code = ERROR`, `otel.kind = server`
-- `error.message`, `error.target`
-- `code.filepath`, `code.lineno`
-- `doggy.force_sample = true`
-
-Normal request spans stay ratio-sampled; only ERROR events get this extra
-forced span. OTel SDK internal ERROR logs are excluded to avoid an export
+**Every `tracing::error!` event is force-captured** as a dedicated `dns.error`
+span (attributes in the table above), regardless of `sample_ratio` — even at
+`0`. It is a child of the current request span, so it keeps the original
+`trace_id` even when head sampling dropped the root; outside any span it becomes
+a root span. OTel SDK internal ERROR logs are excluded to avoid an export
 feedback loop.
 
-> This is based on `tracing::error!` events, not DNS response codes. Authority
+> This is driven by `tracing::error!`, not by DNS response codes. Authority
 > paths that log at `WARN` do not trigger it; the forward authority logs
 > upstream lookup failures at `ERROR`, so those do.
 
@@ -297,13 +279,12 @@ Requirements and caveats:
   `stream_type=profiles` stream and is queryable. List it with
   `GET /api/<org>/streams?type=profiles&offset=0&limit=10`; the stream may not
   appear until the first non-empty profile is flushed.
-- OTel Collector requires `--feature-gates=+service.profilesSupport` and a
-  profiles pipeline.
-- Vector does not support profiles.
+- The Collector needs the profiles feature gate and pipeline (see above);
+  Vector cannot receive profiles at all.
 - Release builds should include debug symbols for useful function names
   (`[profile.release] debug = 1`).
-- Profile collection is disabled by default (sampling overhead + Alpha status).
-- Collection windows with no CPU samples are skipped (no empty profile is sent).
+- Collection windows with no CPU samples are skipped (no empty profile is sent),
+  which is why the signal is off by default along with its sampling overhead.
 
 ## Operational notes
 
