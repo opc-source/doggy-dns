@@ -28,7 +28,7 @@ allowed_hosts = ["dns-node-1", "10.0.0.5:19090"]
 | Field | Default | Description |
 |-------|---------|-------------|
 | `enabled` | `false` | Enable the MCP server |
-| `listen_addr` | `"127.0.0.1"` | Bind address |
+| `listen_addr` | `"127.0.0.1"` | Bind address; IPv4 or IPv6 literal (`[::1]` also accepted) |
 | `port` | `19090` | Bind port |
 | `token` | `None` | Bearer token for authentication |
 | `allowed_hosts` | `[]` | Allowed `Host` header values for DNS rebinding protection |

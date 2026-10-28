@@ -12,12 +12,11 @@ Part of [README](../README.md); see also
 ## Requirements
 
 - Linux (the fast path is a no-op stub on other platforms).
-- `bpf-linker` on `PATH` and a nightly toolchain for the `xdp/` workspace
-  (pinned by `xdp/rust-toolchain.toml`); the eBPF program is built
-  automatically by `crates/doggy-dns-xdp/build.rs` when the binary is built
-  with `--features xdp` — a zero-byte placeholder is embedded if the build
-  environment cannot compile it, and loading then fails at startup with a
-  warning.
+- `bpf-linker` on `PATH` plus the nightly toolchain pinned by
+  `xdp/rust-toolchain.toml`. `crates/doggy-dns-xdp/build.rs` compiles the eBPF
+  program when the binary is built with `--features xdp`; if the build
+  environment cannot compile it, a zero-byte placeholder is embedded and loading
+  fails at startup with a warning.
 - Root (or `CAP_BPF` + `CAP_NET_ADMIN`) to load and attach the program, and a
   bpffs mounted (usually `/sys/fs/bpf`) for the pinned cache map.
 
@@ -39,8 +38,8 @@ ip -d link show <iface>        # xdp program appears under "prog"
 ```
 
 The first query for a name goes through the normal middleware → authority
-pipeline; the response is written into the BPF map on the way out. Identical
-queries within the TTL are then answered by the kernel (`XDP_TX`).
+pipeline and is written into the BPF map on the way out; identical queries within
+the TTL are answered by the kernel. The sequence diagram below shows both paths.
 
 ## `[xdp]` configuration
 
@@ -94,27 +93,6 @@ queries within the TTL are then answered by the kernel (`XDP_TX`).
     +======================================================================+
 ```
 
-Mermaid version of the same decision path:
-
-```mermaid
-flowchart TD
-    A[Packet arrives on iface] --> B{IPv4 / UDP / port == dns_port?}
-    B -- no --> P[XDP_PASS to network stack]
-    B -- yes --> C{QR=0 and QDCOUNT=1?}
-    C -- no --> P
-    C -- yes --> D[Hash QNAME + qtype/qclass]
-    D --> E{DNS_CACHE entry?}
-    E -- miss / expired --> P
-    E -- fresh --> F{negative?}
-    F -- yes --> G[Adjust tail, synthesise NXDOMAIN header]
-    F -- no --> H[Adjust tail, copy <=512B reply, patch TXID]
-    G --> I[Swap headers, fix lengths, checksum]
-    H --> I
-    I --> J[XDP_TX reply]
-    P -.userspace resolves.-> K[XdpCacheMiddleware writes entry]
-    K -.next identical query.-> E
-```
-
 ### First query vs cached query
 
 ```mermaid
@@ -135,29 +113,21 @@ sequenceDiagram
 
 ### Kernel side (`xdp/doggy-dns-xdp-ebpf`)
 
-For every inbound packet the program runs a strict fast path; anything it
-does not recognise is `XDP_PASS`ed to the normal network stack untouched:
+The numbered path in the runtime diagram above is the whole program: anything it
+does not recognise is `XDP_PASS`ed to the network stack untouched. Details the
+diagram leaves out:
 
-1. **Parse headers** — Ethernet (IPv4 only), IPv4, UDP. Non-DNS traffic and
-   any packet addressed to a port other than the server's `dns_port` (read
-   from the `XDP_CONFIG` map the loader fills in before attach) pass through.
-2. **Validate the DNS query** — DNS header present, `QR = 0`, `QDCOUNT = 1`;
-   otherwise pass.
-3. **Compute the cache key** — FNV-1a over the QNAME's raw wire bytes
-   (length prefixes included, lowercased) plus `qtype`/`qclass`. The
-   userspace key builder produces the identical hash.
-4. **Look up `DNS_CACHE`** (an LRU hash map) — a miss or an entry whose
-   `expires_at` (`bpf_ktime_get_ns` clock) has passed is passed to userspace.
-5. **Rebuild the reply in place** — `bpf_xdp_adjust_tail` resizes the frame
-   to the response length; positive hits copy the cached DNS message
-   (chunked, bounds-checked, capped at 512 bytes) and overwrite the transaction
-   ID with the current query's; negative hits synthesise an NXDOMAIN header.
-   MACs/IPs/ports are swapped, IP total length and UDP length fixed, and the
-   IPv4 checksum updated incrementally (RFC 1624). The packet goes back with
-   `XDP_TX`.
-
-After a resize the original query no longer exists, so any later failure
-drops the packet rather than passing a truncated frame upward.
+- The cache key is FNV-1a over the QNAME's raw wire bytes (length prefixes
+  included, lowercased) plus `qtype`/`qclass`; the userspace key builder
+  produces the identical hash.
+- Freshness uses `expires_at` against `bpf_ktime_get_ns`, the same monotonic
+  clock userspace timestamps with.
+- Positive replies are copied chunked and bounds-checked, capped at 512 bytes,
+  with the transaction ID overwritten by the current query's.
+- Header rewrite swaps MACs/IPs/ports, fixes IP total length and UDP length, and
+  updates the IPv4 checksum incrementally (RFC 1624).
+- After `bpf_xdp_adjust_tail` the original query no longer exists, so any later
+  failure drops the packet rather than passing a truncated frame upward.
 
 ### Userspace side (`crates/doggy-dns-xdp` + `src/xdp/`)
 
