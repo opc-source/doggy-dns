@@ -1,15 +1,21 @@
+//! Node-side service control plane: one HTTP listener whose endpoints are
+//! selected by configuration — the read-only MCP introspection protocol at
+//! `/mcp`, plus unauthenticated `healthz`/`readyz` probes backed by live
+//! runtime signals.
+
+pub mod live;
 pub mod redact;
 pub mod server;
 pub mod state;
 pub mod transport;
 
-pub use transport::{McpServerHandle, start};
+pub use transport::{ControlPlaneHandle, start};
 
 use serde::{Deserialize, Serialize};
 
 use doggy_dns_basic::{PluginConfig, PluginKind};
 
-pub use doggy_dns_basic::McpConfig;
+pub use doggy_dns_basic::ControlConfig;
 
 /// Snapshot of a single plugin for the MCP `list_plugins` tool.
 #[derive(Debug, Clone, Serialize, Deserialize)]

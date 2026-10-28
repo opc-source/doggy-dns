@@ -2,7 +2,7 @@
 
 use chrono::Utc;
 use doggy_dns_basic::PluginConfig;
-use doggy_dns_mcp::state::McpState;
+use doggy_dns_control::state::McpState;
 
 #[test]
 fn instance_id_contains_host_and_pid() {
@@ -59,7 +59,7 @@ kind = "native"
         plugins: Vec<PluginConfig>,
     }
     let parsed: Wrapper = toml::from_str(toml_str).unwrap();
-    let snapshots = doggy_dns_mcp::snapshots_from(&parsed.plugins);
+    let snapshots = doggy_dns_control::snapshots_from(&parsed.plugins);
 
     assert_eq!(snapshots.len(), 3);
     assert_eq!(snapshots[0].order, 0);
@@ -109,7 +109,7 @@ key_path = "/tmp/c.key"
             remote_config: Default::default(),
             observability: Default::default(),
             xdp: Default::default(),
-            mcp: Default::default(),
+            control: Default::default(),
         };
         McpState::enabled_protocols(&config)
     }

@@ -1,6 +1,6 @@
 #![allow(clippy::disallowed_methods)]
 
-use doggy_dns_mcp::redact::redact_toml;
+use doggy_dns_control::redact::redact_toml;
 
 #[test]
 fn redacts_nested_secrets_but_keeps_stream_name() {

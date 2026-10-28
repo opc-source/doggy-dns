@@ -726,42 +726,45 @@ cache_size = 0
 }
 
 #[test]
-fn mcp_defaults_to_disabled_on_loopback_19090() {
+fn control_defaults_to_disabled_loopback_19090() {
     let toml_str = r#"
 [server]
 listen_addr = "127.0.0.1"
 port = 15353
 "#;
     let config: DoggyDnsConfig = toml::from_str(toml_str).unwrap();
-    assert!(!config.mcp.enabled);
-    assert_eq!(config.mcp.listen_addr, "127.0.0.1");
-    assert_eq!(config.mcp.port, 19090);
-    assert!(config.mcp.token.is_none());
+    assert!(!config.control.enabled);
+    assert_eq!(config.control.listen_addr, "127.0.0.1");
+    assert_eq!(config.control.port, 19090);
+    assert!(config.control.token.is_none());
+    assert_eq!(config.control.endpoints, ["mcp", "healthz", "readyz"]);
 }
 
 #[test]
-fn mcp_config_parses_token_and_allowed_hosts() {
+fn control_config_parses_token_endpoints_and_allowed_hosts() {
     let toml_str = r#"
 [server]
 listen_addr = "127.0.0.1"
 port = 15353
 
-[mcp]
+[control]
 enabled = true
 listen_addr = "0.0.0.0"
 port = 19091
 token = "secret"
 allowed_hosts = ["dns-node-1", "10.0.0.5:19091"]
+endpoints = ["healthz", "readyz"]
 "#;
     let config: DoggyDnsConfig = toml::from_str(toml_str).unwrap();
-    assert!(config.mcp.enabled);
-    assert_eq!(config.mcp.port, 19091);
-    assert_eq!(config.mcp.token.as_deref(), Some("secret"));
-    assert_eq!(config.mcp.allowed_hosts.len(), 2);
+    assert!(config.control.enabled);
+    assert_eq!(config.control.port, 19091);
+    assert_eq!(config.control.token.as_deref(), Some("secret"));
+    assert_eq!(config.control.allowed_hosts.len(), 2);
+    assert_eq!(config.control.endpoints, ["healthz", "readyz"]);
 }
 
 #[test]
-fn validate_accepts_ipv6_mcp_address() {
+fn validate_accepts_ipv6_control_address() {
     for listen_addr in ["::1", "[::1]"] {
         let toml_str = format!(
             r#"
@@ -769,32 +772,88 @@ fn validate_accepts_ipv6_mcp_address() {
 listen_addr = "127.0.0.1"
 port = 15353
 
-[mcp]
+[control]
 enabled = true
 listen_addr = "{listen_addr}"
 port = 19090
 "#
         );
         let config: DoggyDnsConfig = toml::from_str(&toml_str).expect("parse failed");
-        validate_config(&config).expect("IPv6 mcp.listen_addr should validate");
+        validate_config(&config).expect("IPv6 control.listen_addr should validate");
     }
 }
 
 #[test]
-fn validate_rejects_invalid_mcp_address() {
+fn validate_rejects_invalid_control_address() {
     let toml_str = r#"
 [server]
 listen_addr = "127.0.0.1"
 port = 15353
 
-[mcp]
+[control]
 enabled = true
 listen_addr = "not an ip"
 port = 19090
 "#;
     let config: DoggyDnsConfig = toml::from_str(toml_str).unwrap();
     let err = validate_config(&config).unwrap_err().to_string();
-    assert!(err.contains("mcp.listen_addr"), "unexpected error: {err}");
+    assert!(
+        err.contains("control.listen_addr"),
+        "unexpected error: {err}"
+    );
+}
+
+fn control_endpoints_err(endpoints: &str) -> String {
+    let toml_str = format!(
+        r#"
+[server]
+listen_addr = "127.0.0.1"
+port = 15353
+
+[control]
+enabled = true
+endpoints = {endpoints}
+"#
+    );
+    let config: DoggyDnsConfig = toml::from_str(&toml_str).expect("parse failed");
+    validate_config(&config).unwrap_err().to_string()
+}
+
+#[test]
+fn validate_rejects_unknown_control_endpoint() {
+    let err = control_endpoints_err(r#"["mcp", "metrics"]"#);
+    assert!(err.contains("control.endpoints"), "unexpected error: {err}");
+    assert!(
+        err.contains("metrics"),
+        "error should name the bad value: {err}"
+    );
+}
+
+#[test]
+fn validate_rejects_empty_control_endpoints() {
+    let err = control_endpoints_err("[]");
+    assert!(err.contains("control.endpoints"), "unexpected error: {err}");
+}
+
+#[test]
+fn validate_rejects_duplicate_control_endpoints() {
+    let err = control_endpoints_err(r#"["mcp", "mcp"]"#);
+    assert!(err.contains("control.endpoints"), "unexpected error: {err}");
+}
+
+#[test]
+fn validate_skips_endpoint_checks_when_control_disabled() {
+    let toml_str = r#"
+[server]
+listen_addr = "127.0.0.1"
+port = 15353
+
+[control]
+enabled = false
+endpoints = []
+"#;
+    let config: DoggyDnsConfig = toml::from_str(toml_str).unwrap();
+    validate_config(&config).expect("disabled control should skip validation");
 }
 
 fn validation_error(toml_str: &str) -> String {

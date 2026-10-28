@@ -2,24 +2,26 @@
 //!
 //! This crate holds every TOML config struct and validation rule, with no
 //! transitive dependency on hickory, tokio, rustls, or the DNS runtime itself.
-//! Consumers (observability, xdp, mcp, tests) can depend on it alone.
+//! Consumers (observability, xdp, the control plane, tests) can depend on it
+//! alone.
 
+pub mod control;
 pub mod env;
 pub mod load;
-pub mod mcp;
 pub mod middleware;
 pub mod net;
 pub mod observability;
 pub mod plugin;
 pub mod remote;
 pub mod server;
+pub mod time;
 pub mod validate;
 pub mod xdp;
 
 use serde::Deserialize;
 
+pub use control::{CONTROL_ENDPOINTS, ControlConfig};
 pub use load::load_config;
-pub use mcp::McpConfig;
 pub use middleware::MiddlewareConfig;
 pub use observability::{
     BasicAuthConfig, LogsConfig, MetricsConfig, MetricsTemporality, ObservabilityBackend,
@@ -45,5 +47,5 @@ pub struct DoggyDnsConfig {
     #[serde(default)]
     pub xdp: XdpConfig,
     #[serde(default)]
-    pub mcp: McpConfig,
+    pub control: ControlConfig,
 }

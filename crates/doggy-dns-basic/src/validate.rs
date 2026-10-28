@@ -69,13 +69,31 @@ pub fn validate_config(config: &DoggyDnsConfig) -> anyhow::Result<()> {
             "xdp.pin_path must be under /sys/fs/bpf/"
         );
     }
-    if config.mcp.enabled {
-        crate::net::socket_addr(&config.mcp.listen_addr, config.mcp.port).map_err(|_| {
-            anyhow::anyhow!(
-                "mcp.listen_addr is not a valid IP address: {}",
-                config.mcp.listen_addr
-            )
-        })?;
+    if config.control.enabled {
+        crate::net::socket_addr(&config.control.listen_addr, config.control.port).map_err(
+            |_| {
+                anyhow::anyhow!(
+                    "control.listen_addr is not a valid IP address: {}",
+                    config.control.listen_addr
+                )
+            },
+        )?;
+        anyhow::ensure!(
+            !config.control.endpoints.is_empty(),
+            "control.endpoints must not be empty when the control plane is enabled"
+        );
+        let mut seen = std::collections::HashSet::new();
+        for endpoint in &config.control.endpoints {
+            anyhow::ensure!(
+                crate::CONTROL_ENDPOINTS.contains(&endpoint.as_str()),
+                "control.endpoints contains unknown value: {endpoint} (allowed: {:?})",
+                crate::CONTROL_ENDPOINTS
+            );
+            anyhow::ensure!(
+                seen.insert(endpoint),
+                "control.endpoints contains duplicate value: {endpoint}"
+            );
+        }
     }
     Ok(())
 }

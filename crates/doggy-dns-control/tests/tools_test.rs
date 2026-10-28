@@ -1,9 +1,10 @@
 #![allow(clippy::disallowed_methods)]
 
 use chrono::Utc;
-use doggy_dns_mcp::PluginSnapshot;
-use doggy_dns_mcp::server::DoggyMcpServer;
-use doggy_dns_mcp::state::McpState;
+use doggy_dns_control::PluginSnapshot;
+use doggy_dns_control::live::LiveState;
+use doggy_dns_control::server::DoggyMcpServer;
+use doggy_dns_control::state::McpState;
 use std::sync::Arc;
 
 fn test_state() -> McpState {
@@ -24,6 +25,15 @@ fn test_state() -> McpState {
     )
 }
 
+fn test_live() -> Arc<LiveState> {
+    let mut live = LiveState::new();
+    live.register(
+        "nacos.nacos.local",
+        || serde_json::json!({"cachedServices": 3}),
+    );
+    Arc::new(live)
+}
+
 fn first_text_json(result: &rmcp::model::CallToolResult) -> serde_json::Value {
     let text = result
         .content
@@ -36,7 +46,7 @@ fn first_text_json(result: &rmcp::model::CallToolResult) -> serde_json::Value {
 
 #[tokio::test]
 async fn get_status_returns_identity_and_uptime() {
-    let server = DoggyMcpServer::new(Arc::new(test_state()));
+    let server = DoggyMcpServer::new(Arc::new(test_state()), test_live());
     let result = server.get_status().await.unwrap();
     let json = first_text_json(&result);
     assert_eq!(json["instanceId"], "dns-node-1-4242");
@@ -53,7 +63,7 @@ async fn get_status_returns_identity_and_uptime() {
 
 #[tokio::test]
 async fn list_plugins_returns_snapshots() {
-    let server = DoggyMcpServer::new(Arc::new(test_state()));
+    let server = DoggyMcpServer::new(Arc::new(test_state()), test_live());
     let result = server.list_plugins().await.unwrap();
     let json = first_text_json(&result);
     let plugins = json["plugins"].as_array().unwrap();
@@ -84,7 +94,7 @@ password = "hunter2"
         Vec::new(),
         raw,
     );
-    let server = DoggyMcpServer::new(Arc::new(state));
+    let server = DoggyMcpServer::new(Arc::new(state), test_live());
     let result = server.get_config().await.unwrap();
     let json = first_text_json(&result);
 
@@ -108,7 +118,7 @@ async fn get_config_returns_parse_error_for_malformed_content() {
         Vec::new(),
         "this is = = not valid toml",
     );
-    let server = DoggyMcpServer::new(Arc::new(state));
+    let server = DoggyMcpServer::new(Arc::new(state), test_live());
     let result = server.get_config().await.unwrap();
     let json = first_text_json(&result);
     assert_eq!(json["error"]["code"], "config_parse_error");
@@ -116,14 +126,15 @@ async fn get_config_returns_parse_error_for_malformed_content() {
 
 #[tokio::test]
 async fn tools_declare_read_only_annotations() {
-    let server = DoggyMcpServer::new(Arc::new(test_state()));
+    let server = DoggyMcpServer::new(Arc::new(test_state()), test_live());
     let tools = server.tool_declarations();
-    assert_eq!(tools.len(), 3);
+    assert_eq!(tools.len(), 4);
 
     let names: Vec<&str> = tools.iter().map(|t| t.name.as_ref()).collect();
     assert!(names.contains(&"get_status"));
     assert!(names.contains(&"list_plugins"));
     assert!(names.contains(&"get_config"));
+    assert!(names.contains(&"get_runtime_status"));
 
     for tool in &tools {
         let annotations = tool.annotations.as_ref().unwrap();
@@ -132,4 +143,12 @@ async fn tools_declare_read_only_annotations() {
         assert_eq!(annotations.idempotent_hint, Some(true));
         assert_eq!(annotations.open_world_hint, Some(false));
     }
+}
+
+#[tokio::test]
+async fn get_runtime_status_returns_registered_signals() {
+    let server = DoggyMcpServer::new(Arc::new(test_state()), test_live());
+    let result = server.get_runtime_status().await.unwrap();
+    let json = first_text_json(&result);
+    assert_eq!(json["signals"]["nacos.nacos.local"]["cachedServices"], 3);
 }

@@ -8,16 +8,18 @@ use rmcp::{
 use serde_json::Value;
 
 use crate::ConfigSnapshot;
+use crate::live::LiveState;
 use crate::state::McpState;
 
 #[derive(Clone)]
 pub struct DoggyMcpServer {
     state: Arc<McpState>,
+    live: Arc<LiveState>,
 }
 
 impl DoggyMcpServer {
-    pub fn new(state: Arc<McpState>) -> Self {
-        Self { state }
+    pub fn new(state: Arc<McpState>, live: Arc<LiveState>) -> Self {
+        Self { state, live }
     }
 
     pub fn tool_declarations(&self) -> Vec<rmcp::model::Tool> {
@@ -129,6 +131,23 @@ impl DoggyMcpServer {
         };
         Ok(CallToolResult::success(vec![ContentBlock::text(json)]))
     }
+
+    #[tool(
+        name = "get_runtime_status",
+        description = "Return live runtime signals (plugin cache sizes, push freshness, fast-path state) sampled at call time.",
+        annotations(
+            title = "Get live runtime signals",
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    pub async fn get_runtime_status(&self) -> Result<CallToolResult, ErrorData> {
+        Ok(CallToolResult::success(vec![ContentBlock::text(
+            self.live.snapshot().to_string(),
+        )]))
+    }
 }
 
 fn error_json(code: &str, message: &str) -> String {
@@ -140,12 +159,12 @@ fn error_json(code: &str, message: &str) -> String {
     Value::Object(map).to_string()
 }
 
-#[tool_handler(name = "doggy-dns-mcp", version = "0.1.0")]
+#[tool_handler(name = "doggy-dns-control", version = "0.1.0")]
 impl ServerHandler for DoggyMcpServer {
     fn get_info(&self) -> ServerConfig {
         ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(rmcp::model::Implementation::new(
-                "doggy-dns-mcp",
+                "doggy-dns-control",
                 env!("CARGO_PKG_VERSION"),
             ))
             .with_instructions("Read-only introspection of a doggy-dns instance.")

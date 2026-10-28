@@ -5,6 +5,7 @@ use doggy_dns_nacos::watcher::{CachedInstance, InstanceChangeListener, ServiceKe
 use nacos_sdk::api::naming::{NamingChangeEvent, NamingEventListener, ServiceInstance};
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicI64, Ordering};
 
 fn make_service_instance(ip: &str, port: i32, healthy: bool, enabled: bool) -> ServiceInstance {
     ServiceInstance {
@@ -33,6 +34,7 @@ fn make_listener(
         cache: Arc::clone(&cache),
         group: group.to_string(),
         namespace: namespace.to_string(),
+        last_push: Arc::new(AtomicI64::new(0)),
     };
     (listener, cache)
 }
@@ -170,4 +172,26 @@ fn listener_lowercases_keys() {
         namespace: "public".to_string(),
     };
     assert!(cache.get(&key).is_some());
+}
+
+#[test]
+fn listener_stamps_last_push_on_every_event() {
+    let (listener, _cache) = make_listener("default_group", "public");
+    assert_eq!(
+        listener.last_push.load(Ordering::Relaxed),
+        0,
+        "no event yet must read as epoch-0 (never pushed)"
+    );
+
+    fire_event(
+        &listener,
+        "svc-time",
+        Some(vec![make_service_instance("10.0.0.1", 8080, true, true)]),
+    );
+    let first = listener.last_push.load(Ordering::Relaxed);
+    assert!(first > 0, "a push event must stamp unix seconds");
+
+    // Removal events are pushes too — freshness of contact matters, not payload.
+    fire_event(&listener, "svc-time", None);
+    assert!(listener.last_push.load(Ordering::Relaxed) >= first);
 }

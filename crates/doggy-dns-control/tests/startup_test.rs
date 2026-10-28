@@ -1,9 +1,10 @@
 #![allow(clippy::disallowed_methods)]
 
 use chrono::Utc;
-use doggy_dns_mcp::McpConfig;
-use doggy_dns_mcp::state::McpState;
-use doggy_dns_mcp::transport;
+use doggy_dns_control::ControlConfig;
+use doggy_dns_control::live::LiveState;
+use doggy_dns_control::state::McpState;
+use doggy_dns_control::transport;
 use std::sync::Arc;
 use tokio::net::TcpListener;
 
@@ -26,7 +27,8 @@ async fn occupied_port_returns_error_without_panicking() {
     let addr = occupied.local_addr().unwrap();
     let err = transport::start(
         test_state(),
-        McpConfig {
+        Arc::new(LiveState::new()),
+        ControlConfig {
             listen_addr: "127.0.0.1".into(),
             port: addr.port(),
             ..Default::default()
@@ -49,7 +51,8 @@ async fn start_binds_ipv6_loopback() {
 
     let handle = transport::start(
         test_state(),
-        McpConfig {
+        Arc::new(LiveState::new()),
+        ControlConfig {
             listen_addr: "::1".into(),
             port,
             ..Default::default()
@@ -68,7 +71,8 @@ async fn start_binds_ipv6_loopback() {
 async fn start_with_port_zero_assigns_random_port() {
     let handle = transport::start(
         test_state(),
-        McpConfig {
+        Arc::new(LiveState::new()),
+        ControlConfig {
             port: 0,
             ..Default::default()
         },

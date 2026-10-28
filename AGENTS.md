@@ -41,13 +41,14 @@ doggy-dns (binary)
   │     ├── doggy-dns-basic
   │     └── doggy-dns-plugin
   ├── doggy-dns-nacos           (Nacos service discovery backend)
+  │     ├── doggy-dns-basic
   │     └── doggy-dns-plugin
   ├── doggy-dns-observability   (OTLP logs/metrics/traces/profiles)
   │     ├── doggy-dns-basic
   │     └── doggy-dns-plugin
-  ├── doggy-dns-mcp             (read-only MCP server)
+  ├── doggy-dns-control         (service control plane: MCP tools + health probes)
   │     └── doggy-dns-basic
-  ├── doggy-dns-basic           (all TOML config types, load & validate — serde/toml/anyhow only)
+  ├── doggy-dns-basic           (TOML config types, load & validate, wall-clock helpers — serde/toml/anyhow only)
   ├── doggy-dns-plugin          (traits, authority chain, built-in authorities — leaf crate)
   └── doggy-dns-xdp (optional, feature = "xdp")
         ├── doggy-dns-basic
@@ -109,7 +110,7 @@ Cache updates replace the entire Vec for a key (never mutate in place). Config s
 
 TOML config at `config/doggy-dns.toml`. Key structs in `crates/doggy-dns-basic` (`doggy_dns_basic`): `DoggyDnsConfig`, `ServerConfig`, `PluginConfig` (flat — fields per kind), `PluginKind` enum (`Nacos`, `Native`, `Forward`). `doggy-dns-core` re-exports the module as `config`.
 
-`validate_config()` checks: worker_threads > 0, TLS/HTTPS cert files exist when enabled, remote_config fields non-empty when enabled, plugin rules (one enabled plugin when `[[plugins]]` exists; Nacos connection fields, valid unique zone; `min_ttl <= max_ttl`; forward upstream is IP or IP:port), and observability ranges/URLs (observability enabled, signal ranges, profile duration/frequency, log level, endpoint format). Every config string may use `${ENV_VAR}`; expansion happens in `load_config()` before deserialisation and a missing variable is fatal (the raw, unexpanded file content is what the MCP `get_config` tool sees).
+`validate_config()` checks: worker_threads > 0, TLS/HTTPS cert files exist when enabled, remote_config fields non-empty when enabled, plugin rules (one enabled plugin when `[[plugins]]` exists; Nacos connection fields, valid unique zone; `min_ttl <= max_ttl`; forward upstream is IP or IP:port), observability ranges/URLs (observability enabled, signal ranges, profile duration/frequency, log level, endpoint format), and control-plane rules when `[control]` is enabled (valid `listen_addr`; `endpoints` non-empty, unique, within `mcp|healthz|readyz`). Every config string may use `${ENV_VAR}`; expansion happens in `load_config()` before deserialisation and a missing variable is fatal (the raw, unexpanded file content is what the MCP `get_config` tool sees).
 
 ## Test Conventions
 
