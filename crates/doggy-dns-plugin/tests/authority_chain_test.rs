@@ -155,7 +155,7 @@ async fn single_handler_hit_returns_continue() {
 }
 
 #[tokio::test]
-async fn single_handler_miss_returns_skip() {
+async fn single_handler_miss_is_authoritative_nxdomain() {
     use dashmap::DashMap;
     use doggy_dns_nacos::authority::NacosAuthority;
     use std::sync::Arc;
@@ -166,8 +166,11 @@ async fn single_handler_miss_returns_skip() {
 
     let name = Name::from_str("unknown.DEFAULT_GROUP.public.nacos.local.").unwrap();
     let result = chain.resolve(&name, RecordType::A, None).await;
-    assert!(matches!(result.outcome, LookupControlFlow::Skip));
-    assert!(result.handler_name.is_none());
+    assert!(matches!(
+        result.outcome,
+        LookupControlFlow::Continue(Err(_))
+    ));
+    assert_eq!(result.handler_name.as_deref(), Some("nacos"));
 }
 
 #[tokio::test]

@@ -18,7 +18,9 @@ Part of [README](../README.md).
 2. **Authority chain** iterates handlers sequentially. Each handler returns one of:
    - `Skip` -- does not handle this query, try the next handler
    - `Continue(Ok(records))` -- resolved, return records
-   - `Continue(Err(e))` / `Break(Err(e))` -- error, return SERVFAIL
+   - `Continue(Err(e))` / `Break(Err(e))` -- authoritative failure; the lookup
+     error maps to `NXDOMAIN` (`ResponseCode::NXDomain`), `NODATA`
+     (`NameExists`), or `SERVFAIL` for anything else
 3. If all handlers skip, the response is `NXDOMAIN`.
 4. Middleware chain runs `after_request()` with elapsed time and the final outcome (response code, authority, answer count).
 
@@ -46,7 +48,13 @@ Plugins are evaluated in the order defined in the `[[plugins]]` config array. Th
 - Maintains an in-memory `DashMap<ServiceKey, Vec<CachedInstance>>` cache; updates replace the entire `Vec` for a key (immutable update)
 - DNS name format: `<service>.<group>.<namespace>.<zone_suffix>.`
 - Example: `dig user-service.DEFAULT_GROUP.public.nacos.local A`
-- Only handles `A` and `AAAA` record types; all other types are skipped
+- The name is split from the right, so service names may contain dots
+  (`com.example.api.DEFAULT_GROUP.public.nacos.local`)
+- The authority is authoritative for its whole zone: once a name is inside
+  `<zone_suffix>`, a miss never falls through to `native`/`forward`. An unknown
+  service returns `NXDOMAIN`; a service with no instance of the requested
+  family (or a non-`A`/`AAAA` query type) returns `NODATA`
+- `A` queries return only `A` records and `AAAA` queries only `AAAA` records
 
 ## Server protocols
 
@@ -67,6 +75,7 @@ Structured logging via `tracing`. Key log events:
 |-------|-------|--------|
 | Query resolved | `INFO` | `query`, `qtype`, `authority`, `answers`, `duration_ms`, `response_code` |
 | No authority handled query | `INFO` | `query`, `qtype`, `response_code=NXDomain` |
+| Authority returned negative response | `DEBUG` | `query`, `qtype`, `authority`, `response_code=NXDomain/NoError` |
 | Authority returned error | `WARN` | `query`, `qtype`, `authority`, `error`, `response_code=ServFail` |
 | Middleware short-circuit | `WARN` | `duration_ms`, `response_code=Refused` |
 | Configuration loaded | `INFO` | `listen_addr`, `port`, `worker_threads`, `plugin_count`, ... |

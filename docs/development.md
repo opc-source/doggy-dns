@@ -81,16 +81,16 @@ All jobs use dependency caching (`Swatinem/rust-cache@v2`).
 | Test File | Tests | Description |
 |-----------|-------|-------------|
 | `crates/doggy-dns-basic/tests/config_test.rs` | 33 | Config parsing, defaults, validation (TLS/HTTPS/remote_config/observability/xdp/mcp) |
-| `crates/doggy-dns-core/tests/handler_test.rs` | 7 | Handler pipeline: NoError, NXDomain, ServFail, Refused, middleware callbacks |
+| `crates/doggy-dns-core/tests/handler_test.rs` | 12 | Handler pipeline: NoError, NXDomain, NODATA, ServFail, Refused, middleware callbacks, EDNS cache admission, authoritative negative caching |
 | `crates/doggy-dns-core/tests/middleware_test.rs` | 6 | Metrics counter, logging middleware, return values |
-| `crates/doggy-dns-nacos/tests/authority_test.rs` | 3 | Nacos authority lookup hit/miss/wrong-zone |
-| `crates/doggy-dns-nacos/tests/mapping_test.rs` | 6 | DNS name parsing, record creation |
+| `crates/doggy-dns-nacos/tests/authority_test.rs` | 11 | Nacos authority: hit, dotted names, NOERROR/NXDOMAIN/NODATA, family filtering, zone boundaries |
+| `crates/doggy-dns-nacos/tests/mapping_test.rs` | 10 | DNS name parsing (zone boundaries, dotted services), family-filtered record creation |
 | `crates/doggy-dns-nacos/tests/watcher_test.rs` | 6 | Instance cache: insert, filter, remove, replace, lowercase keys |
-| `crates/doggy-dns-plugin/tests/authority_chain_test.rs` | 9 | Chain resolution: empty, hit, miss, fallthrough, all-skip, Break, error, is_empty |
+| `crates/doggy-dns-plugin/tests/authority_chain_test.rs` | 9 | Chain resolution: empty, hit, authoritative miss, zone fallthrough, all-skip, Break, error, is_empty |
 | `crates/doggy-dns-plugin/tests/forward_test.rs` | 1 | Forward resolver (requires network) |
 | `crates/doggy-dns-plugin/tests/native_test.rs` | 1 | Native resolver (requires network) |
 | `crates/doggy-dns-xdp/tests/*` | 22 + 6 ignored | Userspace cache/interface/middleware/stats; XDP attach tests need root + Linux |
-| `tests/integration_test.rs` | 2 | End-to-end chain: Nacos hit, Nacos miss -> Forward |
+| `tests/integration_test.rs` | 3 | End-to-end chain: Nacos hit, outside-zone fallthrough, in-zone miss stays authoritative |
 
 Forward/native tests make real network calls; Nacos tests use mock DashMap
 caches (no Nacos server needed).

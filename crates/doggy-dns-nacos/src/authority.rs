@@ -1,11 +1,13 @@
-use crate::mapping::{parse_dns_name, to_dns_records};
+use crate::mapping::{is_in_zone, parse_dns_name, to_dns_records};
 use crate::watcher::{CachedInstance, ServiceKey};
 use async_trait::async_trait;
 use dashmap::DashMap;
+use hickory_proto::op::ResponseCode;
 use hickory_proto::rr::{LowerName, Name, RecordType, TSigResponseContext};
 use hickory_server::server::{Request, RequestInfo};
 use hickory_server::zone_handler::{
-    AuthLookup, AxfrPolicy, LookupControlFlow, LookupOptions, LookupRecords, ZoneHandler, ZoneType,
+    AuthLookup, AxfrPolicy, LookupControlFlow, LookupError, LookupOptions, LookupRecords,
+    ZoneHandler, ZoneType,
 };
 use std::sync::Arc;
 
@@ -33,6 +35,12 @@ impl NacosAuthority {
     }
 }
 
+fn is_zone_apex(name: &Name, zone_suffix: &str) -> bool {
+    name.to_ascii()
+        .trim_end_matches('.')
+        .eq_ignore_ascii_case(zone_suffix.trim_end_matches('.'))
+}
+
 #[async_trait]
 impl ZoneHandler for NacosAuthority {
     fn zone_type(&self) -> ZoneType {
@@ -54,14 +62,27 @@ impl ZoneHandler for NacosAuthority {
         _request_info: Option<&RequestInfo<'_>>,
         _lookup_options: LookupOptions,
     ) -> LookupControlFlow<AuthLookup> {
-        if !matches!(rtype, RecordType::A | RecordType::AAAA) {
+        let query_name = Name::from(name.clone());
+
+        // Names outside our zone belong to another authority.
+        if !is_in_zone(&query_name, &self.dns_zone) {
             return LookupControlFlow::Skip;
         }
 
-        let query_name = Name::from(name.clone());
+        // Inside the zone we are authoritative: never fall through to
+        // native/forward, or internal names could leak to an upstream resolver.
         let parts = match parse_dns_name(&query_name, &self.dns_zone) {
-            Some(p) => p,
-            None => return LookupControlFlow::Skip,
+            Some(parts) => parts,
+            None => {
+                return if is_zone_apex(&query_name, &self.dns_zone) {
+                    // The zone exists, so the apex is NODATA.
+                    LookupControlFlow::Continue(Err(LookupError::NameExists))
+                } else {
+                    LookupControlFlow::Continue(Err(LookupError::ResponseCode(
+                        ResponseCode::NXDomain,
+                    )))
+                };
+            }
         };
 
         // Normalize to lowercase for case-insensitive DNS matching
@@ -73,14 +94,24 @@ impl ZoneHandler for NacosAuthority {
 
         let instances = match self.cache.get(&key) {
             Some(entry) => entry.value().clone(),
-            None => return LookupControlFlow::Skip,
+            None => {
+                return LookupControlFlow::Continue(Err(LookupError::ResponseCode(
+                    ResponseCode::NXDomain,
+                )));
+            }
         };
 
+        // The service exists, but we only serve address records.
+        if !matches!(rtype, RecordType::A | RecordType::AAAA) {
+            return LookupControlFlow::Continue(Err(LookupError::NameExists));
+        }
+
         let ips: Vec<String> = instances.iter().map(|i| i.ip.clone()).collect();
-        let records = to_dns_records(&query_name, &ips, self.ttl);
+        let records = to_dns_records(&query_name, &ips, self.ttl, rtype);
 
         if records.is_empty() {
-            return LookupControlFlow::Skip;
+            // Service exists, but has no address of the requested family.
+            return LookupControlFlow::Continue(Err(LookupError::NameExists));
         }
 
         LookupControlFlow::Continue(Ok(AuthLookup::answers(

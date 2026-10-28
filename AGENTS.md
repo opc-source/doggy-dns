@@ -61,7 +61,7 @@ xdp/
 
 DNS query → **Middleware chain** (before_request) → **AuthorityChain** (sequential lookup) → **Middleware chain** (after_request) → DNS response.
 
-**AuthorityChain** iterates `Vec<(String, Arc<dyn ZoneHandler>)>` in order. Each handler returns `Skip` (try next), `Continue(Ok/Err)`, or `Break(Ok/Err)` (stop). Returns a `ResolveResult` with `outcome` + `handler_name`. The handler maps outcomes to DNS response codes: `NoError`, `ServFail`, or `NXDomain` (all skipped).
+**AuthorityChain** iterates `Vec<(String, Arc<dyn ZoneHandler>)>` in order. Each handler returns `Skip` (try next), `Continue(Ok/Err)`, or `Break(Ok/Err)` (stop). Returns a `ResolveResult` with `outcome` + `handler_name`. The handler maps outcomes to DNS response codes: `NoError`, `NXDomain` (lookup error), or `ServFail`; all-skipped queries return `NXDomain`.
 
 **Middleware** trait (`plugin.rs`): `before_request()` returns `Continue` or `ShortCircuit`; `after_request()` receives elapsed time plus the final outcome (response code, authority, answer count).
 
@@ -79,7 +79,7 @@ All implement hickory's `ZoneHandler` trait. Plugins are evaluated in `[[plugins
 
 `NacosServiceWatcher` → subscribes to Nacos naming service → `InstanceChangeListener` receives push events → replaces entire `Vec<CachedInstance>` for a `ServiceKey` in `DashMap` (immutable update) → `NacosAuthority.lookup()` reads from cache.
 
-DNS name format: `<service>.<group>.<namespace>.<zone_suffix>.` (parsed by `mapping::parse_dns_name`). Only `A`/`AAAA` record types handled.
+DNS name format: `<service>.<group>.<namespace>.<zone_suffix>.` (parsed by `mapping::parse_dns_name`, split from the right so service names may contain dots). Only `A`/`AAAA` record types are served, filtered by query type. The authority owns its whole zone: unknown services return authoritative `NXDOMAIN` and missing families/types return `NODATA` instead of falling through to later plugins.
 
 ### Server (`core/server.rs`)
 
