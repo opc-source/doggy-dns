@@ -3,7 +3,8 @@ use crate::watcher::{CachedInstance, ServiceKey};
 use async_trait::async_trait;
 use dashmap::DashMap;
 use hickory_proto::op::ResponseCode;
-use hickory_proto::rr::{LowerName, Name, RecordType, TSigResponseContext};
+use hickory_proto::rr::rdata::SOA;
+use hickory_proto::rr::{LowerName, Name, RData, Record, RecordType, TSigResponseContext};
 use hickory_server::server::{Request, RequestInfo};
 use hickory_server::zone_handler::{
     AuthLookup, AxfrPolicy, LookupControlFlow, LookupError, LookupOptions, LookupRecords,
@@ -32,6 +33,18 @@ impl NacosAuthority {
             ttl,
             origin,
         }
+    }
+    /// SOA for the zone apex.
+    ///
+    /// The zone is synthesized from Nacos, so there is no real primary or
+    /// serial: the apex itself is the MNAME, `hostmaster.<zone>` the RNAME and
+    /// the configured record TTL doubles as the negative-caching TTL.
+    fn soa_record(&self) -> Record {
+        let zone = Name::from_ascii(format!("{}.", self.dns_zone.trim_end_matches('.')))
+            .unwrap_or_default();
+        let admin = Name::from_ascii(format!("hostmaster.{zone}")).unwrap_or_default();
+        let soa = SOA::new(zone.clone(), admin, 1, 3600, 600, 86400, self.ttl);
+        Record::from_rdata(zone, self.ttl, RData::SOA(soa))
     }
 }
 
@@ -71,17 +84,24 @@ impl ZoneHandler for NacosAuthority {
 
         // Inside the zone we are authoritative: never fall through to
         // native/forward, or internal names could leak to an upstream resolver.
+        if is_zone_apex(&query_name, &self.dns_zone) {
+            return if rtype == RecordType::SOA {
+                LookupControlFlow::Continue(Ok(AuthLookup::answers(
+                    LookupRecords::Section(vec![self.soa_record()]),
+                    None,
+                )))
+            } else {
+                // The zone exists, so every other apex type is NODATA.
+                LookupControlFlow::Continue(Err(LookupError::NameExists))
+            };
+        }
+
         let parts = match parse_dns_name(&query_name, &self.dns_zone) {
             Some(parts) => parts,
             None => {
-                return if is_zone_apex(&query_name, &self.dns_zone) {
-                    // The zone exists, so the apex is NODATA.
-                    LookupControlFlow::Continue(Err(LookupError::NameExists))
-                } else {
-                    LookupControlFlow::Continue(Err(LookupError::ResponseCode(
-                        ResponseCode::NXDomain,
-                    )))
-                };
+                return LookupControlFlow::Continue(Err(LookupError::ResponseCode(
+                    ResponseCode::NXDomain,
+                )));
             }
         };
 

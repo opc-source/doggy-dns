@@ -2,6 +2,7 @@ use async_trait::async_trait;
 use doggy_dns_plugin::authority_chain::AuthorityChain;
 use doggy_dns_plugin::{Middleware, MiddlewareAction, RequestOutcome};
 use hickory_proto::op::{Header, HeaderCounts, MessageType, Metadata, OpCode, ResponseCode};
+use hickory_proto::rr::Record;
 use hickory_proto::serialize::binary::BinEncoder;
 use hickory_server::net::xfer::Protocol;
 use hickory_server::server::{Request, RequestHandler, ResponseHandler, ResponseInfo};
@@ -85,7 +86,14 @@ impl RequestHandler for DoggyDnsHandler {
                         response_code = ?ResponseCode::Refused,
                         "request short-circuited by middleware"
                     );
-                    return send_error(request, &mut response_handle, ResponseCode::Refused).await;
+                    return send_error(
+                        request,
+                        &mut response_handle,
+                        ResponseCode::Refused,
+                        false,
+                        None,
+                    )
+                    .await;
                 }
             }
 
@@ -100,7 +108,14 @@ impl RequestHandler for DoggyDnsHandler {
                         error = %e,
                         "failed to parse request info"
                     );
-                    return send_error(request, &mut response_handle, ResponseCode::FormErr).await;
+                    return send_error(
+                        request,
+                        &mut response_handle,
+                        ResponseCode::FormErr,
+                        false,
+                        None,
+                    )
+                    .await;
                 }
             };
 
@@ -141,6 +156,8 @@ impl RequestHandler for DoggyDnsHandler {
                 .instrument(resolve_span.clone())
                 .await;
 
+            let authoritative = resolve_result.authoritative;
+            let soa = resolve_result.soa;
             let handler_name = resolve_result.handler_name.as_deref().unwrap_or("none");
             resolve_span.record(
                 "dns.authority",
@@ -156,7 +173,10 @@ impl RequestHandler for DoggyDnsHandler {
                     metadata.message_type = MessageType::Response;
                     metadata.op_code = OpCode::Query;
                     metadata.response_code = ResponseCode::NoError;
-                    metadata.recursion_available = true;
+                    // AA marks data the server owns; RA only when the answer
+                    // came from a recursive backend (forward/native).
+                    metadata.authoritative = authoritative;
+                    metadata.recursion_available = !authoritative;
 
                     let resp_bytes = if self.xdp_enabled {
                         serialize_for_xdp(request, |probe| {
@@ -210,8 +230,14 @@ impl RequestHandler for DoggyDnsHandler {
                                 "failed to send response"
                             );
                             (
-                                send_error(request, &mut response_handle, ResponseCode::ServFail)
-                                    .await,
+                                send_error(
+                                    request,
+                                    &mut response_handle,
+                                    ResponseCode::ServFail,
+                                    false,
+                                    None,
+                                )
+                                .await,
                                 RequestOutcome::authority_error(
                                     ResponseCode::ServFail,
                                     handler_name.to_string(),
@@ -229,9 +255,15 @@ impl RequestHandler for DoggyDnsHandler {
                     let resp_bytes = if self.xdp_enabled && negative_cacheable {
                         serialize_for_xdp(request, |probe| {
                             let b = MessageResponseBuilder::from_message_request(request);
-                            b.error_msg(&request.metadata, response_code)
-                                .destructive_emit(probe)
-                                .is_ok()
+                            b.build(
+                                error_metadata(request, response_code, authoritative),
+                                std::iter::empty::<&Record>(),
+                                &[],
+                                soa.iter(),
+                                &[],
+                            )
+                            .destructive_emit(probe)
+                            .is_ok()
                         })
                     } else {
                         None
@@ -262,7 +294,14 @@ impl RequestHandler for DoggyDnsHandler {
                         RequestOutcome::authority_error(response_code, handler_name.to_string());
                     outcome.response_bytes = resp_bytes;
                     (
-                        send_error(request, &mut response_handle, response_code).await,
+                        send_error(
+                            request,
+                            &mut response_handle,
+                            response_code,
+                            authoritative,
+                            soa.as_ref(),
+                        )
+                        .await,
                         outcome,
                     )
                 }
@@ -270,9 +309,15 @@ impl RequestHandler for DoggyDnsHandler {
                     let resp_bytes = if self.xdp_enabled {
                         serialize_for_xdp(request, |probe| {
                             let b = MessageResponseBuilder::from_message_request(request);
-                            b.error_msg(&request.metadata, ResponseCode::NXDomain)
-                                .destructive_emit(probe)
-                                .is_ok()
+                            b.build(
+                                error_metadata(request, ResponseCode::NXDomain, false),
+                                std::iter::empty::<&Record>(),
+                                &[],
+                                std::iter::empty::<&Record>(),
+                                &[],
+                            )
+                            .destructive_emit(probe)
+                            .is_ok()
                         })
                     } else {
                         None
@@ -286,7 +331,14 @@ impl RequestHandler for DoggyDnsHandler {
                         "no authority handled query"
                     );
                     (
-                        send_error(request, &mut response_handle, ResponseCode::NXDomain).await,
+                        send_error(
+                            request,
+                            &mut response_handle,
+                            ResponseCode::NXDomain,
+                            false,
+                            None,
+                        )
+                        .await,
                         RequestOutcome::nxdomain(resp_bytes),
                     )
                 }
@@ -414,13 +466,34 @@ fn max_message_size(protocol: Protocol, edns: Option<&hickory_proto::op::Edns>) 
     }
 }
 
+/// Build response metadata with the AA/RA flags that match the answering
+/// authority: authoritative zones set AA and clear RA, recursive backends do
+/// the opposite.
+fn error_metadata(request: &Request, response_code: ResponseCode, authoritative: bool) -> Metadata {
+    let mut metadata = Metadata::response_from_request(&request.metadata);
+    metadata.message_type = MessageType::Response;
+    metadata.op_code = OpCode::Query;
+    metadata.response_code = response_code;
+    metadata.authoritative = authoritative;
+    metadata.recursion_available = !authoritative;
+    metadata
+}
+
 async fn send_error<R: ResponseHandler>(
     request: &Request,
     response_handle: &mut R,
     response_code: ResponseCode,
+    authoritative: bool,
+    soa: Option<&Record>,
 ) -> ResponseInfo {
     let builder = MessageResponseBuilder::from_message_request(request);
-    let response = builder.error_msg(&request.metadata, response_code);
+    let response = builder.build(
+        error_metadata(request, response_code, authoritative),
+        std::iter::empty::<&Record>(),
+        &[],
+        soa,
+        &[],
+    );
     match response_handle.send_response(response).await {
         Ok(info) => info,
         Err(e) => {
@@ -429,7 +502,7 @@ async fn send_error<R: ResponseHandler>(
                 error = %e,
                 "failed to send error response"
             );
-            let mut metadata = Metadata::response_from_request(&request.metadata);
+            let mut metadata = error_metadata(request, ResponseCode::ServFail, false);
             metadata.response_code = ResponseCode::ServFail;
             Header {
                 metadata,

@@ -22,7 +22,11 @@ Part of [README](../README.md).
      error maps to `NXDOMAIN` (`ResponseCode::NXDomain`), `NODATA`
      (`NameExists`), or `SERVFAIL` for anything else
 3. If all handlers skip, the response is `NXDOMAIN`.
-4. Middleware chain runs `after_request()` with elapsed time and the final outcome (response code, authority, answer count).
+4. **Response flags and negative caching**: answers from a zone-owning handler
+   (`ZoneType::Primary`) set `AA`, clear `RA`, and carry the zone apex `SOA`
+   in negative responses so downstream resolvers can cache them (RFC 2308).
+   External handlers (forward/native) clear `AA` and set `RA`.
+5. Middleware chain runs `after_request()` with elapsed time and the final outcome (response code, authority, answer count).
 
 ## Plugin axes
 
@@ -61,6 +65,9 @@ through on lookup failure so a later `forward` plugin can still answer.
   service returns `NXDOMAIN`; a service with no instance of the requested
   family (or a non-`A`/`AAAA` query type) returns `NODATA`
 - `A` queries return only `A` records and `AAAA` queries only `AAAA` records
+- The apex answers `SOA` queries with a synthesized record (MNAME = zone,
+  RNAME = `hostmaster.<zone>`, minimum TTL = the plugin `ttl`); the same record
+  is attached to `NXDOMAIN`/`NODATA` responses
 
 ## Server protocols
 

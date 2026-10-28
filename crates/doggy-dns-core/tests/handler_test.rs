@@ -7,10 +7,10 @@ use doggy_dns_nacos::authority::NacosAuthority;
 use doggy_dns_nacos::watcher::{CachedInstance, ServiceKey};
 use doggy_dns_plugin::authority_chain::AuthorityChain;
 use doggy_dns_plugin::{Middleware, MiddlewareAction, RequestOutcome};
-use hickory_proto::op::{
-    Edns, Header, HeaderCounts, Message, MessageType, OpCode, Query, ResponseCode,
-};
-use hickory_proto::rr::{Name, Record, RecordType};
+use hickory_proto::op::{Edns, Message, MessageType, OpCode, Query, ResponseCode};
+use hickory_proto::rr::rdata::A;
+use hickory_proto::rr::{Name, RData, Record, RecordType};
+use hickory_proto::serialize::binary::BinEncoder;
 use hickory_server::net::NetError;
 use hickory_server::net::runtime::TokioTime;
 use hickory_server::net::xfer::Protocol;
@@ -52,21 +52,28 @@ fn build_request(domain: &str, rtype: RecordType, edns: Option<Edns>) -> Request
     Request::from_bytes(bytes, src, Protocol::Udp).unwrap()
 }
 
-/// Mock ResponseHandler that captures the response header info.
+/// Mock ResponseHandler that serializes the response so tests can inspect
+/// header flags and record sections.
 #[derive(Clone)]
 struct MockResponseHandler {
     last_response_code: Arc<std::sync::Mutex<Option<ResponseCode>>>,
+    last_message: Arc<std::sync::Mutex<Option<Message>>>,
 }
 
 impl MockResponseHandler {
     fn new() -> Self {
         Self {
             last_response_code: Arc::new(std::sync::Mutex::new(None)),
+            last_message: Arc::new(std::sync::Mutex::new(None)),
         }
     }
 
     fn response_code(&self) -> Option<ResponseCode> {
         *self.last_response_code.lock().unwrap()
+    }
+
+    fn message(&self) -> Option<Message> {
+        self.last_message.lock().unwrap().clone()
     }
 }
 
@@ -83,12 +90,16 @@ impl ResponseHandler for MockResponseHandler {
             impl Iterator<Item = &'a Record> + Send + 'a,
         >,
     ) -> Result<ResponseInfo, NetError> {
-        let metadata = *response.metadata();
-        *self.last_response_code.lock().unwrap() = Some(metadata.response_code);
-        Ok(ResponseInfo::from(Header {
-            metadata,
-            counts: HeaderCounts::default(),
-        }))
+        let mut bytes = Vec::new();
+        let mut encoder = BinEncoder::new(&mut bytes);
+        encoder.set_max_size(u16::MAX);
+        let info = response
+            .destructive_emit(&mut encoder)
+            .expect("serialize test response");
+        let message = Message::from_vec(&bytes).expect("parse serialized test response");
+        *self.last_response_code.lock().unwrap() = Some(message.metadata.response_code);
+        *self.last_message.lock().unwrap() = Some(message);
+        Ok(info)
     }
 }
 
@@ -555,4 +566,168 @@ async fn handler_authoritative_nxdomain_is_cached_for_xdp() {
         .expect("authoritative NXDOMAIN should be cached");
     let decoded = Message::from_vec(&bytes).expect("cached bytes must be a valid DNS message");
     assert_eq!(decoded.metadata.response_code, ResponseCode::NXDomain);
+}
+
+/// A non-authoritative handler that answers every query with one A record.
+struct ExternalAnswerHandler;
+
+#[async_trait]
+impl ZoneHandler for ExternalAnswerHandler {
+    fn zone_type(&self) -> hickory_server::zone_handler::ZoneType {
+        hickory_server::zone_handler::ZoneType::External
+    }
+
+    fn axfr_policy(&self) -> hickory_server::zone_handler::AxfrPolicy {
+        hickory_server::zone_handler::AxfrPolicy::Deny
+    }
+
+    fn origin(&self) -> &hickory_proto::rr::LowerName {
+        static ORIGIN: std::sync::LazyLock<hickory_proto::rr::LowerName> =
+            std::sync::LazyLock::new(|| hickory_proto::rr::LowerName::from(Name::root()));
+        &ORIGIN
+    }
+
+    async fn lookup(
+        &self,
+        name: &hickory_proto::rr::LowerName,
+        _rtype: RecordType,
+        _request_info: Option<&hickory_server::server::RequestInfo<'_>>,
+        _lookup_options: LookupOptions,
+    ) -> LookupControlFlow<AuthLookup> {
+        let record = Record::from_rdata(
+            Name::from(name.clone()),
+            60,
+            RData::A(A(Ipv4Addr::new(203, 0, 113, 7))),
+        );
+        LookupControlFlow::Continue(Ok(AuthLookup::answers(
+            hickory_server::zone_handler::LookupRecords::Section(vec![record]),
+            None,
+        )))
+    }
+
+    async fn search(
+        &self,
+        _request: &Request,
+        _lookup_options: LookupOptions,
+    ) -> (
+        LookupControlFlow<AuthLookup>,
+        Option<hickory_proto::rr::TSigResponseContext>,
+    ) {
+        (LookupControlFlow::Skip, None)
+    }
+
+    async fn nsec_records(
+        &self,
+        _name: &hickory_proto::rr::LowerName,
+        _lookup_options: LookupOptions,
+    ) -> LookupControlFlow<AuthLookup> {
+        LookupControlFlow::Skip
+    }
+}
+
+fn soa_records(message: &Message) -> Vec<&Record> {
+    message
+        .authorities
+        .iter()
+        .filter(|record| record.record_type() == RecordType::SOA)
+        .collect()
+}
+
+#[tokio::test]
+async fn handler_authoritative_answer_sets_aa_and_clears_ra() {
+    let authority = make_nacos_authority_with_hit();
+    let chain = AuthorityChain::new(vec![("nacos".to_string(), Arc::new(authority))]);
+    let handler = DoggyDnsHandler::new(vec![], Arc::new(chain), false);
+
+    let request = make_dns_request("my-svc.DEFAULT_GROUP.public.nacos.local.", RecordType::A);
+    let mock = MockResponseHandler::new();
+    let _info = handler
+        .handle_request::<_, TokioTime>(&request, mock.clone())
+        .await;
+
+    let message = mock.message().expect("response not captured");
+    assert!(message.metadata.authoritative, "AA must be set");
+    assert!(!message.metadata.recursion_available, "RA must be clear");
+    assert_eq!(message.answers.len(), 1);
+}
+
+#[tokio::test]
+async fn handler_authoritative_nxdomain_sets_aa_and_carries_soa() {
+    let authority = make_nacos_authority_with_hit();
+    let chain = AuthorityChain::new(vec![("nacos".to_string(), Arc::new(authority))]);
+    let handler = DoggyDnsHandler::new(vec![], Arc::new(chain), false);
+
+    let request = make_dns_request("missing.DEFAULT_GROUP.public.nacos.local.", RecordType::A);
+    let mock = MockResponseHandler::new();
+    let _info = handler
+        .handle_request::<_, TokioTime>(&request, mock.clone())
+        .await;
+
+    assert_eq!(mock.response_code(), Some(ResponseCode::NXDomain));
+    let message = mock.message().expect("response not captured");
+    assert!(message.metadata.authoritative, "AA must be set");
+    assert!(!message.metadata.recursion_available, "RA must be clear");
+    let soa = soa_records(&message);
+    assert_eq!(soa.len(), 1, "negative answer must carry one SOA");
+    assert_eq!(soa[0].name, Name::from_str("nacos.local.").unwrap());
+    assert_eq!(soa[0].ttl, 60);
+}
+
+#[tokio::test]
+async fn handler_authoritative_nodata_sets_aa_and_carries_soa() {
+    let authority = make_nacos_authority_with_ips(&["10.0.0.1"]);
+    let chain = AuthorityChain::new(vec![("nacos".to_string(), Arc::new(authority))]);
+    let handler = DoggyDnsHandler::new(vec![], Arc::new(chain), false);
+
+    let request = make_dns_request("my-svc.DEFAULT_GROUP.public.nacos.local.", RecordType::AAAA);
+    let mock = MockResponseHandler::new();
+    let _info = handler
+        .handle_request::<_, TokioTime>(&request, mock.clone())
+        .await;
+
+    assert_eq!(mock.response_code(), Some(ResponseCode::NoError));
+    let message = mock.message().expect("response not captured");
+    assert!(message.metadata.authoritative, "AA must be set");
+    assert!(!message.metadata.recursion_available, "RA must be clear");
+    assert!(message.answers.is_empty());
+    assert_eq!(soa_records(&message).len(), 1);
+}
+
+#[tokio::test]
+async fn handler_external_answer_sets_ra_and_clears_aa() {
+    let chain = AuthorityChain::new(vec![(
+        "external".to_string(),
+        Arc::new(ExternalAnswerHandler),
+    )]);
+    let handler = DoggyDnsHandler::new(vec![], Arc::new(chain), false);
+
+    let request = make_dns_request("www.example.com.", RecordType::A);
+    let mock = MockResponseHandler::new();
+    let _info = handler
+        .handle_request::<_, TokioTime>(&request, mock.clone())
+        .await;
+
+    let message = mock.message().expect("response not captured");
+    assert!(!message.metadata.authoritative, "AA must be clear");
+    assert!(message.metadata.recursion_available, "RA must be set");
+    assert!(soa_records(&message).is_empty());
+}
+
+#[tokio::test]
+async fn handler_apex_soa_query_returns_authoritative_soa_answer() {
+    let authority = make_nacos_authority_with_hit();
+    let chain = AuthorityChain::new(vec![("nacos".to_string(), Arc::new(authority))]);
+    let handler = DoggyDnsHandler::new(vec![], Arc::new(chain), false);
+
+    let request = make_dns_request("nacos.local.", RecordType::SOA);
+    let mock = MockResponseHandler::new();
+    let _info = handler
+        .handle_request::<_, TokioTime>(&request, mock.clone())
+        .await;
+
+    assert_eq!(mock.response_code(), Some(ResponseCode::NoError));
+    let message = mock.message().expect("response not captured");
+    assert!(message.metadata.authoritative);
+    assert_eq!(message.answers.len(), 1);
+    assert_eq!(message.answers[0].record_type(), RecordType::SOA);
 }
