@@ -53,12 +53,34 @@ impl ZoneHandler for NativeAuthority {
         match self.resolver.lookup(&name_str, rtype).await {
             Ok(lookup) => {
                 if lookup.answers().is_empty() {
+                    tracing::debug!(
+                        query = %name_str,
+                        qtype = ?rtype,
+                        "system resolver returned an empty answer, falling through"
+                    );
                     LookupControlFlow::Skip
                 } else {
                     LookupControlFlow::Continue(Ok(AuthLookup::Resolved(lookup)))
                 }
             }
-            Err(_) => LookupControlFlow::Skip,
+            Err(e) if e.is_nx_domain() || e.is_no_records_found() => {
+                tracing::debug!(
+                    query = %name_str,
+                    qtype = ?rtype,
+                    detail = %e,
+                    "system resolver returned a negative answer, falling through"
+                );
+                LookupControlFlow::Skip
+            }
+            Err(e) => {
+                tracing::warn!(
+                    query = %name_str,
+                    qtype = ?rtype,
+                    error = %e,
+                    "system resolver lookup failed, falling through"
+                );
+                LookupControlFlow::Skip
+            }
         }
     }
 

@@ -81,7 +81,7 @@ max_ttl = 300             # seconds, default 300
 [[plugins]]
 kind = "forward"
 enabled = true
-upstream = ["8.8.8.8:53", "1.1.1.1:53"]
+upstream = ["8.8.8.8:53", "1.1.1.1:53"]   # IP or IP:port; port defaults to 53
 cache_size = 1024
 min_ttl = 30
 max_ttl = 600
