@@ -4,7 +4,7 @@ use dashmap::DashMap;
 use doggy_dns_nacos::authority::NacosAuthority;
 use doggy_dns_nacos::watcher::{CachedInstance, ServiceKey};
 use hickory_proto::op::ResponseCode;
-use hickory_proto::rr::{LowerName, Name, RecordType};
+use hickory_proto::rr::{LowerName, Name, RData, RecordType};
 use hickory_server::zone_handler::{LookupControlFlow, LookupError, LookupOptions, ZoneHandler};
 use std::str::FromStr;
 use std::sync::Arc;
@@ -140,6 +140,33 @@ async fn zone_apex_returns_nodata() {
         result,
         LookupControlFlow::Continue(Err(LookupError::NameExists))
     ));
+}
+
+#[tokio::test]
+async fn zone_apex_soa_query_returns_soa_record() {
+    let cache = make_test_cache();
+    let authority = NacosAuthority::new(cache, "nacos.local", 6);
+
+    let name = LowerName::from(Name::from_str("nacos.local.").unwrap());
+    let result = authority
+        .lookup(&name, RecordType::SOA, None, LookupOptions::default())
+        .await;
+
+    match result {
+        LookupControlFlow::Continue(Ok(lookup)) => {
+            let records: Vec<_> = lookup.iter().collect();
+            assert_eq!(records.len(), 1);
+            let record = records[0];
+            assert_eq!(&record.name, &Name::from_str("nacos.local.").unwrap());
+            assert_eq!(record.ttl, 6);
+            let RData::SOA(soa) = &record.data else {
+                panic!("expected SOA rdata, got {:?}", &record.data);
+            };
+            assert_eq!(soa.minimum, 6);
+            assert_eq!(&soa.mname, &Name::from_str("nacos.local.").unwrap());
+        }
+        _ => panic!("Expected Continue(Ok) with an SOA record"),
+    }
 }
 
 #[tokio::test]

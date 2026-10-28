@@ -1,6 +1,8 @@
-use hickory_proto::rr::{LowerName, Name, RecordType};
+use hickory_proto::rr::{LowerName, Name, Record, RecordType};
 use hickory_server::server::RequestInfo;
-use hickory_server::zone_handler::{AuthLookup, LookupControlFlow, LookupOptions, ZoneHandler};
+use hickory_server::zone_handler::{
+    AuthLookup, LookupControlFlow, LookupOptions, ZoneHandler, ZoneType,
+};
 use std::sync::Arc;
 
 /// Result of a chain resolution, including which handler responded.
@@ -8,6 +10,10 @@ pub struct ResolveResult {
     pub outcome: LookupControlFlow<AuthLookup>,
     /// Name of the handler that produced the result, or `None` if all skipped.
     pub handler_name: Option<String>,
+    /// Whether the responding handler owns its zone (AA flag).
+    pub authoritative: bool,
+    /// Apex SOA to attach to negative answers for downstream caching.
+    pub soa: Option<Record>,
 }
 
 /// Named handler entry in the chain.
@@ -51,9 +57,25 @@ impl AuthorityChain {
             match &result {
                 LookupControlFlow::Skip => continue,
                 LookupControlFlow::Continue(_) | LookupControlFlow::Break(_) => {
+                    let authoritative = matches!(
+                        entry.handler.zone_type(),
+                        ZoneType::Primary | ZoneType::Secondary
+                    );
+                    let soa = if authoritative
+                        && matches!(
+                            result,
+                            LookupControlFlow::Continue(Err(_)) | LookupControlFlow::Break(Err(_))
+                        ) {
+                        apex_soa(entry.handler.as_ref(), request_info).await
+                    } else {
+                        None
+                    };
+
                     return ResolveResult {
                         outcome: result,
                         handler_name: Some(entry.name.clone()),
+                        authoritative,
+                        soa,
                     };
                 }
             }
@@ -62,10 +84,34 @@ impl AuthorityChain {
         ResolveResult {
             outcome: LookupControlFlow::Skip,
             handler_name: None,
+            authoritative: false,
+            soa: None,
         }
     }
 
     pub fn is_empty(&self) -> bool {
         self.handlers.is_empty()
+    }
+}
+
+/// Fetch the apex SOA of an authoritative handler for negative responses.
+async fn apex_soa(
+    handler: &dyn ZoneHandler,
+    request_info: Option<&RequestInfo<'_>>,
+) -> Option<Record> {
+    let origin = handler.origin().clone();
+    match handler
+        .lookup(
+            &origin,
+            RecordType::SOA,
+            request_info,
+            LookupOptions::default(),
+        )
+        .await
+    {
+        LookupControlFlow::Continue(Ok(lookup)) | LookupControlFlow::Break(Ok(lookup)) => {
+            lookup.iter().next().cloned()
+        }
+        _ => None,
     }
 }

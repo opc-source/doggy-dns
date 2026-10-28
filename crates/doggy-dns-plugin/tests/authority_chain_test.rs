@@ -277,3 +277,89 @@ async fn continue_error_propagated_with_handler_name() {
     ));
     assert_eq!(result.handler_name.as_deref(), Some("error-handler"));
 }
+
+#[tokio::test]
+async fn authoritative_negative_carries_apex_soa() {
+    use dashmap::DashMap;
+
+    let authority = doggy_dns_nacos::authority::NacosAuthority::new(
+        Arc::new(DashMap::new()),
+        "nacos.local",
+        60,
+    );
+    let chain = AuthorityChain::new(vec![("nacos".to_string(), Arc::new(authority))]);
+
+    let name = Name::from_str("missing.group.public.nacos.local.").unwrap();
+    let result = chain.resolve(&name, RecordType::A, None).await;
+
+    assert!(
+        result.authoritative,
+        "Nacos zone must answer authoritatively"
+    );
+    let soa = result.soa.expect("negative answer must carry SOA");
+    assert_eq!(soa.name, Name::from_str("nacos.local.").unwrap());
+    assert_eq!(soa.ttl, 60);
+}
+
+#[tokio::test]
+async fn external_negative_is_not_authoritative_and_has_no_soa() {
+    let chain = AuthorityChain::new(vec![(
+        "external".to_string(),
+        Arc::new(ExternalNegativeHandler),
+    )]);
+
+    let name = Name::from_str("missing.example.com.").unwrap();
+    let result = chain.resolve(&name, RecordType::A, None).await;
+
+    assert!(!result.authoritative);
+    assert!(result.soa.is_none());
+}
+
+/// A non-authoritative handler that reports NODATA.
+struct ExternalNegativeHandler;
+
+#[async_trait]
+impl ZoneHandler for ExternalNegativeHandler {
+    fn zone_type(&self) -> ZoneType {
+        ZoneType::External
+    }
+
+    fn axfr_policy(&self) -> AxfrPolicy {
+        AxfrPolicy::Deny
+    }
+
+    fn origin(&self) -> &LowerName {
+        static ORIGIN: std::sync::LazyLock<LowerName> =
+            std::sync::LazyLock::new(|| LowerName::from(Name::root()));
+        &ORIGIN
+    }
+
+    async fn lookup(
+        &self,
+        _name: &LowerName,
+        _rtype: RecordType,
+        _request_info: Option<&RequestInfo<'_>>,
+        _lookup_options: LookupOptions,
+    ) -> LookupControlFlow<AuthLookup> {
+        LookupControlFlow::Continue(Err(hickory_server::zone_handler::LookupError::NameExists))
+    }
+
+    async fn search(
+        &self,
+        _request: &Request,
+        _lookup_options: LookupOptions,
+    ) -> (
+        LookupControlFlow<AuthLookup>,
+        Option<hickory_proto::rr::TSigResponseContext>,
+    ) {
+        (LookupControlFlow::Skip, None)
+    }
+
+    async fn nsec_records(
+        &self,
+        _name: &LowerName,
+        _lookup_options: LookupOptions,
+    ) -> LookupControlFlow<AuthLookup> {
+        LookupControlFlow::Skip
+    }
+}
