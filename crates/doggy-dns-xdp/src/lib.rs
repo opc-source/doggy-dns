@@ -12,3 +12,6 @@ pub mod types;
 pub use middleware::XdpCacheMiddleware;
 #[cfg(target_os = "linux")]
 pub use program::XdpManager;
+
+// Component benchmarks in this crate are re-measured against main
+// on every PR by the xdp-component-bench job in .github/workflows/xdp-ci.yml.

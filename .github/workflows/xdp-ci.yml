@@ -1,6 +1,7 @@
 name: XDP CI
 
 on:
+  workflow_dispatch:
   push:
     branches: [main]
     paths:
@@ -72,27 +73,54 @@ jobs:
           curl -sSL https://github.com/aya-rs/bpf-linker/releases/download/v0.12.0/bpf-linker-x86_64-unknown-linux-musl.tar.zst | tar -xI zstd -C ~/.cargo/bin/
       - name: Build eBPF program
         run: cd xdp && cargo build -Z build-std=core,alloc --release --target bpfel-unknown-none
-      - name: Run benchmarks (PR)
-        run: |
-          sudo -E env "PATH=$PATH" cargo bench -p doggy-dns-xdp --bench xdp_component_bench -- --save-baseline pr | tee /tmp/bench-pr.txt
-      - name: Checkout base branch
-        run: git checkout origin/main
+      # Benchmarks run as root (sudo): the userspace XDP crate touches kernel
+      # state, so the runner needs privileges for the whole step.
+      #
+      # Comparison design: base first, PR second. The base run is a plain
+      # --save-baseline, which fully overwrites target/criterion/<id>/base/
+      # with fresh sample files in THIS worktree — so the PR comparison never
+      # reads stale/partial baseline artifacts from the restored cache. The
+      # PR run then uses --baseline base (strict: fails loudly if the base run
+      # above did not succeed) and criterion prints per-benchmark "change:"
+      # lines measuring the PR against main in the same job.
       - name: Run benchmarks (base)
+        if: github.event_name == 'pull_request'
         run: |
+          git checkout origin/main
           sudo -E env "PATH=$PATH" cargo bench -p doggy-dns-xdp --bench xdp_component_bench -- --save-baseline base | tee /tmp/bench-base.txt
+      - name: Checkout PR head
+        if: github.event_name == 'pull_request'
+        run: git checkout "${github.event.pull_request.head.sha}"
+      - name: Run benchmarks (PR)
+        if: github.event_name == 'pull_request'
+        run: |
+          sudo -E env "PATH=$PATH" cargo bench -p doggy-dns-xdp --bench xdp_component_bench -- --baseline base | tee /tmp/bench-pr.txt
+      # A push to main has no PR to compare against; just keep a fresh
+      # baseline (and its logs) on record.
+      - name: Run benchmarks (main)
+        if: github.event_name != 'pull_request'
+        run: |
+          sudo -E env "PATH=$PATH" cargo bench -p doggy-dns-xdp --bench xdp_component_bench -- --save-baseline base | tee /tmp/bench-main.txt
       - name: Write job summary
         if: always()
         run: |
           {
             echo "## XDP Component Benchmark Comparison"
-            echo '### PR Branch'
-            echo '```'
-            cat /tmp/bench-pr.txt 2>/dev/null || echo "benchmarks did not run"
-            echo '```'
-            echo '### Base Branch'
-            echo '```'
-            cat /tmp/bench-base.txt 2>/dev/null || echo "benchmarks did not run"
-            echo '```'
+            if [ "${{ github.event_name }}" = "pull_request" ]; then
+              echo '### Base (main)'
+              echo '```'
+              cat /tmp/bench-base.txt 2>/dev/null || echo "benchmarks did not run"
+              echo '```'
+              echo '### PR (change lines compare against base)'
+              echo '```'
+              cat /tmp/bench-pr.txt 2>/dev/null || echo "benchmarks did not run"
+              echo '```'
+            else
+              echo '### Main'
+              echo '```'
+              cat /tmp/bench-main.txt 2>/dev/null || echo "benchmarks did not run"
+              echo '```'
+            fi
           } >> "$GITHUB_STEP_SUMMARY"
       # A push to main has no issue/PR to comment on, and fork PRs get a
       # read-only token, so only same-repo PRs can be commented on.
@@ -106,7 +134,7 @@ jobs:
             const fs = require('fs');
             const pr = fs.readFileSync('/tmp/bench-pr.txt', 'utf8');
             const base = fs.readFileSync('/tmp/bench-base.txt', 'utf8');
-            const body = `## XDP Component Benchmark Comparison\n\n### PR Branch\n\`\`\`\n${pr}\n\`\`\`\n\n### Base Branch\n\`\`\`\n${base}\n\`\`\``;
+            const body = `## XDP Component Benchmark Comparison\n\n### Base (main)\n\`\`\`\n${base}\n\`\`\`\n\n### PR (change lines compare against base)\n\`\`\`\n${pr}\n\`\`\``;
             github.rest.issues.createComment({
               issue_number: context.issue.number,
               owner: context.repo.owner,
