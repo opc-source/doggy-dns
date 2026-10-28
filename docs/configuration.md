@@ -31,9 +31,8 @@ worker_threads = 1        # default 1 (suitable for DaemonSet, one per node)
 [middleware]
 logging = true
 
-# Optional OTLP export (disabled by default).
-# Full signal reference, backend presets, Collector/Vector examples:
-# docs/observability.md
+# Optional OTLP export (disabled by default). Per-signal fields, backend
+# presets and endpoint precedence: docs/observability.md
 [observability]
 enabled = false
 backend = "openobserve"                  # openobserve | otel-collector | vector | custom
@@ -56,10 +55,7 @@ enabled = true
 sample_ratio = 0.05   # normal traffic; tracing::error! spans are always captured
 
 [observability.profiles]
-enabled = false
-interval_secs = 60
-duration_secs = 10
-frequency_hz = 99
+enabled = false       # CPU only, Linux/macOS, OTLP Profiles Alpha
 
 # Plugins are evaluated in order. First non-Skip result wins.
 [[plugins]]
