@@ -97,6 +97,56 @@ fn bench_handler_pipeline_nacos_hit(c: &mut Criterion) {
     group.finish();
 }
 
+/// Full pipeline on an in-zone name the cache does not hold.
+///
+/// The existing `handler_pipeline_nxdomain` uses an empty chain, which never
+/// reaches the authoritative negative branch: the chain only fetches the apex
+/// SOA when the responding handler owns its zone. This case is what the
+/// apex-SOA caching work measures, and the substitute for a Nacos end-to-end
+/// scenario (the server aborts boot when Nacos is unreachable, so CI cannot
+/// stress that path without a live Nacos).
+fn bench_handler_pipeline_nacos_nxdomain(c: &mut Criterion) {
+    let cache = Arc::new(DashMap::new());
+    cache.insert(
+        ServiceKey {
+            service_name: "my-svc".to_string(),
+            group: "default_group".to_string(),
+            namespace: "public".to_string(),
+        },
+        vec![CachedInstance {
+            ip: "10.0.0.1".to_string(),
+            port: 8080,
+            healthy: true,
+        }],
+    );
+    let authority = NacosAuthority::new(cache, "nacos.local", 60);
+    let chain = Arc::new(AuthorityChain::new(vec![(
+        "nacos".to_string(),
+        Arc::new(authority),
+    )]));
+    let handler = DoggyDnsHandler::new(vec![], chain, false);
+    let request = make_request("unknown-svc.DEFAULT_GROUP.public.nacos.local.");
+
+    let mut group = c.benchmark_group("handler_pipeline_nacos_nxdomain");
+    for threads in 1..=4 {
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(threads)
+            .enable_all()
+            .build()
+            .unwrap();
+        group.bench_with_input(BenchmarkId::new("threads", threads), &threads, |b, _| {
+            b.to_async(&rt).iter(|| async {
+                black_box(
+                    handler
+                        .handle_request::<_, TokioTime>(&request, NoOpResponseHandler)
+                        .await,
+                )
+            });
+        });
+    }
+    group.finish();
+}
+
 fn bench_handler_pipeline_nxdomain(c: &mut Criterion) {
     let chain = Arc::new(AuthorityChain::new(vec![]));
     let handler = DoggyDnsHandler::new(vec![], chain, false);
@@ -125,6 +175,7 @@ fn bench_handler_pipeline_nxdomain(c: &mut Criterion) {
 criterion_group!(
     benches,
     bench_handler_pipeline_nacos_hit,
+    bench_handler_pipeline_nacos_nxdomain,
     bench_handler_pipeline_nxdomain,
 );
 criterion_main!(benches);
