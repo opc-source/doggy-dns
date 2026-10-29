@@ -658,7 +658,7 @@ Append to `.github/workflows/rust.yml`:
           sleep 2
           dnsperf -s 127.0.0.1 -p 5353 -d /tmp/queries.txt -n 1 -l 5 > /dev/null 2>&1 || true
           dnsperf -s 127.0.0.1 -p 5353 -d /tmp/queries.txt -n 10 -T 4 -l 30 > /tmp/e2e-result.txt 2>&1 || true
-          kill $(cat /tmp/server.pid)
+          kill $(cat /tmp/server.pid) 2>/dev/null || echo "server had already exited"
       - name: Generate report
         run: |
           python3 scripts/xdp_stress_report.py --single /tmp/e2e-result.txt > /tmp/e2e-report.md \
@@ -696,8 +696,14 @@ Append to `.github/workflows/rust.yml`:
         with:
           script: |
             const fs = require('fs');
-            const report = fs.readFileSync('/tmp/e2e-report.md', 'utf8');
-            const pr = fs.readFileSync('/tmp/bench-pr.txt', 'utf8');
+            // Both files can legitimately be absent: an earlier step may have
+            // produced nothing, and this is a report-only job. Reading them
+            // unguarded would turn a missing artefact into a red check.
+            const read = (p) => fs.existsSync(p)
+              ? fs.readFileSync(p, 'utf8')
+              : `_${p} was not produced by this run_\n`;
+            const report = read('/tmp/e2e-report.md');
+            const pr = read('/tmp/bench-pr.txt');
             const body = `${report}\n## Component Benchmarks (PR vs main)\n\n\`\`\`\n${pr}\n\`\`\`\n`;
             github.rest.issues.createComment({
               issue_number: context.issue.number,
