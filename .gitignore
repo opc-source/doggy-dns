@@ -17,3 +17,6 @@
 cobertura.xml
 tarpaulin-report.html
 lcov.info
+
+# Python bytecode (scripts/test_xdp_stress_report.py runs in CI)
+__pycache__/
