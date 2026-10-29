@@ -373,13 +373,32 @@ async fn apex_soa_matches_the_record_a_negative_answer_carries() {
 
     let handler: Arc<dyn ZoneHandler> = authority.clone();
     let chain = AuthorityChain::new(vec![("nacos".to_string(), handler)]);
-    let attached = chain
-        .resolve(&Name::from(missing.clone()), RecordType::A, None)
-        .await
-        .soa;
+    let attached = chain.resolve(&missing, RecordType::A, None).await.soa;
 
     assert!(
         published.is_some() && attached == published,
         "the chain must attach the same SOA the zone publishes"
     );
+}
+
+/// A client sends the QNAME in whatever case it likes. The cache key is
+/// lowercase, and the only reason it matches is that the server hands every
+/// handler a `LowerName` - so this is the contract the refactor relies on.
+#[tokio::test]
+async fn uppercase_wire_name_resolves_from_the_lowercase_cache() {
+    let cache = make_test_cache();
+    let authority = NacosAuthority::new(cache, "nacos.local", 6);
+
+    let name =
+        LowerName::from(Name::from_str("USER-SERVICE.DEFAULT_GROUP.PUBLIC.NACOS.LOCAL.").unwrap());
+    let result = authority
+        .lookup(&name, RecordType::A, None, LookupOptions::default())
+        .await;
+
+    match result {
+        LookupControlFlow::Continue(Ok(lookup)) => {
+            assert_eq!(lookup.iter().count(), 2, "both seeded instances answer");
+        }
+        other => panic!("uppercase QNAME must still resolve, got {other}"),
+    }
 }

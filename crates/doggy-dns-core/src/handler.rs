@@ -139,10 +139,11 @@ impl RequestHandler for DoggyDnsHandler {
             );
             span_for_body.record("client.port", request_info.src.port());
 
-            // Resolve through authority chain
-            let query_name = request_info.query.name().to_owned();
+            // Resolve through authority chain. `query.name()` is the `LowerName`
+            // the server already lowercased once at parse time, so it goes to the
+            // chain by reference; the log string is the only owned copy.
             let query_type = request_info.query.query_type();
-            let query_display = query_name.to_string();
+            let query_display = request_info.query.name().to_string();
             let resolve_span = tracing::info_span!(
                 "dns.resolve",
                 "dns.question.name" = %query_display,
@@ -152,7 +153,7 @@ impl RequestHandler for DoggyDnsHandler {
             );
             let resolve_result = self
                 .authority_chain
-                .resolve(&query_name.into(), query_type, Some(&request_info))
+                .resolve(request_info.query.name(), query_type, Some(&request_info))
                 .instrument(resolve_span.clone())
                 .await;
 

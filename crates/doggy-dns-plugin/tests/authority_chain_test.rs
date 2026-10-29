@@ -118,7 +118,7 @@ impl ZoneHandler for ErrorZoneHandler {
 #[tokio::test]
 async fn empty_chain_returns_skip() {
     let chain = AuthorityChain::new(vec![]);
-    let name = Name::from_str("example.com.").unwrap();
+    let name = LowerName::from(Name::from_str("example.com.").unwrap());
     let result = chain.resolve(&name, RecordType::A, None).await;
     assert!(matches!(result.outcome, LookupControlFlow::Skip));
     assert!(result.handler_name.is_none());
@@ -148,7 +148,7 @@ async fn single_handler_hit_returns_continue() {
     let authority = NacosAuthority::new(cache, "nacos.local", 60);
     let chain = AuthorityChain::new(vec![("nacos".to_string(), Arc::new(authority))]);
 
-    let name = Name::from_str("my-svc.DEFAULT_GROUP.public.nacos.local.").unwrap();
+    let name = LowerName::from(Name::from_str("my-svc.DEFAULT_GROUP.public.nacos.local.").unwrap());
     let result = chain.resolve(&name, RecordType::A, None).await;
     assert!(matches!(result.outcome, LookupControlFlow::Continue(Ok(_))));
     assert_eq!(result.handler_name.as_deref(), Some("nacos"));
@@ -164,7 +164,8 @@ async fn single_handler_miss_is_authoritative_nxdomain() {
     let authority = NacosAuthority::new(cache, "nacos.local", 60);
     let chain = AuthorityChain::new(vec![("nacos".to_string(), Arc::new(authority))]);
 
-    let name = Name::from_str("unknown.DEFAULT_GROUP.public.nacos.local.").unwrap();
+    let name =
+        LowerName::from(Name::from_str("unknown.DEFAULT_GROUP.public.nacos.local.").unwrap());
     let result = chain.resolve(&name, RecordType::A, None).await;
     assert!(matches!(
         result.outcome,
@@ -206,7 +207,7 @@ async fn first_skips_second_resolves() {
     ]);
 
     // Query matches zone-b, not zone-a → first skips, second resolves
-    let name = Name::from_str("web.DEFAULT_GROUP.public.zone-b.local.").unwrap();
+    let name = LowerName::from(Name::from_str("web.DEFAULT_GROUP.public.zone-b.local.").unwrap());
     let result = chain.resolve(&name, RecordType::A, None).await;
     assert!(matches!(result.outcome, LookupControlFlow::Continue(Ok(_))));
     assert_eq!(result.handler_name.as_deref(), Some("zone-b"));
@@ -228,7 +229,7 @@ async fn all_handlers_skip_returns_skip() {
         ("zone-b".to_string(), Arc::new(h2)),
     ]);
 
-    let name = Name::from_str("svc.group.ns.zone-c.local.").unwrap();
+    let name = LowerName::from(Name::from_str("svc.group.ns.zone-c.local.").unwrap());
     let result = chain.resolve(&name, RecordType::A, None).await;
     assert!(matches!(result.outcome, LookupControlFlow::Skip));
     assert!(result.handler_name.is_none());
@@ -253,7 +254,7 @@ async fn break_result_stops_chain_and_returns_handler_name() {
         ("should-not-reach".to_string(), Arc::new(ErrorZoneHandler)),
     ]);
 
-    let name = Name::from_str("anything.example.com.").unwrap();
+    let name = LowerName::from(Name::from_str("anything.example.com.").unwrap());
     let result = chain.resolve(&name, RecordType::A, None).await;
 
     // BreakZoneHandler returns Break(Ok(...)), so chain stops at first handler
@@ -268,7 +269,7 @@ async fn continue_error_propagated_with_handler_name() {
         Arc::new(ErrorZoneHandler),
     )]);
 
-    let name = Name::from_str("anything.example.com.").unwrap();
+    let name = LowerName::from(Name::from_str("anything.example.com.").unwrap());
     let result = chain.resolve(&name, RecordType::A, None).await;
 
     assert!(matches!(
@@ -289,7 +290,7 @@ async fn authoritative_negative_carries_apex_soa() {
     );
     let chain = AuthorityChain::new(vec![("nacos".to_string(), Arc::new(authority))]);
 
-    let name = Name::from_str("missing.group.public.nacos.local.").unwrap();
+    let name = LowerName::from(Name::from_str("missing.group.public.nacos.local.").unwrap());
     let result = chain.resolve(&name, RecordType::A, None).await;
 
     assert!(
@@ -308,7 +309,7 @@ async fn external_negative_is_not_authoritative_and_has_no_soa() {
         Arc::new(ExternalNegativeHandler),
     )]);
 
-    let name = Name::from_str("missing.example.com.").unwrap();
+    let name = LowerName::from(Name::from_str("missing.example.com.").unwrap());
     let result = chain.resolve(&name, RecordType::A, None).await;
 
     assert!(!result.authoritative);
@@ -453,7 +454,7 @@ async fn negative_answers_fetch_the_apex_soa_only_once() {
 
     let first = chain
         .resolve(
-            &Name::from_str("missing.example.com.").unwrap(),
+            &LowerName::from(Name::from_str("missing.example.com.").unwrap()),
             RecordType::A,
             None,
         )
@@ -467,7 +468,7 @@ async fn negative_answers_fetch_the_apex_soa_only_once() {
 
     let second = chain
         .resolve(
-            &Name::from_str("other.example.com.").unwrap(),
+            &LowerName::from(Name::from_str("other.example.com.").unwrap()),
             RecordType::A,
             None,
         )

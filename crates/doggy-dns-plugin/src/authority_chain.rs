@@ -1,4 +1,4 @@
-use hickory_proto::rr::{LowerName, Name, Record, RecordType};
+use hickory_proto::rr::{LowerName, Record, RecordType};
 use hickory_server::server::RequestInfo;
 use hickory_server::zone_handler::{
     AuthLookup, LookupControlFlow, LookupOptions, ZoneHandler, ZoneType,
@@ -59,20 +59,23 @@ impl AuthorityChain {
     }
 
     /// Resolve a query by iterating the chain.
+    ///
+    /// Takes the already-lowercased name the server parsed: `ZoneHandler::lookup`
+    /// wants a `&LowerName` anyway, so cloning and re-lowercasing here cost four
+    /// allocations per request for nothing.
     /// Returns the first non-Skip result with the handler name, or Skip if all handlers skip.
     pub async fn resolve(
         &self,
-        name: &Name,
+        name: &LowerName,
         record_type: RecordType,
         request_info: Option<&RequestInfo<'_>>,
     ) -> ResolveResult {
-        let lower_name = LowerName::new(name);
         let lookup_options = LookupOptions::default();
 
         for entry in &self.handlers {
             let result = entry
                 .handler
-                .lookup(&lower_name, record_type, request_info, lookup_options)
+                .lookup(name, record_type, request_info, lookup_options)
                 .await;
 
             match &result {

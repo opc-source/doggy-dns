@@ -5,7 +5,7 @@ use doggy_dns_nacos::authority::NacosAuthority;
 use doggy_dns_nacos::watcher::{CachedInstance, ServiceKey};
 use doggy_dns_plugin::authority_chain::AuthorityChain;
 use doggy_dns_plugin::builtin::forward::ForwardAuthority;
-use hickory_proto::rr::{Name, RecordType};
+use hickory_proto::rr::{LowerName, Name, RecordType};
 use hickory_server::zone_handler::LookupControlFlow;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -48,7 +48,8 @@ async fn chain_nacos_hit() {
         ("forward".to_string(), forward),
     ]);
 
-    let name = Name::from_str("web-app.DEFAULT_GROUP.public.nacos.local.").unwrap();
+    let name =
+        LowerName::from(Name::from_str("web-app.DEFAULT_GROUP.public.nacos.local.").unwrap());
     let result = chain.resolve(&name, RecordType::A, None).await;
 
     assert!(matches!(result.outcome, LookupControlFlow::Continue(Ok(_))));
@@ -75,7 +76,7 @@ async fn chain_outside_nacos_zone_falls_to_forward() {
         ("forward".to_string(), forward),
     ]);
 
-    let name = Name::from_str("www.google.com.").unwrap();
+    let name = LowerName::from(Name::from_str("www.google.com.").unwrap());
     let result = chain.resolve(&name, RecordType::A, None).await;
 
     assert!(matches!(
@@ -105,7 +106,8 @@ async fn chain_unknown_service_in_nacos_zone_does_not_fall_to_forward() {
         ("forward".to_string(), forward),
     ]);
 
-    let name = Name::from_str("missing.DEFAULT_GROUP.public.nacos.local.").unwrap();
+    let name =
+        LowerName::from(Name::from_str("missing.DEFAULT_GROUP.public.nacos.local.").unwrap());
     let result = chain.resolve(&name, RecordType::A, None).await;
 
     assert!(matches!(
