@@ -80,14 +80,49 @@ def format_report(userspace, xdp):
     return report
 
 
+def format_single(run):
+    """Render one dnsperf run. Used by the userspace performance job, where
+    there is no second mode to compare against; the committed baseline in
+    docs/benchmarks/userspace-baseline.md is the comparison instead."""
+    if run is None:
+        return (
+            "## Userspace Performance Report\n\n"
+            "The userspace stress run did not produce parseable output.\n"
+        )
+
+    return f"""## Userspace Performance Report
+
+| Metric | Value |
+|--------|-------|
+| Queries per second | {fmt(run['qps'])} |
+| Queries sent | {run['sent']} |
+| Completed | {run['completed']} |
+| Lost | {run['lost']} |
+| Average latency (s) | {fmt(run['latency_avg'])} |
+| Min latency (s) | {fmt(run['latency_min'])} |
+| Max latency (s) | {fmt(run['latency_max'])} |
+
+> Measured with `RUST_LOG=warn` on the `forward` plugin, so per-query `info`
+> logs are suppressed and this is not the default configuration's number.
+> Compare against docs/benchmarks/userspace-baseline.md; shared-runner variance
+> makes the absolute value meaningless on its own.
+"""
+
+
 if __name__ == "__main__":
-    if len(sys.argv) != 3:
+    args = sys.argv[1:]
+
+    if args and args[0] == "--single":
+        if len(args) != 2:
+            print("Usage: xdp_stress_report.py --single <run.txt>", file=sys.stderr)
+            sys.exit(1)
+        print(format_single(parse_dnsperf(args[1])))
+    elif len(args) == 2:
+        print(format_report(parse_dnsperf(args[0]), parse_dnsperf(args[1])))
+    else:
         print(
-            "Usage: xdp_stress_report.py <userspace.txt> <xdp.txt>",
+            "Usage: xdp_stress_report.py <userspace.txt> <xdp.txt> | "
+            "xdp_stress_report.py --single <run.txt>",
             file=sys.stderr,
         )
         sys.exit(1)
-
-    userspace = parse_dnsperf(sys.argv[1])
-    xdp = parse_dnsperf(sys.argv[2])
-    print(format_report(userspace, xdp))
