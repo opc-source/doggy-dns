@@ -41,7 +41,7 @@ Applies to every task; exact values copied from the spec and `AGENTS.md`.
 | File | Responsibility | Tasks |
 |------|----------------|-------|
 | `crates/doggy-dns-core/tests/wire_golden_test.rs` | Create. Byte-level golden assertions for the four Nacos answer shapes; the tripwire for every later representation change. | 1 |
-| `scripts/xdp_stress_report.py` | Modify. Add `--single-mode` rendering so one dnsperf run produces a report; existing pair mode and callers unchanged. | 2 |
+| `scripts/xdp_stress_report.py` | Modify. Add `--single` rendering so one dnsperf run produces a report; existing pair mode and callers unchanged. | 2 |
 | `crates/doggy-dns-core/benches/handler_bench.rs` | Modify. Add `handler_pipeline_nacos_nxdomain` (zone-owning negative + apex SOA) — the substitute for the unreachable Nacos E2E scenario. | 3 |
 | `.github/workflows/rust.yml` | Modify. Add the `performance` job: dnsperf E2E + base-vs-PR criterion for the three bench files. | 4 |
 | `docs/benchmarks/userspace-baseline.md` | Create. Committed baseline: QPS, criterion medians, exact commands, runner image, date. | 4 |
@@ -296,7 +296,7 @@ EOF
 
 ---
 
-### Task 2: `--single-mode` in the stress report script
+### Task 2: `--single` rendering in the stress report script
 
 **Files:**
 - Modify: `scripts/xdp_stress_report.py`
@@ -443,7 +443,7 @@ python3 scripts/xdp_stress_report.py --single scripts/tests/fixtures/userspace.t
 python3 scripts/xdp_stress_report.py scripts/tests/fixtures/userspace.txt scripts/tests/fixtures/userspace.txt
 ```
 
-Expected: 4 tests `OK`; the first command prints the single-mode table; the second prints `## XDP Stress Test Report` with a `1.00x` ratio — proof the existing pair path still works for the XDP workflow.
+Expected: 4 tests `OK`; the first command prints the single-run report; the second prints `## XDP Stress Test Report` with a `1.00x` ratio — proof the existing pair path still works for the XDP workflow.
 
 - [ ] **Step 5: Commit**
 
