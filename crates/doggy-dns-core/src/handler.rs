@@ -6,7 +6,9 @@ use hickory_proto::rr::Record;
 use hickory_proto::serialize::binary::BinEncoder;
 use hickory_server::net::xfer::Protocol;
 use hickory_server::server::{Request, RequestHandler, ResponseHandler, ResponseInfo};
-use hickory_server::zone_handler::{LookupControlFlow, LookupError, MessageResponseBuilder};
+use hickory_server::zone_handler::{
+    AuthLookup, LookupControlFlow, LookupError, LookupRecords, MessageResponseBuilder,
+};
 use std::sync::Arc;
 use tokio::time::Instant;
 use tracing::Instrument;
@@ -167,7 +169,7 @@ impl RequestHandler for DoggyDnsHandler {
 
             let (response_info, outcome) = match resolve_result.outcome {
                 LookupControlFlow::Continue(Ok(lookup)) | LookupControlFlow::Break(Ok(lookup)) => {
-                    let records: Vec<_> = lookup.iter().cloned().collect();
+                    let records = take_answer_records(lookup);
                     let answer_count = records.len();
 
                     let mut metadata = Metadata::response_from_request(&request.metadata);
@@ -449,6 +451,25 @@ fn serialize_for_xdp(
     }
 
     Some(bytes)
+}
+
+/// Move the answer records out of a zone lookup instead of cloning them.
+///
+/// The authorities we own build answers as `LookupRecords::Section`, an owned
+/// `Vec`, so handing it over is a free transfer of records that used to cost
+/// two allocations per answer through `iter().cloned()`. `forward` and `native`
+/// return `AuthLookup::Resolved`, whose records live behind an `Arc`, so those
+/// keep the clone path. Order is preserved: `Section` iterates forward, the
+/// same direction the clone walked, and `AuthLookup::iter` already ignored
+/// `additionals`, so the `..` binding drops nothing the response carried.
+fn take_answer_records(lookup: AuthLookup) -> Vec<Record> {
+    match lookup {
+        AuthLookup::Records {
+            answers: LookupRecords::Section(records),
+            ..
+        } => records,
+        lookup => lookup.iter().cloned().collect(),
+    }
 }
 
 /// Extract the minimum TTL from a slice of DNS records.
