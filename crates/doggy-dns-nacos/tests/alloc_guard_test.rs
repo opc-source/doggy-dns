@@ -4,10 +4,11 @@
 //!
 //! Timings on a shared runner are easy to wave away; an allocation count is not.
 //! This wraps the system allocator and measures one `lookup` call, which is the
-//! unit of work the hot-path refactor owns. The budgets were recorded from the
-//! first green run of this file, not guessed: `String`-free name resolution
-//! should cost one key allocation, one answer `Name`, and one `Record` `Name`
-//! clone per answer.
+//! unit of work the hot-path refactor owns. The budgets were measured with a zero
+//! budget on this file's first run, not guessed: one answering instance costs 6
+//! allocations and the in-zone miss costs 2. The composite key, the answer
+//! `Name`, the `Vec<Record>` and the per-record `Name` clone are the sites a
+//! regression would grow; the count is the contract, not a sum of its parts.
 //!
 //! Both measurements live in one test on purpose: libtest runs tests in a file
 //! concurrently, and a second thread allocating inside the measured window would
@@ -103,11 +104,11 @@ fn hit_and_miss_paths_allocate_within_budget() {
         RecordType::A,
     );
 
-    // Measured on the first green run: 6 allocations for one answering
-    // instance and 2 for the in-zone miss. The budget equals the measurement -
-    // no slack - so the next `to_lowercase`, `format!` or `Vec` clone on this
-    // path fails the suite instead of the next review. Changing the seed above
-    // means re-measuring; that is deliberate, not routine.
+    // Measured with a zero budget on this file's first run: 6 allocations for
+    // one answering instance and 2 for the in-zone miss. The budget equals the
+    // measurement - no slack - so the next `to_lowercase`, `format!` or `Vec`
+    // clone on this path fails the suite instead of the next review. Changing
+    // the seed above means re-measuring; that is deliberate, not routine.
     const HIT_BUDGET: usize = 6;
     const MISS_BUDGET: usize = 2;
     assert!(
