@@ -576,6 +576,7 @@ EOF
 
 **Files:**
 - Modify: `.github/workflows/rust.yml` (add the `performance` job after `bench`)
+- Modify: `.gitignore` (add `__pycache__/`; this job runs the Python suite, which drops bytecode next to `scripts/xdp_stress_report.py`)
 - Create: `docs/benchmarks/userspace-baseline.md`
 
 **Interfaces:**
@@ -599,6 +600,11 @@ Append to `.github/workflows/rust.yml`:
           fetch-depth: 0
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      # The stress report script is this job's renderer, so its suite runs here
+      # rather than in the lint job: a broken --single mode fails this job loudly
+      # before the report step can silently emit nothing.
+      - name: Report script tests
+        run: python3 scripts/test_xdp_stress_report.py -v
       - name: Install dnsperf
         run: sudo apt-get update && sudo apt-get install -y dnsperf
       - name: Generate query file
@@ -662,6 +668,7 @@ Append to `.github/workflows/rust.yml`:
         run: |
           {
             echo "## Userspace Performance (report-only)"
+            echo "E2E measured with \`RUST_LOG=warn\` (per-query info logs suppressed); component benches are base-vs-PR on this same runner."
             cat /tmp/e2e-report.md 2>/dev/null || echo "no e2e report"
             if [ "${{ github.event_name }}" = "pull_request" ]; then
               echo '### Component benchmarks: base (main)'
@@ -708,23 +715,47 @@ python3 -c "import yaml,sys; d=yaml.safe_load(open('.github/workflows/rust.yml')
 
 Expected: `['bench', 'build', 'lint', 'performance']` and `['uses', 'with']`. If `yaml` is missing, `gh workflow lint` is not available offline either — then check indentation by eye against `xdp-ci.yml`, which this block copies, and let CI be the verifier.
 
-- [ ] **Step 3: Open the PR and confirm the job agrees with itself**
+- [ ] **Step 3: Open the PR and confirm the job agrees with itself** *(maintainer action — pushing and opening PRs is not part of task execution)*
 
 Push and open the PR. The spec's W1 check: run the job on this PR (which changes no hot-path code) and confirm the `change:` lines sit within noise and the E2E number lands in the same order as the XDP job's historical userspace-only run (~43k QPS). That is the calibration step — without it no later delta means anything. Read the numbers off the PR's job summary.
 
+The task loop cannot perform this step: it is a push to a shared remote plus a PR, and the repo's convention is that the maintainer integrates. Execution therefore stops at the commit, the baseline document records what could be measured locally (Step 4), and the E2E row is marked as awaiting this job's first run. Do not invent an E2E number.
+
+- [ ] **Step 3b: Record what is measurable without CI**
+
+Run the three bench files locally with the committed benches and take the `threads/1` and `threads/4` medians:
+
+```bash
+cargo bench -p doggy-dns-core --bench handler_bench -- --save-baseline local
+cargo bench -p doggy-dns-plugin --bench chain_bench -- --save-baseline local
+cargo bench -p doggy-dns-nacos --bench nacos_bench -- --save-baseline local
+```
+
+Those medians are what Step 4's component table carries, labelled with the machine they came from. `dnsperf` is not installed locally and installing system packages is not in scope, so the end-to-end row has no local measurement and states the reference number instead.
+
 - [ ] **Step 4: Write the baseline document**
 
-Create `docs/benchmarks/userspace-baseline.md` with the numbers the green run printed (substitute the real values; the shape and commands are fixed):
+Create `docs/benchmarks/userspace-baseline.md` with the numbers Step 3b measured (substitute the real values; the shape and commands are fixed):
 
 ```markdown
 # Userspace Performance Baseline
 
-Recorded from the first `Performance` job run on a PR that changes no hot-path
-code, so it calibrates the job as well as the server. Numbers are runner
-specific; only same-job base-vs-PR comparisons are meaningful.
+Two kinds of number live here, and they are not interchangeable:
+
+- **Component benchmarks** are criterion medians measured locally on the machine
+  named below, from the committed benches. They are the starting point later PRs
+  compare against.
+- **End-to-end** is measured only by the `Performance` CI job, whose base-vs-PR
+  comparison happens on one runner inside one job. That job's first run lands
+  with this PR, so the end-to-end row below is the reference from the XDP stress
+  job's historical userspace-only run, not a measurement taken by this job.
+
+Numbers are runner/machine specific; only same-job base-vs-PR comparisons are
+meaningful.
 
 - Date: 2026-10-29
-- Runner: `ubuntu-latest` (2 vCPU shared)
+- CI target: `ubuntu-latest` (2 vCPU shared)
+- Local bench machine: <host, CPU, core count, OS>
 - Binary: `cargo build --release`, feature `xdp` off
 - Server config: `config/doggy-dns-stress.toml` (forward to 8.8.8.8:53,
   `worker_threads = 4`), `RUST_LOG=warn`
@@ -735,11 +766,17 @@ specific; only same-job base-vs-PR comparisons are meaningful.
 
 | Metric | Value |
 |--------|-------|
-| Queries per second | <QPS> |
-| Queries lost | <LOST> |
-| Average latency (s) | <LATENCY> |
+| Queries per second | not measured by this job yet |
+| Queries lost | not measured by this job yet |
+| Average latency (s) | not measured by this job yet |
 
-## Component benchmarks (median per iteration)
+Reference: **43,288 QPS** with four worker threads, from the XDP stress job's
+userspace-only run recorded in `docs/superpowers/specs/2026-10-29-userspace-perf-design.md`.
+The first `Performance` job on this PR replaces the table above with its own
+number; if it is not the same order of magnitude, the job is measuring something
+other than the transport (check the `RUST_LOG=warn` suppression and the warm-up).
+
+## Component benchmarks (median per iteration, measured locally)
 
 | Benchmark | threads=1 | threads=4 |
 |-----------|-----------|-----------|
@@ -773,7 +810,7 @@ cargo bench -p doggy-dns-core --bench handler_bench -- --save-baseline base
 - [ ] **Step 5: Commit**
 
 ```bash
-git add .github/workflows/rust.yml docs/benchmarks/userspace-baseline.md
+git add .github/workflows/rust.yml .gitignore docs/benchmarks/userspace-baseline.md
 git commit -m "$(cat <<'EOF'
 feat(ci): measure the userspace path end to end on every PR
 
