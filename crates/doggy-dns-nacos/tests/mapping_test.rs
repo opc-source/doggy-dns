@@ -1,7 +1,7 @@
 #![allow(clippy::disallowed_methods)]
 
 use doggy_dns_nacos::mapping::{service_key_from_name, to_dns_records};
-use doggy_dns_nacos::watcher::ServiceKey;
+use doggy_dns_nacos::watcher::{CachedInstance, ServiceKey};
 use hickory_proto::rr::{LowerName, Name, RecordType};
 use std::str::FromStr;
 
@@ -76,11 +76,25 @@ fn service_key_rejects_a_label_carrying_the_separator() {
     assert!(service_key_from_name(&LowerName::from(forged), &zone()).is_none());
 }
 
+fn instances(ips: &[&str]) -> Vec<CachedInstance> {
+    ips.iter()
+        .map(|ip| CachedInstance {
+            ip: ip.parse().unwrap(),
+            port: 8080,
+            healthy: true,
+        })
+        .collect()
+}
+
 #[test]
 fn to_dns_records_creates_a_records() {
-    let ips = vec!["10.0.1.5".to_string(), "10.0.1.6".to_string()];
     let name = Name::from_str("user-service.DEFAULT_GROUP.public.nacos.local.").unwrap();
-    let records = to_dns_records(&name, &ips, 6, RecordType::A);
+    let records = to_dns_records(
+        &name,
+        &instances(&["10.0.1.5", "10.0.1.6"]),
+        6,
+        RecordType::A,
+    );
 
     assert_eq!(records.len(), 2);
     for record in &records {
@@ -91,9 +105,8 @@ fn to_dns_records_creates_a_records() {
 
 #[test]
 fn to_dns_records_handles_ipv6() {
-    let ips = vec!["::1".to_string()];
     let name = Name::from_str("svc.DEFAULT_GROUP.public.nacos.local.").unwrap();
-    let records = to_dns_records(&name, &ips, 6, RecordType::AAAA);
+    let records = to_dns_records(&name, &instances(&["::1"]), 6, RecordType::AAAA);
 
     assert_eq!(records.len(), 1);
     assert_eq!(records[0].record_type(), RecordType::AAAA);
@@ -101,9 +114,13 @@ fn to_dns_records_handles_ipv6() {
 
 #[test]
 fn to_dns_records_filters_a_records_for_a_query() {
-    let ips = vec!["10.0.1.5".to_string(), "2001:db8::1".to_string()];
     let name = Name::from_str("svc.DEFAULT_GROUP.public.nacos.local.").unwrap();
-    let records = to_dns_records(&name, &ips, 6, RecordType::A);
+    let records = to_dns_records(
+        &name,
+        &instances(&["10.0.1.5", "2001:db8::1"]),
+        6,
+        RecordType::A,
+    );
 
     assert_eq!(records.len(), 1);
     assert_eq!(records[0].record_type(), RecordType::A);
@@ -111,19 +128,33 @@ fn to_dns_records_filters_a_records_for_a_query() {
 
 #[test]
 fn to_dns_records_filters_aaaa_records_for_aaaa_query() {
-    let ips = vec!["10.0.1.5".to_string(), "2001:db8::1".to_string()];
     let name = Name::from_str("svc.DEFAULT_GROUP.public.nacos.local.").unwrap();
-    let records = to_dns_records(&name, &ips, 6, RecordType::AAAA);
+    let records = to_dns_records(
+        &name,
+        &instances(&["10.0.1.5", "2001:db8::1"]),
+        6,
+        RecordType::AAAA,
+    );
 
     assert_eq!(records.len(), 1);
     assert_eq!(records[0].record_type(), RecordType::AAAA);
 }
 
+/// Answer order is the cache order; the record move in the next task depends on
+/// it, so pin it down before anything can reorder.
 #[test]
-fn to_dns_records_skips_invalid_ips() {
-    let ips = vec!["not-an-ip".to_string(), "10.0.1.1".to_string()];
+fn to_dns_records_preserves_instance_order() {
     let name = Name::from_str("svc.DEFAULT_GROUP.public.nacos.local.").unwrap();
-    let records = to_dns_records(&name, &ips, 6, RecordType::A);
+    let records = to_dns_records(
+        &name,
+        &instances(&["10.0.1.5", "10.0.1.6", "10.0.1.7"]),
+        6,
+        RecordType::A,
+    );
 
-    assert_eq!(records.len(), 1);
+    let addresses: Vec<String> = records
+        .iter()
+        .map(|record| record.data.to_string())
+        .collect();
+    assert_eq!(addresses, ["10.0.1.5", "10.0.1.6", "10.0.1.7"]);
 }

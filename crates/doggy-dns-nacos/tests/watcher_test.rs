@@ -4,6 +4,7 @@ use dashmap::DashMap;
 use doggy_dns_nacos::watcher::{CachedInstance, InstanceChangeListener, ServiceKey};
 use nacos_sdk::api::naming::{NamingChangeEvent, NamingEventListener, ServiceInstance};
 use std::collections::HashMap;
+use std::net::IpAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicI64, Ordering};
 
@@ -84,7 +85,7 @@ fn listener_filters_disabled_instances() {
     let key = ServiceKey::new("svc-a", "default_group", "public");
     let cached = cache.get(&key).unwrap();
     assert_eq!(cached.value().len(), 1);
-    assert_eq!(cached.value()[0].ip, "10.0.0.1");
+    assert_eq!(cached.value()[0].ip, IpAddr::from([10, 0, 0, 1]));
 }
 
 #[test]
@@ -128,16 +129,49 @@ fn listener_replaces_entire_vec_on_update() {
         ]),
     );
     assert_eq!(cache.get(&key).unwrap().value().len(), 3);
-    assert_eq!(cache.get(&key).unwrap().value()[0].ip, "10.0.0.2");
+    assert_eq!(
+        cache.get(&key).unwrap().value()[0].ip,
+        IpAddr::from([10, 0, 0, 2])
+    );
 }
 
 #[test]
-fn cached_instance_from_service_instance() {
+fn cached_instance_parses_the_address_once() {
     let si = make_service_instance("192.168.1.100", 9090, true, true);
-    let cached = CachedInstance::from(&si);
-    assert_eq!(cached.ip, "192.168.1.100");
+    let cached = CachedInstance::from_service_instance(&si).expect("valid IPv4");
+    assert_eq!(cached.ip, IpAddr::from([192, 168, 1, 100]));
     assert_eq!(cached.port, 9090);
     assert!(cached.healthy);
+}
+
+#[test]
+fn cached_instance_rejects_a_non_address() {
+    let si = make_service_instance("not-an-ip", 9090, true, true);
+    assert!(
+        CachedInstance::from_service_instance(&si).is_none(),
+        "an unparsable address must not reach the cache"
+    );
+}
+
+#[test]
+fn listener_drops_only_the_bad_address() {
+    let (listener, cache) = make_listener("default_group", "public");
+
+    let mut broken = make_service_instance("garbage", 8080, true, true);
+    broken.metadata = HashMap::new();
+    fire_event(
+        &listener,
+        "svc-partial",
+        Some(vec![
+            make_service_instance("10.0.0.1", 8080, true, true),
+            broken,
+        ]),
+    );
+
+    let key = ServiceKey::new("svc-partial", "default_group", "public");
+    let cached = cache.get(&key).expect("one valid instance is enough");
+    assert_eq!(cached.value().len(), 1);
+    assert_eq!(cached.value()[0].ip, IpAddr::from([10, 0, 0, 1]));
 }
 
 #[test]

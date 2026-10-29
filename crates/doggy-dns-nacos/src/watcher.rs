@@ -4,6 +4,8 @@ use nacos_sdk::api::naming::{
     NamingChangeEvent, NamingEventListener, NamingService, NamingServiceBuilder, ServiceInstance,
 };
 use nacos_sdk::api::props::ClientProps;
+use std::net::IpAddr;
+use std::str::FromStr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicI64, Ordering};
 
@@ -48,17 +50,28 @@ fn parts_are_separable(parts: [&str; 3]) -> bool {
 /// Simplified service instance for DNS resolution.
 #[derive(Debug, Clone)]
 pub struct CachedInstance {
-    pub ip: String,
+    pub ip: IpAddr,
     pub port: i32,
     pub healthy: bool,
 }
 
-impl From<&ServiceInstance> for CachedInstance {
-    fn from(instance: &ServiceInstance) -> Self {
-        Self {
-            ip: instance.ip.clone(),
-            port: instance.port,
-            healthy: instance.healthy,
+impl CachedInstance {
+    /// Build a cache entry, rejecting an instance whose address is not an IP.
+    ///
+    /// Parsed once per push instead of once per query. An unparsable address is
+    /// dropped here rather than skipped while answering, so the warn log keeps
+    /// its level and text but no longer repeats for every query.
+    pub fn from_service_instance(instance: &ServiceInstance) -> Option<Self> {
+        match IpAddr::from_str(&instance.ip) {
+            Ok(ip) => Some(Self {
+                ip,
+                port: instance.port,
+                healthy: instance.healthy,
+            }),
+            Err(e) => {
+                tracing::warn!("skipping invalid IP '{}': {}", instance.ip, e);
+                None
+            }
         }
     }
 }
@@ -98,7 +111,7 @@ impl NamingEventListener for InstanceChangeListener {
                 let cached: Vec<CachedInstance> = instances
                     .iter()
                     .filter(|i| i.healthy && i.enabled)
-                    .map(CachedInstance::from)
+                    .filter_map(CachedInstance::from_service_instance)
                     .collect();
                 // Immutable replacement: insert replaces the entire value
                 self.cache.insert(key, cached);

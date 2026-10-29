@@ -17,12 +17,12 @@ fn make_test_cache() -> Arc<DashMap<ServiceKey, Vec<CachedInstance>>> {
         ServiceKey::new("user-service", "default_group", "public"),
         vec![
             CachedInstance {
-                ip: "10.0.1.5".to_string(),
+                ip: "10.0.1.5".parse().unwrap(),
                 port: 8080,
                 healthy: true,
             },
             CachedInstance {
-                ip: "10.0.1.6".to_string(),
+                ip: "10.0.1.6".parse().unwrap(),
                 port: 8080,
                 healthy: true,
             },
@@ -58,7 +58,7 @@ async fn resolves_dotted_service_name() {
     cache.insert(
         ServiceKey::new("com.example.api", "default_group", "public"),
         vec![CachedInstance {
-            ip: "10.0.2.7".to_string(),
+            ip: "10.0.2.7".parse().unwrap(),
             port: 8080,
             healthy: true,
         }],
@@ -190,12 +190,12 @@ async fn a_query_returns_only_a_records() {
         ServiceKey::new("user-service", "default_group", "public"),
         vec![
             CachedInstance {
-                ip: "10.0.1.5".to_string(),
+                ip: "10.0.1.5".parse().unwrap(),
                 port: 8080,
                 healthy: true,
             },
             CachedInstance {
-                ip: "2001:db8::1".to_string(),
+                ip: "2001:db8::1".parse().unwrap(),
                 port: 8080,
                 healthy: true,
             },
@@ -226,12 +226,12 @@ async fn aaaa_query_returns_only_aaaa_records() {
         ServiceKey::new("user-service", "default_group", "public"),
         vec![
             CachedInstance {
-                ip: "10.0.1.5".to_string(),
+                ip: "10.0.1.5".parse().unwrap(),
                 port: 8080,
                 healthy: true,
             },
             CachedInstance {
-                ip: "2001:db8::1".to_string(),
+                ip: "2001:db8::1".parse().unwrap(),
                 port: 8080,
                 healthy: true,
             },

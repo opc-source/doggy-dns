@@ -104,13 +104,15 @@ impl ZoneHandler for NacosAuthority {
             }
         };
 
-        let instances = match self.cache.get(&key) {
-            Some(entry) => entry.value().clone(),
-            None => {
-                return LookupControlFlow::Continue(Err(LookupError::ResponseCode(
-                    ResponseCode::NXDomain,
-                )));
-            }
+        // Read through the guard instead of cloning the whole Vec: an answer
+        // needs only borrowed instances now. Nothing below may await while
+        // `entry` is alive, or a slow shard holder could stall a push writing
+        // the same shard - clippy's await_holding_lock does not know about
+        // DashMap, so the alloc guard and the async tests are the tripwire.
+        let Some(entry) = self.cache.get(&key) else {
+            return LookupControlFlow::Continue(Err(LookupError::ResponseCode(
+                ResponseCode::NXDomain,
+            )));
         };
 
         // The service exists, but we only serve address records.
@@ -118,9 +120,10 @@ impl ZoneHandler for NacosAuthority {
             return LookupControlFlow::Continue(Err(LookupError::NameExists));
         }
 
-        let query_name = Name::from(name.clone());
-        let ips: Vec<String> = instances.iter().map(|i| i.ip.clone()).collect();
-        let records = to_dns_records(&query_name, &ips, self.ttl, rtype);
+        // Answers carry an owned name, which only this path pays for. K records
+        // cost K Name clones; that is the floor a Vec<Record> gives us.
+        let answer_name = Name::from(name.clone());
+        let records = to_dns_records(&answer_name, entry.value(), self.ttl, rtype);
 
         if records.is_empty() {
             // Service exists, but has no address of the requested family.

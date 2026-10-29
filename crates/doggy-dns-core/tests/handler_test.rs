@@ -268,7 +268,7 @@ fn make_nacos_authority_with_ips(ips: &[&str]) -> NacosAuthority {
         ServiceKey::new("my-svc", "default_group", "public"),
         ips.iter()
             .map(|ip| CachedInstance {
-                ip: (*ip).to_string(),
+                ip: ip.parse().unwrap(),
                 port: 8080,
                 healthy: true,
             })

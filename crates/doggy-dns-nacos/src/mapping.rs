@@ -1,9 +1,8 @@
-use crate::watcher::{KEY_SEPARATOR, ServiceKey};
+use crate::watcher::{CachedInstance, KEY_SEPARATOR, ServiceKey};
 use hickory_proto::rr::rdata::{A, AAAA};
 use hickory_proto::rr::{LowerName, Name, RData, Record, RecordType};
 use std::borrow::Cow;
 use std::net::IpAddr;
-use std::str::FromStr;
 
 /// Build the cache key for a `<service>.<group>.<namespace>.<zone>` name.
 ///
@@ -59,27 +58,30 @@ fn label_text(label: &[u8]) -> Option<&str> {
     std::str::from_utf8(label).ok()
 }
 
-/// Convert a list of IP strings to DNS records matching `rtype`.
+/// Convert a service's instances to DNS records matching `rtype`.
 ///
 /// Only records of the requested family are produced, so an `A` query never
-/// returns `AAAA` records (and vice versa). Invalid IPs are skipped with a
-/// warning log.
-pub fn to_dns_records(name: &Name, ips: &[String], ttl: u32, rtype: RecordType) -> Vec<Record> {
-    ips.iter()
-        .filter_map(|ip_str| match (IpAddr::from_str(ip_str), rtype) {
-            (Ok(IpAddr::V4(ipv4)), RecordType::A) => {
+/// returns `AAAA` records (and vice versa). The addresses are already parsed -
+/// `CachedInstance` holds an `IpAddr` - so this no longer runs
+/// `IpAddr::from_str` over every instance for every query.
+pub fn to_dns_records(
+    name: &Name,
+    instances: &[CachedInstance],
+    ttl: u32,
+    rtype: RecordType,
+) -> Vec<Record> {
+    instances
+        .iter()
+        .filter_map(|instance| match (instance.ip, rtype) {
+            (IpAddr::V4(ipv4), RecordType::A) => {
                 Some(Record::from_rdata(name.clone(), ttl, RData::A(A(ipv4))))
             }
-            (Ok(IpAddr::V6(ipv6)), RecordType::AAAA) => Some(Record::from_rdata(
+            (IpAddr::V6(ipv6), RecordType::AAAA) => Some(Record::from_rdata(
                 name.clone(),
                 ttl,
                 RData::AAAA(AAAA(ipv6)),
             )),
-            (Ok(_), _) => None,
-            (Err(e), _) => {
-                tracing::warn!("skipping invalid IP '{}': {}", ip_str, e);
-                None
-            }
+            _ => None,
         })
         .collect()
 }

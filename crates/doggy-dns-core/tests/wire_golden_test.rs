@@ -76,7 +76,7 @@ fn nacos_handler() -> (DoggyDnsHandler, ByteCapturingHandler) {
     cache.insert(
         ServiceKey::new("my-svc", "default_group", "public"),
         vec![CachedInstance {
-            ip: "10.0.0.1".to_string(),
+            ip: "10.0.0.1".parse().unwrap(),
             port: 8080,
             healthy: true,
         }],

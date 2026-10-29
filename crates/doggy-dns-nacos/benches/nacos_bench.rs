@@ -8,6 +8,7 @@ use doggy_dns_nacos::watcher::{CachedInstance, ServiceKey};
 use hickory_proto::rr::{LowerName, Name, RecordType};
 use hickory_server::zone_handler::{LookupOptions, ZoneHandler};
 use std::hint::black_box;
+use std::net::{IpAddr, Ipv4Addr};
 use std::str::FromStr;
 use std::sync::Arc;
 
@@ -16,7 +17,7 @@ fn make_populated_cache(count: usize) -> Arc<DashMap<ServiceKey, Vec<CachedInsta
     for i in 0..count {
         let key = ServiceKey::new(&format!("service-{}", i), "default_group", "public");
         let instances = vec![CachedInstance {
-            ip: format!("10.0.{}.{}", i / 256, i % 256),
+            ip: IpAddr::V4(Ipv4Addr::new(10, 0, (i / 256) as u8, (i % 256) as u8)),
             port: 8080,
             healthy: true,
         }];
@@ -106,9 +107,15 @@ fn bench_service_key_dotted_service(c: &mut Criterion) {
 
 fn bench_to_dns_records_10_ips(c: &mut Criterion) {
     let name = Name::from_str("my-svc.nacos.local.").unwrap();
-    let ips: Vec<String> = (0..10).map(|i| format!("10.0.0.{}", i)).collect();
+    let instances: Vec<CachedInstance> = (0..10)
+        .map(|i| CachedInstance {
+            ip: IpAddr::V4(Ipv4Addr::new(10, 0, 0, i)),
+            port: 8080,
+            healthy: true,
+        })
+        .collect();
     c.bench_function("to_dns_records_10_ips", |b| {
-        b.iter(|| black_box(to_dns_records(&name, &ips, 60, RecordType::A)));
+        b.iter(|| black_box(to_dns_records(&name, &instances, 60, RecordType::A)));
     });
 }
 

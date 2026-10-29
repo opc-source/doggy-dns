@@ -135,7 +135,7 @@ async fn single_handler_hit_returns_continue() {
     cache.insert(
         ServiceKey::new("my-svc", "default_group", "public"),
         vec![CachedInstance {
-            ip: "10.0.0.1".to_string(),
+            ip: "10.0.0.1".parse().unwrap(),
             port: 8080,
             healthy: true,
         }],
@@ -186,7 +186,7 @@ async fn first_skips_second_resolves() {
     populated_cache.insert(
         ServiceKey::new("web", "default_group", "public"),
         vec![CachedInstance {
-            ip: "192.168.1.1".to_string(),
+            ip: "192.168.1.1".parse().unwrap(),
             port: 80,
             healthy: true,
         }],
