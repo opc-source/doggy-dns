@@ -459,11 +459,11 @@ fn serialize_for_xdp(
 /// `Vec`, so handing it over is a free transfer of records that used to be
 /// rebuilt by `iter().cloned()`: one `Vec` allocation plus a `Name` clone per
 /// record, and that clone allocates as soon as the name outgrows `Name`'s
-/// inline buffer. `forward` and `native`
-/// return `AuthLookup::Resolved`, whose records live behind an `Arc`, so those
-/// keep the clone path. Order is preserved: `Section` iterates forward, the
-/// same direction the clone walked, and `AuthLookup::iter` already ignored
-/// `additionals`, so the `..` binding drops nothing the response carried.
+/// inline buffer. `forward` and `native` return `AuthLookup::Resolved`, whose
+/// records live behind an `Arc`, so those keep the clone path. Order is
+/// preserved: `Section` iterates forward, the same direction the clone walked,
+/// and `AuthLookup::iter` already ignored `additionals`, so the `..` binding
+/// drops nothing the response carried.
 fn take_answer_records(lookup: AuthLookup) -> Vec<Record> {
     match lookup {
         AuthLookup::Records {
