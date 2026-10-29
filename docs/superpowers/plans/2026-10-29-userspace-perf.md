@@ -541,10 +541,15 @@ criterion_group!(
 
 ```bash
 cargo bench -p doggy-dns-core --bench handler_bench -- \
-  handler_pipeline_nacos_nxdomain --sample-size 20 --measurement-time 2 --warm-up-time 1
+  nxdomain --sample-size 20 --measurement-time 2 --warm-up-time 1
 ```
 
-Expected: `change:`-free criterion output for `handler_pipeline_nacos_nxdomain/threads/{1,2,3,4}`, and the median must be **strictly greater** than `handler_pipeline_nxdomain`'s (the empty-chain case skips `apex_soa` entirely). If they are equal, the bench is not reaching the negative branch — stop and check that the request name is inside `nacos.local` and carries all three labels. Write the four medians into the PR description; Task 4 reports them, Task 6/7 improve them.
+The filter is `nxdomain`, not a full bench id: criterion matches a substring of the full id, and
+neither `handler_pipeline_nxdomain` nor `handler_pipeline_nacos_nxdomain` is a substring of the
+other. `nxdomain` selects both, so the comparison below runs in one session under identical
+machine conditions.
+
+Expected: `change:`-free criterion output for `handler_pipeline_nacos_nxdomain/threads/{1,2,3,4}` **and** `handler_pipeline_nxdomain/threads/{1,2,3,4}`, and the new medians must be **strictly greater** than `handler_pipeline_nxdomain`'s (the empty-chain case skips `apex_soa` entirely). If they are equal, the bench is not reaching the negative branch — stop and check that the request name is inside `nacos.local` and carries all three labels. Record the four medians per bench id (the PR description carries them; Task 4 reports them, Task 6/7 improve them).
 
 - [ ] **Step 4: Verify and commit**
 
