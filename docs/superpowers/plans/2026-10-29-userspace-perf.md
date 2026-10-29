@@ -852,11 +852,34 @@ Placement matters: `[workspace.dependencies]` is a table, and a new `[profile.re
 ```toml
 # Release and bench both inherit this. `panic = "abort"` stays out: the test
 # suite and the criterion benches need unwinding to isolate a failing case.
+# `strip` takes debuginfo, not symbols: the OTLP profile signal resolves frame
+# names from the executable's own symbol table at runtime
+# (crates/doggy-dns-observability/src/profiles/mod.rs, symbol.name()/sys_name()),
+# and Rust keeps its functions in .symtab rather than .dynsym, so
+# `strip = "symbols"` would ship flame graphs full of addresses.
 [profile.release]
 lto = "fat"
 codegen-units = 1
-strip = "symbols"
+strip = "debuginfo"
 ```
+
+**Deviation from the spec, decided here:** the spec's Workstream 3 block writes `strip = "symbols"`. That silently breaks a shipped feature — the profiling signal symbolizes in-process from `.symtab` — for an ~11 MB size win that buys no throughput. `strip = "debuginfo"` keeps every symbol a runtime reader can ask for and still drops debug sections. If the maintainer wants the smaller binary instead, that is their call to make with the profile-signal cost named, not this plan's to take quietly.
+
+- [ ] **Step 1b: Prove the strip choice kept the profile signal's symbols**
+
+After the first `cargo build --release` of Step 2, check the shipped executable still carries the
+function symbols the profiling thread resolves at runtime:
+
+```bash
+nm -a target/release/doggy-dns | grep -c ' t \| T ' 
+otool -l target/release/doggy-dns | grep -c LC_SYMTAB
+ls -l target/release/doggy-dns
+```
+
+Expected: a non-zero function-symbol count and one `LC_SYMTAB` (Linux equivalent: `readelf -S
+target/release/doggy-dns | grep -c '\.symtab'`). Record the size next to the `strip = "symbols"`
+size from the report so the maintainer can see the exact price of the choice. If the symbol count
+is zero, the profile signal is shipping blind and the setting is wrong.
 
 - [ ] **Step 2: Measure the shift and the build-time cost**
 
