@@ -1,4 +1,4 @@
-use crate::mapping::{is_in_zone, parse_dns_name, to_dns_records};
+use crate::mapping::{service_key_from_name, to_dns_records};
 use crate::watcher::{CachedInstance, ServiceKey};
 use async_trait::async_trait;
 use dashmap::DashMap;
@@ -14,7 +14,6 @@ use std::sync::Arc;
 
 pub struct NacosAuthority {
     cache: Arc<DashMap<ServiceKey, Vec<CachedInstance>>>,
-    dns_zone: String,
     ttl: u32,
     origin: LowerName,
     /// Apex SOA, built once. Every in-zone negative answer attaches it, and
@@ -34,7 +33,6 @@ impl NacosAuthority {
         let apex_soa = build_soa_record(&zone, ttl);
         Self {
             cache,
-            dns_zone: dns_zone.to_string(),
             ttl,
             origin,
             apex_soa,
@@ -51,12 +49,6 @@ fn build_soa_record(zone: &Name, ttl: u32) -> Record {
     let admin = Name::from_ascii(format!("hostmaster.{zone}")).unwrap_or_default();
     let soa = SOA::new(zone.clone(), admin, 1, 3600, 600, 86400, ttl);
     Record::from_rdata(zone.clone(), ttl, RData::SOA(soa))
-}
-
-fn is_zone_apex(name: &Name, zone_suffix: &str) -> bool {
-    name.to_ascii()
-        .trim_end_matches('.')
-        .eq_ignore_ascii_case(zone_suffix.trim_end_matches('.'))
 }
 
 #[async_trait]
@@ -80,16 +72,18 @@ impl ZoneHandler for NacosAuthority {
         _request_info: Option<&RequestInfo<'_>>,
         _lookup_options: LookupOptions,
     ) -> LookupControlFlow<AuthLookup> {
-        let query_name = Name::from(name.clone());
-
-        // Names outside our zone belong to another authority.
-        if !is_in_zone(&query_name, &self.dns_zone) {
+        // Zone membership on labels: `zone_of` compares label bytes from the
+        // right and allocates nothing, where the old string test built two
+        // lowercased Strings plus a `format!(".{zone}")` - and ran twice per
+        // lookup, here and inside the name parser.
+        if !self.origin.zone_of(name) {
             return LookupControlFlow::Skip;
         }
 
         // Inside the zone we are authoritative: never fall through to
         // native/forward, or internal names could leak to an upstream resolver.
-        if is_zone_apex(&query_name, &self.dns_zone) {
+        // Equal label count plus `zone_of` is name equality.
+        if name.iter().count() == self.origin.iter().count() {
             return if rtype == RecordType::SOA {
                 LookupControlFlow::Continue(Ok(AuthLookup::answers(
                     LookupRecords::Section(vec![self.apex_soa.clone()]),
@@ -101,21 +95,14 @@ impl ZoneHandler for NacosAuthority {
             };
         }
 
-        let parts = match parse_dns_name(&query_name, &self.dns_zone) {
-            Some(parts) => parts,
+        let key = match service_key_from_name(name, &self.origin) {
+            Some(key) => key,
             None => {
                 return LookupControlFlow::Continue(Err(LookupError::ResponseCode(
                     ResponseCode::NXDomain,
                 )));
             }
         };
-
-        // Normalize to lowercase for case-insensitive DNS matching
-        let key = ServiceKey::new(
-            &parts.service_name.to_lowercase(),
-            &parts.group.to_lowercase(),
-            &parts.namespace.to_lowercase(),
-        );
 
         let instances = match self.cache.get(&key) {
             Some(entry) => entry.value().clone(),
@@ -131,6 +118,7 @@ impl ZoneHandler for NacosAuthority {
             return LookupControlFlow::Continue(Err(LookupError::NameExists));
         }
 
+        let query_name = Name::from(name.clone());
         let ips: Vec<String> = instances.iter().map(|i| i.ip.clone()).collect();
         let records = to_dns_records(&query_name, &ips, self.ttl, rtype);
 

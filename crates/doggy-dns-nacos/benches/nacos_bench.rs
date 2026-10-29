@@ -3,7 +3,7 @@
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use dashmap::DashMap;
 use doggy_dns_nacos::authority::NacosAuthority;
-use doggy_dns_nacos::mapping::{parse_dns_name, to_dns_records};
+use doggy_dns_nacos::mapping::{service_key_from_name, to_dns_records};
 use doggy_dns_nacos::watcher::{CachedInstance, ServiceKey};
 use hickory_proto::rr::{LowerName, Name, RecordType};
 use hickory_server::zone_handler::{LookupOptions, ZoneHandler};
@@ -77,17 +77,30 @@ fn bench_nacos_authority_lookup_miss(c: &mut Criterion) {
     group.finish();
 }
 
-fn bench_parse_dns_name_hit(c: &mut Criterion) {
-    let name = Name::from_str("my-svc.DEFAULT_GROUP.public.nacos.local.").unwrap();
-    c.bench_function("parse_dns_name_hit", |b| {
-        b.iter(|| black_box(parse_dns_name(&name, "nacos.local")));
+fn bench_service_key_from_name_hit(c: &mut Criterion) {
+    let zone = Name::from_str("nacos.local").unwrap();
+    let name = LowerName::from(Name::from_str("my-svc.DEFAULT_GROUP.public.nacos.local.").unwrap());
+    c.bench_function("service_key_from_name_hit", |b| {
+        b.iter(|| black_box(service_key_from_name(&name, &zone)));
     });
 }
 
-fn bench_parse_dns_name_miss(c: &mut Criterion) {
-    let name = Name::from_str("my-svc.DEFAULT_GROUP.public.other.zone.").unwrap();
-    c.bench_function("parse_dns_name_miss", |b| {
-        b.iter(|| black_box(parse_dns_name(&name, "nacos.local")));
+fn bench_service_key_from_name_miss(c: &mut Criterion) {
+    let zone = Name::from_str("nacos.local").unwrap();
+    // Two labels above the zone: too few to carry group and namespace.
+    let name = LowerName::from(Name::from_str("my-svc.group.nacos.local.").unwrap());
+    c.bench_function("service_key_from_name_miss", |b| {
+        b.iter(|| black_box(service_key_from_name(&name, &zone)));
+    });
+}
+
+fn bench_service_key_dotted_service(c: &mut Criterion) {
+    let zone = Name::from_str("nacos.local").unwrap();
+    let name = LowerName::from(
+        Name::from_str("com.example.api.DEFAULT_GROUP.public.nacos.local.").unwrap(),
+    );
+    c.bench_function("service_key_dotted_service", |b| {
+        b.iter(|| black_box(service_key_from_name(&name, &zone)));
     });
 }
 
@@ -103,8 +116,9 @@ criterion_group!(
     benches,
     bench_nacos_authority_lookup_hit,
     bench_nacos_authority_lookup_miss,
-    bench_parse_dns_name_hit,
-    bench_parse_dns_name_miss,
+    bench_service_key_from_name_hit,
+    bench_service_key_from_name_miss,
+    bench_service_key_dotted_service,
     bench_to_dns_records_10_ips,
 );
 criterion_main!(benches);

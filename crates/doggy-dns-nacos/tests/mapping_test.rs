@@ -1,51 +1,79 @@
 #![allow(clippy::disallowed_methods)]
 
-use doggy_dns_nacos::mapping::{parse_dns_name, to_dns_records};
-use hickory_proto::rr::{Name, RecordType};
+use doggy_dns_nacos::mapping::{service_key_from_name, to_dns_records};
+use doggy_dns_nacos::watcher::ServiceKey;
+use hickory_proto::rr::{LowerName, Name, RecordType};
 use std::str::FromStr;
 
-#[test]
-fn parse_valid_dns_name() {
-    let name = Name::from_str("user-service.DEFAULT_GROUP.public.nacos.local.").unwrap();
-    let result = parse_dns_name(&name, "nacos.local");
-    assert!(result.is_some());
-    let parts = result.unwrap();
-    assert_eq!(parts.service_name, "user-service");
-    assert_eq!(parts.group, "DEFAULT_GROUP");
-    assert_eq!(parts.namespace, "public");
+fn zone() -> Name {
+    Name::from_str("nacos.local").unwrap()
+}
+
+fn lower(name: &str) -> LowerName {
+    LowerName::from(Name::from_str(name).unwrap())
 }
 
 #[test]
-fn parse_invalid_dns_name_wrong_zone() {
-    let name = Name::from_str("user-service.DEFAULT_GROUP.public.other.local.").unwrap();
-    let result = parse_dns_name(&name, "nacos.local");
-    assert!(result.is_none());
+fn service_key_from_valid_dns_name() {
+    let key = service_key_from_name(
+        &lower("user-service.DEFAULT_GROUP.public.nacos.local."),
+        &zone(),
+    )
+    .expect("three labels above the zone");
+    assert_eq!(
+        key,
+        ServiceKey::new("user-service", "default_group", "public")
+    );
 }
 
 #[test]
-fn parse_invalid_dns_name_too_few_labels() {
-    let name = Name::from_str("user-service.nacos.local.").unwrap();
-    let result = parse_dns_name(&name, "nacos.local");
-    assert!(result.is_none());
+fn service_key_from_dotted_service_name() {
+    let key = service_key_from_name(
+        &lower("com.example.api.DEFAULT_GROUP.public.nacos.local."),
+        &zone(),
+    )
+    .expect("dots inside the service name are not boundaries");
+    assert_eq!(
+        key,
+        ServiceKey::new("com.example.api", "default_group", "public")
+    );
 }
 
 #[test]
-fn parse_zone_match_is_label_aligned() {
-    let name = Name::from_str("user-service.DEFAULT_GROUP.public.evilnacos.local.").unwrap();
-    assert!(parse_dns_name(&name, "nacos.local").is_none());
-
-    let apex_like = Name::from_str("evilnacos.local.").unwrap();
-    assert!(parse_dns_name(&apex_like, "nacos.local").is_none());
+fn service_key_needs_three_labels_above_the_zone() {
+    assert!(service_key_from_name(&lower("user-service.nacos.local."), &zone()).is_none());
+    assert!(service_key_from_name(&lower("a.b.nacos.local."), &zone()).is_none());
 }
 
 #[test]
-fn parse_service_name_with_dots() {
-    let name = Name::from_str("com.example.api.DEFAULT_GROUP.public.nacos.local.").unwrap();
-    let parts = parse_dns_name(&name, "nacos.local").expect("dotted service name should parse");
+fn service_key_does_not_check_zone_membership() {
+    // Membership is the caller's job. This name is a *sibling* of the zone, yet
+    // the key builder only counts labels from the right, so it happily produces
+    // the same key a legitimate in-zone name would. That aliasing is exactly why
+    // `NacosAuthority::lookup` must call `zone_of` first; `skips_sibling_zone_
+    // with_shared_suffix` in `authority_test.rs` is the guard for that order.
+    let sibling = lower("user-service.default_group.public.evilnacos.local.");
+    assert_eq!(
+        service_key_from_name(&sibling, &zone()),
+        Some(ServiceKey::new("user-service", "default_group", "public"))
+    );
+}
 
-    assert_eq!(parts.service_name, "com.example.api");
-    assert_eq!(parts.group, "DEFAULT_GROUP");
-    assert_eq!(parts.namespace, "public");
+#[test]
+fn service_key_rejects_a_label_carrying_the_separator() {
+    // A 0x01 byte inside a label would otherwise forge a field boundary. The
+    // label must be supplied as raw bytes: `&str` labels go through IDNA/UTS46
+    // validation, which rejects or rewrites a control byte, so this is the only
+    // way to get 0x01 onto a name in a test.
+    let forged = Name::from_labels([
+        b"a\x01b".as_slice(),
+        b"default_group".as_slice(),
+        b"public".as_slice(),
+        b"nacos".as_slice(),
+        b"local".as_slice(),
+    ])
+    .expect("raw labels are only length-checked (1..=63 bytes)");
+    assert!(service_key_from_name(&LowerName::from(forged), &zone()).is_none());
 }
 
 #[test]
