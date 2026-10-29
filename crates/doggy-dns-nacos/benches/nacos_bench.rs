@@ -14,11 +14,7 @@ use std::sync::Arc;
 fn make_populated_cache(count: usize) -> Arc<DashMap<ServiceKey, Vec<CachedInstance>>> {
     let cache = Arc::new(DashMap::new());
     for i in 0..count {
-        let key = ServiceKey {
-            service_name: format!("service-{}", i),
-            group: "default_group".to_string(),
-            namespace: "public".to_string(),
-        };
+        let key = ServiceKey::new(&format!("service-{}", i), "default_group", "public");
         let instances = vec![CachedInstance {
             ip: format!("10.0.{}.{}", i / 256, i % 256),
             port: 8080,

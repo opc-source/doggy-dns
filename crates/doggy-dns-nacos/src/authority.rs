@@ -111,11 +111,11 @@ impl ZoneHandler for NacosAuthority {
         };
 
         // Normalize to lowercase for case-insensitive DNS matching
-        let key = ServiceKey {
-            service_name: parts.service_name.to_lowercase(),
-            group: parts.group.to_lowercase(),
-            namespace: parts.namespace.to_lowercase(),
-        };
+        let key = ServiceKey::new(
+            &parts.service_name.to_lowercase(),
+            &parts.group.to_lowercase(),
+            &parts.namespace.to_lowercase(),
+        );
 
         let instances = match self.cache.get(&key) {
             Some(entry) => entry.value().clone(),

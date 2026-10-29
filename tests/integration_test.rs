@@ -14,11 +14,7 @@ use std::time::Duration;
 fn setup_nacos_cache() -> Arc<DashMap<ServiceKey, Vec<CachedInstance>>> {
     let cache = Arc::new(DashMap::new());
     cache.insert(
-        ServiceKey {
-            service_name: "web-app".to_string(),
-            group: "default_group".to_string(),
-            namespace: "public".to_string(),
-        },
+        ServiceKey::new("web-app", "default_group", "public"),
         vec![CachedInstance {
             ip: "10.0.0.1".to_string(),
             port: 8080,

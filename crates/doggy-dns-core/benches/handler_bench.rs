@@ -58,11 +58,7 @@ fn make_request(domain: &str) -> Request {
 fn bench_handler_pipeline_nacos_hit(c: &mut Criterion) {
     let cache = Arc::new(DashMap::new());
     cache.insert(
-        ServiceKey {
-            service_name: "my-svc".to_string(),
-            group: "default_group".to_string(),
-            namespace: "public".to_string(),
-        },
+        ServiceKey::new("my-svc", "default_group", "public"),
         vec![CachedInstance {
             ip: "10.0.0.1".to_string(),
             port: 8080,
@@ -108,11 +104,7 @@ fn bench_handler_pipeline_nacos_hit(c: &mut Criterion) {
 fn bench_handler_pipeline_nacos_nxdomain(c: &mut Criterion) {
     let cache = Arc::new(DashMap::new());
     cache.insert(
-        ServiceKey {
-            service_name: "my-svc".to_string(),
-            group: "default_group".to_string(),
-            namespace: "public".to_string(),
-        },
+        ServiceKey::new("my-svc", "default_group", "public"),
         vec![CachedInstance {
             ip: "10.0.0.1".to_string(),
             port: 8080,

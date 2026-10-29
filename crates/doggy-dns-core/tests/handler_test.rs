@@ -265,11 +265,7 @@ fn make_nacos_authority_with_hit() -> NacosAuthority {
 fn make_nacos_authority_with_ips(ips: &[&str]) -> NacosAuthority {
     let cache = Arc::new(DashMap::new());
     cache.insert(
-        ServiceKey {
-            service_name: "my-svc".to_string(),
-            group: "default_group".to_string(),
-            namespace: "public".to_string(),
-        },
+        ServiceKey::new("my-svc", "default_group", "public"),
         ips.iter()
             .map(|ip| CachedInstance {
                 ip: (*ip).to_string(),

@@ -14,11 +14,7 @@ fn make_test_cache() -> Arc<DashMap<ServiceKey, Vec<CachedInstance>>> {
     let cache = Arc::new(DashMap::new());
     // Keys are stored lowercase since DNS names are case-insensitive
     cache.insert(
-        ServiceKey {
-            service_name: "user-service".to_string(),
-            group: "default_group".to_string(),
-            namespace: "public".to_string(),
-        },
+        ServiceKey::new("user-service", "default_group", "public"),
         vec![
             CachedInstance {
                 ip: "10.0.1.5".to_string(),
@@ -60,11 +56,7 @@ async fn resolves_known_service() {
 async fn resolves_dotted_service_name() {
     let cache = Arc::new(DashMap::new());
     cache.insert(
-        ServiceKey {
-            service_name: "com.example.api".to_string(),
-            group: "default_group".to_string(),
-            namespace: "public".to_string(),
-        },
+        ServiceKey::new("com.example.api", "default_group", "public"),
         vec![CachedInstance {
             ip: "10.0.2.7".to_string(),
             port: 8080,
@@ -195,11 +187,7 @@ async fn family_without_records_returns_nodata() {
 async fn a_query_returns_only_a_records() {
     let cache = Arc::new(DashMap::new());
     cache.insert(
-        ServiceKey {
-            service_name: "user-service".to_string(),
-            group: "default_group".to_string(),
-            namespace: "public".to_string(),
-        },
+        ServiceKey::new("user-service", "default_group", "public"),
         vec![
             CachedInstance {
                 ip: "10.0.1.5".to_string(),
@@ -235,11 +223,7 @@ async fn a_query_returns_only_a_records() {
 async fn aaaa_query_returns_only_aaaa_records() {
     let cache = Arc::new(DashMap::new());
     cache.insert(
-        ServiceKey {
-            service_name: "user-service".to_string(),
-            group: "default_group".to_string(),
-            namespace: "public".to_string(),
-        },
+        ServiceKey::new("user-service", "default_group", "public"),
         vec![
             CachedInstance {
                 ip: "10.0.1.5".to_string(),

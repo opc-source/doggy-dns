@@ -32,11 +32,7 @@ fn bench_authority_chain_empty(c: &mut Criterion) {
 fn bench_authority_chain_nacos_hit(c: &mut Criterion) {
     let cache = Arc::new(DashMap::new());
     cache.insert(
-        ServiceKey {
-            service_name: "my-svc".to_string(),
-            group: "default_group".to_string(),
-            namespace: "public".to_string(),
-        },
+        ServiceKey::new("my-svc", "default_group", "public"),
         vec![CachedInstance {
             ip: "10.0.0.1".to_string(),
             port: 8080,

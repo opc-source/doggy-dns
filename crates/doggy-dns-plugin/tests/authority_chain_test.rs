@@ -133,11 +133,7 @@ async fn single_handler_hit_returns_continue() {
 
     let cache = Arc::new(DashMap::new());
     cache.insert(
-        ServiceKey {
-            service_name: "my-svc".to_string(),
-            group: "default_group".to_string(),
-            namespace: "public".to_string(),
-        },
+        ServiceKey::new("my-svc", "default_group", "public"),
         vec![CachedInstance {
             ip: "10.0.0.1".to_string(),
             port: 8080,
@@ -188,11 +184,7 @@ async fn first_skips_second_resolves() {
     // Second handler has data → will resolve
     let populated_cache = Arc::new(DashMap::new());
     populated_cache.insert(
-        ServiceKey {
-            service_name: "web".to_string(),
-            group: "default_group".to_string(),
-            namespace: "public".to_string(),
-        },
+        ServiceKey::new("web", "default_group", "public"),
         vec![CachedInstance {
             ip: "192.168.1.1".to_string(),
             port: 80,
