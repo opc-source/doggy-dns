@@ -840,7 +840,9 @@ EOF
 ### Task 5: `[profile.release]` optimisation budget
 
 **Files:**
-- Modify: `Cargo.toml` (root, after `[workspace.dependencies]`, before the first comment block)
+- Modify: `Cargo.toml` (root — append the block at the END of the file, after the last `[workspace.dependencies]` entry)
+
+Placement matters: `[workspace.dependencies]` is a table, and a new `[profile.release]` header written *inside* it (which is where "before the first comment block" lands, since the dependency entries follow that header) terminates the table. Everything after the inserted header then parses as keys of `[profile.release]`, so the remaining dependency entries are stripped and the workspace fails to resolve. A table must be appended after the previous table's key-values have ended — which, for this file, means the last line of the file.
 
 **Interfaces:**
 - Consumes nothing; produces a faster binary and a different absolute value for every criterion number, which is why it lands alone on top of Task 4's baseline.
@@ -858,16 +860,24 @@ strip = "symbols"
 
 - [ ] **Step 2: Measure the shift and the build-time cost**
 
+Run this step BEFORE committing Step 1: `git stash` can only revert the profile while the
+Cargo.toml edit is still uncommitted. If it prints `No local changes to save`, both baselines were
+measured under the same profile and the comparison is meaningless — say so rather than reporting a
+percentage. Prefer `git stash push -- Cargo.toml` so nothing else can ride along, and paste
+`git status --porcelain` before the stash, after the pop, and `git stash list` after the pop into
+the PR description so the sequence is auditable. A stronger check that the two runs really used
+different profiles: the bench binary hashes in criterion's output differ between them.
+
 ```bash
 time cargo build --release --quiet
 cargo bench -p doggy-dns-core --bench handler_bench -- --save-baseline lto
-git stash
+git stash push -- Cargo.toml
 cargo bench -p doggy-dns-core --bench handler_bench -- --save-baseline before
 git stash pop
 cargo bench -p doggy-dns-core --bench handler_bench -- --baseline before
 ```
 
-Expected: `change:` lines for all three handler cases. Record both the percentage and the wall-clock `cargo build --release` time in the PR description — the spec accepts the build-time cost only as a trade against the win, and the number is what makes that call.
+Expected: `change:` lines for all three handler cases. Record both the percentage and the wall-clock `cargo build --release` time in the PR description — the spec accepts the build-time cost only as a trade against the win, and the number is what makes that call. If a local `sccache`/`RUSTC_WRAPPER` is configured, its cache hits distort wall-clock comparisons between two target dirs; re-measure the pair with `RUSTC_WRAPPER=""` and say which number you are quoting.
 
 - [ ] **Step 3: Confirm the test suite still builds and passes with the profile**
 
