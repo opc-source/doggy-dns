@@ -3,7 +3,7 @@ use hickory_server::server::RequestInfo;
 use hickory_server::zone_handler::{
     AuthLookup, LookupControlFlow, LookupOptions, ZoneHandler, ZoneType,
 };
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 /// Result of a chain resolution, including which handler responded.
 pub struct ResolveResult {
@@ -20,6 +20,23 @@ pub struct ResolveResult {
 struct NamedHandler {
     name: String,
     handler: Arc<dyn ZoneHandler>,
+    /// Apex SOA for this handler's negative answers, fetched once.
+    ///
+    /// Lazily filled rather than fetched in `new`, because `new` is synchronous
+    /// and has 38 call sites. Two concurrent first-timers may both fetch; the
+    /// loser's `set` is ignored, which is benign and keeps this off the
+    /// async-lock path. The value goes stale only if plugin TTLs ever become
+    /// hot-reloadable - the chain is rebuilt with the config in that case, as
+    /// it already is for `[[plugins]]` changes.
+    ///
+    /// The first negative answer's `RequestInfo` is the one the fetch sees,
+    /// and every later query reuses that record. That is sound only while
+    /// `<handler>.lookup(origin, SOA, ..)` does not vary by request: every
+    /// authoritative handler today ignores the argument (`NacosAuthority`
+    /// discards it), and the `ZoneType::External` handlers never reach this
+    /// code. A future view/ACL-per-client handler would have to key this cache
+    /// by client - note that in the comment if you add one.
+    apex_soa: OnceLock<Option<Record>>,
 }
 
 /// Iterates through a chain of ZoneHandlers.
@@ -32,7 +49,11 @@ impl AuthorityChain {
     pub fn new(handlers: Vec<(String, Arc<dyn ZoneHandler>)>) -> Self {
         let handlers = handlers
             .into_iter()
-            .map(|(name, handler)| NamedHandler { name, handler })
+            .map(|(name, handler)| NamedHandler {
+                name,
+                handler,
+                apex_soa: OnceLock::new(),
+            })
             .collect();
         Self { handlers }
     }
@@ -66,7 +87,14 @@ impl AuthorityChain {
                             result,
                             LookupControlFlow::Continue(Err(_)) | LookupControlFlow::Break(Err(_))
                         ) {
-                        apex_soa(entry.handler.as_ref(), request_info).await
+                        match entry.apex_soa.get() {
+                            Some(cached) => cached.clone(),
+                            None => {
+                                let fetched = apex_soa(entry.handler.as_ref(), request_info).await;
+                                let _ = entry.apex_soa.set(fetched.clone());
+                                fetched
+                            }
+                        }
                     } else {
                         None
                     };

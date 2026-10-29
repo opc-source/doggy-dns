@@ -363,3 +363,122 @@ impl ZoneHandler for ExternalNegativeHandler {
         LookupControlFlow::Skip
     }
 }
+
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+/// Authoritative handler that counts how many times the chain looked at it.
+/// An in-zone negative answer used to cost two lookups: the answer and a
+/// second one for the apex SOA.
+struct CountingPrimaryHandler {
+    calls: Arc<AtomicUsize>,
+}
+
+#[async_trait]
+impl ZoneHandler for CountingPrimaryHandler {
+    fn zone_type(&self) -> ZoneType {
+        ZoneType::Primary
+    }
+
+    fn axfr_policy(&self) -> AxfrPolicy {
+        AxfrPolicy::Deny
+    }
+
+    fn origin(&self) -> &LowerName {
+        static ORIGIN: std::sync::LazyLock<LowerName> =
+            std::sync::LazyLock::new(|| LowerName::from(Name::from_str("example.com.").unwrap()));
+        &ORIGIN
+    }
+
+    async fn lookup(
+        &self,
+        _name: &LowerName,
+        rtype: RecordType,
+        _request_info: Option<&RequestInfo<'_>>,
+        _lookup_options: LookupOptions,
+    ) -> LookupControlFlow<AuthLookup> {
+        self.calls.fetch_add(1, Ordering::Relaxed);
+        if rtype == RecordType::SOA {
+            let soa = hickory_proto::rr::Record::from_rdata(
+                Name::from_str("example.com.").unwrap(),
+                30,
+                hickory_proto::rr::RData::SOA(hickory_proto::rr::rdata::SOA::new(
+                    Name::from_str("example.com.").unwrap(),
+                    Name::from_str("admin.example.com.").unwrap(),
+                    1,
+                    3600,
+                    600,
+                    86400,
+                    30,
+                )),
+            );
+            return LookupControlFlow::Continue(Ok(AuthLookup::answers(
+                LookupRecords::Section(vec![soa]),
+                None,
+            )));
+        }
+        LookupControlFlow::Continue(Err(
+            hickory_server::zone_handler::LookupError::ResponseCode(
+                hickory_proto::op::ResponseCode::NXDomain,
+            ),
+        ))
+    }
+
+    async fn search(
+        &self,
+        _request: &Request,
+        _lookup_options: LookupOptions,
+    ) -> (
+        LookupControlFlow<AuthLookup>,
+        Option<hickory_proto::rr::TSigResponseContext>,
+    ) {
+        (LookupControlFlow::Skip, None)
+    }
+
+    async fn nsec_records(
+        &self,
+        _name: &LowerName,
+        _lookup_options: LookupOptions,
+    ) -> LookupControlFlow<AuthLookup> {
+        LookupControlFlow::Skip
+    }
+}
+
+#[tokio::test]
+async fn negative_answers_fetch_the_apex_soa_only_once() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let handler = Arc::new(CountingPrimaryHandler {
+        calls: Arc::clone(&calls),
+    });
+    let chain = AuthorityChain::new(vec![("counting".to_string(), handler)]);
+
+    let first = chain
+        .resolve(
+            &Name::from_str("missing.example.com.").unwrap(),
+            RecordType::A,
+            None,
+        )
+        .await;
+    assert!(first.soa.is_some(), "authoritative negative carries an SOA");
+    let after_first = calls.load(Ordering::Relaxed);
+    assert_eq!(
+        after_first, 2,
+        "first negative costs one answer lookup plus one SOA lookup"
+    );
+
+    let second = chain
+        .resolve(
+            &Name::from_str("other.example.com.").unwrap(),
+            RecordType::A,
+            None,
+        )
+        .await;
+    assert!(
+        second.soa.is_some(),
+        "the cached SOA must still be attached"
+    );
+    assert_eq!(
+        calls.load(Ordering::Relaxed) - after_first,
+        1,
+        "second negative must cost only its own answer lookup, not two"
+    );
+}
