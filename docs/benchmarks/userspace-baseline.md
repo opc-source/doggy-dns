@@ -66,3 +66,31 @@ cargo bench -p doggy-dns-core --bench handler_bench -- --save-baseline base
   QPS is partly the upstream's. It measures our transport, not our compute.
 - The job is report-only: it never fails a PR on a regression, because runner
   variance is not yet characterised well enough to gate merges on it.
+
+## After the hot-path round
+
+Recorded 2026-10-30 on branch `perf/userspace-hot-path` (HEAD `7bcb6a2`), locally
+on the M1 machine named above, from `cargo bench` (release profile: `lto = "fat"`,
+one codegen unit). Component rows are `threads=1` medians; the thread-count table
+in `target/criterion` has the rest. The end-to-end row is the one number this
+branch cannot supply: it is produced only by the `Performance` job, so it stays
+pending until the merged `main` run, which is also the row a later PR compares
+against.
+
+| Measurement | Before | After | Target |
+|-------------|--------|-------|--------|
+| `handler_pipeline_nacos_hit` | 2.3416 µs | 0.979 µs | <= 1.7 µs (met) |
+| `nacos_authority_lookup_hit` | 1.4314 µs | 0.299 µs | <= 0.8 µs (met) |
+| `service_key_from_name_hit` (was `parse_dns_name_hit` 0.556 µs) | 0.556 µs | 0.0958 µs | <= 0.15 µs (met) |
+| `handler_pipeline_nacos_nxdomain` | 2.9053 µs | 0.898 µs (−69%) | lower (met) |
+| end-to-end dnsperf QPS | 43,288 (XDP stress job's userspace-only reference; never measured by the `Performance` job before this round) | pending the merged-main `Performance` run | not gated |
+| `NacosAuthority::lookup` allocations (hit / miss) | ~20 / ~15 (estimated before the guard existed) | 6 / 2 | <= 8 / <= 3 (met) |
+
+The allocation row comes from `cargo test -p doggy-dns-nacos --test alloc_guard_test`,
+not from a profiler, because it is the number that cannot be argued with. Its seed
+is one answering instance under a five-label name, so the count is stable across
+runs but not a general "allocations per answer" figure.
+
+All four component rows are single-run medians from one machine; the `Performance`
+job's base-vs-PR `change:` lines on one runner remain the comparison that matters
+for a future regression.

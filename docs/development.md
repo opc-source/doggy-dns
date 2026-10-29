@@ -31,7 +31,17 @@ sudo env "PATH=$PATH" cargo test -p doggy-dns-xdp --test xdp_integration_test --
 
 > **Note:** `cargo bench` output starts with "running 0 tests" lines from the
 > default test harness for each crate. This is normal — the actual criterion
-> results follow immediately after.
+> results follow immediately after. Benchmarks inherit `[profile.release]`
+> (`lto = "fat"`, `codegen-units = 1`), so a run is slower to build and its
+> numbers are not comparable with runs recorded before that profile existed.
+
+> The `Performance` job runs the component benches twice in one job (main first,
+> PR second) and prints criterion `change:` lines, plus one end-to-end dnsperf run
+> against `config/doggy-dns-stress.toml` with `RUST_LOG=warn`. It never fails a PR:
+> shared-runner variance is not characterised well enough to gate merges. The
+> end-to-end Nacos scenario is absent by necessity — the server aborts boot when
+> Nacos is unreachable — so the Nacos paths are covered by benches only.
+> `docs/benchmarks/userspace-baseline.md` holds the reference numbers.
 
 Reports: `cobertura.xml` (for CI/Codecov) and `tarpaulin-report.html` (local).
 
@@ -70,7 +80,7 @@ Reports: `cobertura.xml` (for CI/Codecov) and `tarpaulin-report.html` (local).
 |-----|-------------|
 | **Lint** | `cargo fmt --check` + `cargo clippy -- -D warnings` |
 | **Build & Test** | `cargo build` + `cargo test` |
-| **Benchmarks** | `cargo bench --no-run` (compile check only) |
+| **Benchmarks** | `cargo bench --no-run` (compile check) + `Performance` job (component benches base-vs-PR, one end-to-end dnsperf run) |
 | **Coverage** | `cargo-tarpaulin` -> Codecov (target: 60% project, 70% patch) |
 | **XDP CI** | fmt, integration tests (`--ignored`, root), component benches vs. base, dnsperf stress |
 
