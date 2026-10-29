@@ -298,7 +298,7 @@ EOF
 
 **Files:**
 - Modify: `scripts/xdp_stress_report.py`
-- Test: `scripts/test_xdp_stress_report.py` (create; stdlib `unittest`, no new dependency — the repo has no Python test runner yet, and `python3 -m unittest` is one)
+- Test: `scripts/test_xdp_stress_report.py` (create; stdlib `unittest`, no new dependency — the repo has no Python test runner yet, and `python3 scripts/test_xdp_stress_report.py` runs it with no configuration)
 
 **Interfaces:**
 - Consumes: `parse_dnsperf(path) -> dict | None` (existing, unchanged).
@@ -310,17 +310,13 @@ Create `scripts/test_xdp_stress_report.py`:
 
 ```python
 import unittest
+from pathlib import Path
 
 from xdp_stress_report import format_report, format_single, parse_dnsperf
 
-USERSPACE_SAMPLE = """[18:11:08] dnsperf: awaiting connections
-[18:11:08] dnsperf: opening data file
-Queries sent: 1298645
-Queries completed: 1298645
-Queries lost: 0
-Queries per second: 43288.123
-Average Latency (s): 0.000921 (min 0.000102, max 0.051234)
-"""
+# Resolved from this file, not the cwd: the suite has to pass from the repo
+# root (python3 scripts/test_xdp_stress_report.py) and from scripts/ alike.
+FIXTURE = Path(__file__).parent / "tests" / "fixtures" / "userspace.txt"
 
 
 class SingleMode(unittest.TestCase):
@@ -336,7 +332,7 @@ class SingleMode(unittest.TestCase):
         }
 
     def test_parse_reads_qps_and_latency(self):
-        parsed = parse_dnsperf("scripts/tests/fixtures/userspace.txt")
+        parsed = parse_dnsperf(FIXTURE)
         self.assertEqual(parsed["qps"], 43288.123)
         self.assertEqual(parsed["lost"], 0)
 
@@ -353,6 +349,9 @@ class SingleMode(unittest.TestCase):
     def test_pair_mode_is_unchanged(self):
         report = format_report(self.parsed, None)
         self.assertIn("## XDP Stress Test Report", report)
+        self.assertIn("43,288", report)
+        self.assertIn("| **Ratio** | **0.00x** |", report)
+        self.assertIn("N/A", report)
 
 
 if __name__ == "__main__":
@@ -374,7 +373,7 @@ EOF
 
 - [ ] **Step 2: Run the tests to make sure they fail**
 
-Run: `cd scripts && python3 -m unittest test_xdp_stress_report -v`
+Run from the repo root: `python3 scripts/test_xdp_stress_report.py -v`
 Expected: `ImportError: cannot import name 'format_single'` (and `AttributeError` for the missing method), not a pass.
 
 - [ ] **Step 3: Implement `format_single` and the flag**
@@ -436,7 +435,7 @@ if __name__ == "__main__":
 - [ ] **Step 4: Run the tests and the two CLI modes**
 
 ```bash
-cd scripts && python3 -m unittest test_xdp_stress_report -v
+python3 scripts/test_xdp_stress_report.py -v
 python3 scripts/xdp_stress_report.py --single scripts/tests/fixtures/userspace.txt
 python3 scripts/xdp_stress_report.py scripts/tests/fixtures/userspace.txt scripts/tests/fixtures/userspace.txt
 ```
