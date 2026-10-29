@@ -145,7 +145,12 @@ fn make_request(domain: &str, rtype: RecordType) -> Request {
     Request::from_bytes(bytes, src, Protocol::Udp).unwrap()
 }
 
-/// One A instance and one AAAA instance under `my-svc.default_group.public`.
+/// One **A-only** instance under `my-svc.default_group.public`.
+///
+/// v4-only on purpose: the NODATA case below queries AAAA, and an instance with a
+/// v6 address would make that query an *answer* (NoError, ANCOUNT=1, no SOA) rather
+/// than the `records.is_empty()` NODATA the spec's four-shape set requires. The
+/// family-filtering branch this pins is the one Task 11 rewires.
 fn nacos_handler() -> (DoggyDnsHandler, ByteCapturingHandler) {
     let cache = Arc::new(DashMap::new());
     cache.insert(
@@ -154,18 +159,11 @@ fn nacos_handler() -> (DoggyDnsHandler, ByteCapturingHandler) {
             group: "default_group".to_string(),
             namespace: "public".to_string(),
         },
-        vec![
-            CachedInstance {
-                ip: "10.0.0.1".to_string(),
-                port: 8080,
-                healthy: true,
-            },
-            CachedInstance {
-                ip: "2001:db8::1".to_string(),
-                port: 8080,
-                healthy: true,
-            },
-        ],
+        vec![CachedInstance {
+            ip: "10.0.0.1".to_string(),
+            port: 8080,
+            healthy: true,
+        }],
     );
     let authority = NacosAuthority::new(cache, "nacos.local", 60);
     let chain = Arc::new(AuthorityChain::new(vec![(
