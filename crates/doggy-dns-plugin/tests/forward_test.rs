@@ -197,3 +197,39 @@ async fn forward_maps_upstream_servfail() {
         "upstream SERVFAIL must stay SERVFAIL"
     );
 }
+
+/// Names whose labels carry an interior underscore must still be forwarded.
+///
+/// The Nacos default group (`DEFAULT_GROUP`) makes such names normal traffic,
+/// and the wire parser accepts them, but the resolver's `&str` entry point
+/// runs IDNA/STD3 validation, which only tolerates a leading underscore (the
+/// SRV convention). Forwarding has to hand the already-parsed `Name` to the
+/// resolver, or a name the upstream could answer becomes a local SERVFAIL.
+#[tokio::test]
+async fn forward_forwards_names_with_underscore_labels() {
+    let upstream = spawn_mock_dns(
+        ResponseCode::NoError,
+        Some((Ipv4Addr::new(198, 51, 100, 9), 30)),
+    )
+    .await;
+    let authority = forward_to(upstream).await;
+
+    let name = LowerName::from(
+        Name::from_str("web-app.DEFAULT_GROUP.public.nacos.local.")
+            .expect("failed to parse underscore query name"),
+    );
+    let result = authority
+        .lookup(&name, RecordType::A, None, LookupOptions::default())
+        .await;
+
+    let answers = match result {
+        LookupControlFlow::Continue(Ok(lookup)) | LookupControlFlow::Break(Ok(lookup)) => {
+            lookup.iter().count()
+        }
+        _ => 0,
+    };
+    assert_eq!(
+        answers, 1,
+        "an underscore label must be forwarded, not failed locally"
+    );
+}

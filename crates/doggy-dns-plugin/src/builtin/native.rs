@@ -50,7 +50,11 @@ impl ZoneHandler for NativeAuthority {
         _lookup_options: LookupOptions,
     ) -> LookupControlFlow<AuthLookup> {
         let name_str = name.to_string();
-        match self.resolver.lookup(&name_str, rtype).await {
+        // See ForwardAuthority::lookup: passing a `&str` makes the resolver
+        // re-parse the name under IDNA/STD3 rules, which reject interior
+        // underscores such as Nacos' `DEFAULT_GROUP`. Use the wire-parsed Name.
+        let query_name = Name::from(name.clone());
+        match self.resolver.lookup(query_name, rtype).await {
             Ok(lookup) => {
                 if lookup.answers().is_empty() {
                     tracing::debug!(

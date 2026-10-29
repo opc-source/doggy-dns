@@ -123,6 +123,11 @@ impl ZoneHandler for ForwardAuthority {
         _lookup_options: LookupOptions,
     ) -> LookupControlFlow<AuthLookup> {
         let name_str = name.to_string();
+        // Hand the resolver the name as already parsed from the wire. Going
+        // through `&str` would re-parse it under IDNA/STD3 rules, which reject
+        // interior underscores (Nacos' `DEFAULT_GROUP`) and turn a name the
+        // upstream could answer into a local SERVFAIL.
+        let query_name = Name::from(name.clone());
         let span = tracing::info_span!(
             "dns.forward",
             otel.kind = "client",
@@ -134,7 +139,7 @@ impl ZoneHandler for ForwardAuthority {
         );
         match self
             .resolver
-            .lookup(&name_str, rtype)
+            .lookup(query_name, rtype)
             .instrument(span.clone())
             .await
         {
