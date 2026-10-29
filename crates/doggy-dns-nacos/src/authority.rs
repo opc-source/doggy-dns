@@ -17,6 +17,9 @@ pub struct NacosAuthority {
     dns_zone: String,
     ttl: u32,
     origin: LowerName,
+    /// Apex SOA, built once. Every in-zone negative answer attaches it, and
+    /// rebuilding it cost two `format!` plus two `Name::from_ascii` per query.
+    apex_soa: Record,
 }
 
 impl NacosAuthority {
@@ -26,26 +29,28 @@ impl NacosAuthority {
         ttl: u32,
     ) -> Self {
         let zone_name = format!("{}.", dns_zone.trim_end_matches('.'));
-        let origin = LowerName::from(Name::from_ascii(&zone_name).unwrap_or_default());
+        let zone = Name::from_ascii(&zone_name).unwrap_or_default();
+        let origin = LowerName::from(zone.clone());
+        let apex_soa = build_soa_record(&zone, ttl);
         Self {
             cache,
             dns_zone: dns_zone.to_string(),
             ttl,
             origin,
+            apex_soa,
         }
     }
-    /// SOA for the zone apex.
-    ///
-    /// The zone is synthesized from Nacos, so there is no real primary or
-    /// serial: the apex itself is the MNAME, `hostmaster.<zone>` the RNAME and
-    /// the configured record TTL doubles as the negative-caching TTL.
-    fn soa_record(&self) -> Record {
-        let zone = Name::from_ascii(format!("{}.", self.dns_zone.trim_end_matches('.')))
-            .unwrap_or_default();
-        let admin = Name::from_ascii(format!("hostmaster.{zone}")).unwrap_or_default();
-        let soa = SOA::new(zone.clone(), admin, 1, 3600, 600, 86400, self.ttl);
-        Record::from_rdata(zone, self.ttl, RData::SOA(soa))
-    }
+}
+
+/// SOA for the zone apex.
+///
+/// The zone is synthesized from Nacos, so there is no real primary or serial:
+/// the apex itself is the MNAME, `hostmaster.<zone>` the RNAME and the
+/// configured record TTL doubles as the negative-caching TTL.
+fn build_soa_record(zone: &Name, ttl: u32) -> Record {
+    let admin = Name::from_ascii(format!("hostmaster.{zone}")).unwrap_or_default();
+    let soa = SOA::new(zone.clone(), admin, 1, 3600, 600, 86400, ttl);
+    Record::from_rdata(zone.clone(), ttl, RData::SOA(soa))
 }
 
 fn is_zone_apex(name: &Name, zone_suffix: &str) -> bool {
@@ -87,7 +92,7 @@ impl ZoneHandler for NacosAuthority {
         if is_zone_apex(&query_name, &self.dns_zone) {
             return if rtype == RecordType::SOA {
                 LookupControlFlow::Continue(Ok(AuthLookup::answers(
-                    LookupRecords::Section(vec![self.soa_record()]),
+                    LookupRecords::Section(vec![self.apex_soa.clone()]),
                     None,
                 )))
             } else {

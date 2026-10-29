@@ -3,6 +3,7 @@
 use dashmap::DashMap;
 use doggy_dns_nacos::authority::NacosAuthority;
 use doggy_dns_nacos::watcher::{CachedInstance, ServiceKey};
+use doggy_dns_plugin::authority_chain::AuthorityChain;
 use hickory_proto::op::ResponseCode;
 use hickory_proto::rr::{LowerName, Name, RData, RecordType};
 use hickory_server::zone_handler::{LookupControlFlow, LookupError, LookupOptions, ZoneHandler};
@@ -316,4 +317,69 @@ async fn skips_sibling_zone_with_shared_suffix() {
         .await;
 
     assert!(matches!(result, LookupControlFlow::Skip));
+}
+
+/// The apex SOA is built once. Rebuilding it per answer was the cost; equal
+/// rdata across calls is what a caller can observe, so assert that plus the
+/// fact that a negative answer and an apex SOA query publish the same record.
+#[tokio::test]
+async fn apex_soa_is_identical_across_lookups() {
+    let cache = make_test_cache();
+    let authority = NacosAuthority::new(cache, "nacos.local", 6);
+    let apex = LowerName::from(Name::from_str("nacos.local.").unwrap());
+
+    let mut soas = Vec::new();
+    for _ in 0..3 {
+        match authority
+            .lookup(&apex, RecordType::SOA, None, LookupOptions::default())
+            .await
+        {
+            LookupControlFlow::Continue(Ok(lookup)) => {
+                soas.push(
+                    lookup
+                        .iter()
+                        .next()
+                        .expect("apex SOA query returns one record")
+                        .clone(),
+                );
+            }
+            other => panic!("expected Continue(Ok) for an apex SOA query, got {other}"),
+        }
+    }
+
+    assert!(
+        soas.windows(2).all(|pair| pair[0].data == pair[1].data
+            && pair[0].name == pair[1].name
+            && pair[0].ttl == pair[1].ttl),
+        "repeated apex SOA lookups must return the same record"
+    );
+}
+
+#[tokio::test]
+async fn apex_soa_matches_the_record_a_negative_answer_carries() {
+    let cache = make_test_cache();
+    let authority = Arc::new(NacosAuthority::new(cache, "nacos.local", 6));
+    let apex = LowerName::from(Name::from_str("nacos.local.").unwrap());
+    let missing =
+        LowerName::from(Name::from_str("unknown.default_group.public.nacos.local.").unwrap());
+
+    let published = match authority
+        .lookup(&apex, RecordType::SOA, None, LookupOptions::default())
+        .await
+    {
+        LookupControlFlow::Continue(Ok(lookup)) => lookup.iter().next().cloned(),
+        other => panic!("expected an apex SOA, got {other}"),
+    };
+
+    let handler: Arc<dyn ZoneHandler> = authority.clone();
+    let chain = AuthorityChain::new(vec![("nacos".to_string(), handler)]);
+    let attached = chain
+        .resolve(&Name::from(missing.clone()), RecordType::A, None)
+        .await
+        .soa;
+
+    assert!(
+        published.is_some() && attached == published,
+        "the chain must attach the same SOA the zone publishes"
+    );
 }
