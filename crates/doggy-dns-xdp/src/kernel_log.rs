@@ -1,10 +1,21 @@
-//! Parser for the `AYA_LOG_LEVEL` value baked into the eBPF program.
+//! Kernel-side logging: `AYA_LOG_LEVEL` policy plus the bridge into `tracing`.
 //!
-//! Kernel-side filtering compares the log site's level against this value, so
-//! the ranks must match `aya-log-common`'s `Level` enum: `Error = 1`,
-//! `Warn = 2`, ... and zero disables logging entirely. Only the levels the
-//! program actually uses are accepted; verbose values are clamped to `Warn`
-//! because there are no `info`/`debug`/`trace` call sites to enable.
+//! Kernel-side filtering compares each log site's level against a value baked
+//! into the program, so the ranks here must match `aya-log-common`'s `Level`
+//! enum: `Error = 1`, `Warn = 2`, ... and zero disables logging entirely. Only
+//! the levels the program actually uses are accepted; verbose values are
+//! clamped to `Warn` because there are no `info`/`debug`/`trace` call sites to
+//! enable. This parsing is pure logic, so it stays available on every platform.
+//!
+//! Draining the records out of the kernel is a different concern: it needs
+//! `aya-log` and therefore lives in the Linux-only `bridge` submodule.
+
+#[cfg(target_os = "linux")]
+mod bridge;
+#[cfg(target_os = "linux")]
+pub(crate) use bridge::kernel_log_level;
+#[cfg(target_os = "linux")]
+pub use bridge::{TracingLog, XdpKernelLogger, spawn_log_flush};
 
 /// Kernel-side verbosity. Ranks follow `aya-log-common`'s `Level` ordering.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

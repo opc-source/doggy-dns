@@ -159,8 +159,8 @@ diagram leaves out:
 - **Kernel logs**: `XdpManager` bakes `AYA_LOG_LEVEL` into the program before
   loading and takes the `AYA_LOGS` ring buffer into an `EbpfLogger`. The logger
   must outlive `program.load()` — dropping it closes the map FD and the load
-  fails. `spawn_log_flush` then drains the ring buffer into `tracing` under the
-  `doggy_dns_xdp::kernel` target. The level defaults to `warn`; `off` and
+  fails. `kernel_log::spawn_log_flush` then drains the ring buffer into
+  `tracing` under the `doggy_dns_xdp::kernel` target. The level defaults to `warn`; `off` and
   `error` are also accepted, and anything else (`info`, `debug`, typos) is
   clamped to `warn` with a startup warning — a match failure must not silently
   raise verbosity.

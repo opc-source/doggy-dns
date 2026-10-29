@@ -347,7 +347,7 @@ mod linux_tests {
             .build()
             .expect("build test runtime");
         let enter = runtime.enter();
-        let _drain = doggy_dns_xdp::program::spawn_log_flush(logger);
+        let _drain = doggy_dns_xdp::kernel_log::spawn_log_flush(logger);
 
         let poison_name = "poison.example.";
         let (key, mut value) = compute_cache_entry(
