@@ -128,6 +128,14 @@ diagram leaves out:
   updates the IPv4 checksum incrementally (RFC 1624).
 - After `bpf_xdp_adjust_tail` the original query no longer exists, so any later
   failure drops the packet rather than passing a truncated frame upward.
+- Failure paths log through `aya-log-ebpf` into the `AYA_LOGS` ring buffer:
+  `error` for post-resize failures that drop the packet, `warn` for abnormal
+  passes (missing `XDP_CONFIG`, failed `bpf_xdp_adjust_tail`, a poisoned cached
+  response length, a truncated query that still hit the cache). Records from the
+  response path carry the transaction ID, plus the QNAME hash and query type
+  once the question has been parsed, so a kernel record can be matched against
+  the userspace request log. The hot path — hits, misses, TTL expiry and
+  non-DNS traffic — stays log-free; per-packet outcomes are counters, not logs.
 
 ### Userspace side (`crates/doggy-dns-xdp` + `src/xdp/`)
 
@@ -148,6 +156,14 @@ diagram leaves out:
   exports them as the OTLP metric `dns.xdp.queries`, labelled by result. If
   OTLP metrics are disabled the counters are collected but not exported (a
   warning says so at startup).
+- **Kernel logs**: `XdpManager` bakes `AYA_LOG_LEVEL` into the program before
+  loading and takes the `AYA_LOGS` ring buffer into an `EbpfLogger`. The logger
+  must outlive `program.load()` — dropping it closes the map FD and the load
+  fails. `spawn_log_flush` then drains the ring buffer into `tracing` under the
+  `doggy_dns_xdp::kernel` target. The level defaults to `warn`; `off` and
+  `error` are also accepted, and anything else (`info`, `debug`, typos) is
+  clamped to `warn` with a startup warning — a match failure must not silently
+  raise verbosity.
 
 ## Limitations & notes
 
@@ -165,8 +181,10 @@ diagram leaves out:
   knowing before exposing it publicly.
 - **`cache_size` is fixed once the map is created** — it is applied at load
   time, not resized in place; restart to change it.
-- The kernel program has no logging today; silent passes are observable only
-  through the `miss` / `expired` / `drop` counters.
+- Kernel logs are deliberately sparse (`warn`/`error` only, no per-packet
+  logging). The missing-`XDP_CONFIG` warning fires per packet, so a
+  manual-mode loader that forgets to write the config map can flood the ring
+  buffer; full records are dropped, never blocking the fast path.
 
 ## Development
 
@@ -175,7 +193,7 @@ cargo check --workspace --features xdp          # userspace crate compiles on an
 cargo test -p doggy-dns-xdp                     # pure logic: key hashing, deltas, config
 cargo build -p doggy-dns --features xdp         # full binary incl. eBPF build.rs step
 cd xdp && cargo build -Z build-std=core,alloc --release --target bpfel-unknown-none  # eBPF only
-sudo -E cargo test -p doggy-dns-xdp --test xdp_integration_test -- --ignored  # load + attach on loopback (Linux, root)
+sudo env "PATH=$PATH" RUST_LOG=debug cargo test -p doggy-dns-xdp --test xdp_integration_test -- --ignored  # load + attach on loopback (Linux, root)
 cargo bench -p doggy-dns-xdp                    # component benchmarks
 ```
 

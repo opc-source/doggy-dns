@@ -35,7 +35,9 @@ fn needs_rebuild(elf_path: &Path, ebpf_dir: &Path) -> bool {
     let newer_than_elf = |path: &Path| last_modified(path).is_some_and(|t| t > elf_time);
     newer_than_elf(&ebpf_dir.join("src"))
         || newer_than_elf(&ebpf_dir.join("Cargo.toml"))
-        || newer_than_elf(&ebpf_dir.join("Cargo.lock"))
+        // The eBPF program is a member of the `xdp/` workspace, so its
+        // lockfile lives one level above the crate directory.
+        || newer_than_elf(&ebpf_dir.join("../Cargo.lock"))
 }
 
 fn main() {
@@ -47,6 +49,10 @@ fn main() {
     println!(
         "cargo:rerun-if-changed={}",
         ebpf_dir.join("Cargo.toml").display()
+    );
+    println!(
+        "cargo:rerun-if-changed={}",
+        ebpf_dir.join("../Cargo.lock").display()
     );
 
     // Build the eBPF program
@@ -68,12 +74,31 @@ fn main() {
 
         match status {
             Ok(s) if s.success() => {}
-            _ => {
-                // eBPF build failed — this is expected on non-Linux or without bpf-linker
-                // Create a placeholder so the userspace crate still compiles
-                eprintln!("cargo:warning=eBPF build skipped (requires Linux + bpf-linker)");
-                std::fs::create_dir_all(&target_dir).expect("create eBPF target dir");
-                std::fs::write(&elf_path, []).expect("write placeholder eBPF ELF");
+            other => {
+                // A failed nested invocation (e.g. blocked by an outer cargo
+                // lock) must not destroy a previously built ELF: keep it and
+                // let the next build decide. Only a missing or placeholder
+                // artifact gets a stand-in, so the userspace crate still
+                // compiles on hosts without the eBPF toolchain.
+                let reason = match other {
+                    Ok(s) => format!("exit status {s}"),
+                    Err(e) => format!("could not run cargo: {e}"),
+                };
+                let usable = elf_path.metadata().is_ok_and(|m| m.len() > 0);
+                if usable {
+                    // The embedded program may not match the sources just
+                    // edited, so say so instead of failing silently.
+                    eprintln!(
+                        "cargo:warning=eBPF build failed ({reason}); reusing the existing ELF, \
+                         which may be stale"
+                    );
+                } else {
+                    eprintln!(
+                        "cargo:warning=eBPF build skipped (requires Linux + bpf-linker): {reason}"
+                    );
+                    std::fs::create_dir_all(&target_dir).expect("create eBPF target dir");
+                    std::fs::write(&elf_path, []).expect("write placeholder eBPF ELF");
+                }
             }
         }
     }

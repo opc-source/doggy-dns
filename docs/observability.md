@@ -241,7 +241,9 @@ add `miss`/`expired`, which also appear in `dns.queries`. Values come from a
 per-CPU map polled once per `interval_secs`, so they lag by up to one poll plus
 one export interval but are exact counts, not a sample, unless the program was
 reloaded (a counter that went backwards starts fresh, so deltas stay
-non-negative while the counts since the last poll are lost). See
+non-negative while the counts since the last poll are lost). Kernel-side
+failure records are logs, not metrics: they arrive under the
+`doggy_dns_xdp::kernel` target at `warn`/`error` level. See
 [xdp.md](xdp.md) for the kernel side.
 
 ## Traces

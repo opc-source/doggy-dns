@@ -28,7 +28,7 @@ cargo build --features xdp                 # Build with XDP support (requires Li
 cd xdp && cargo build --target bpfel-unknown-none --release  # Build eBPF program
 cargo test -p doggy-dns-xdp                # Test XDP userspace crate
 cargo bench -p doggy-dns-xdp               # Benchmark XDP components
-sudo -E cargo test -p doggy-dns-xdp --test xdp_integration_test -- --ignored  # XDP integration tests (requires root)
+sudo env "PATH=$PATH" cargo test -p doggy-dns-xdp --test xdp_integration_test -- --ignored  # XDP integration tests (requires root)
 ```
 
 ## Architecture

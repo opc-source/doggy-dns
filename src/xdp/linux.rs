@@ -38,6 +38,11 @@ pub fn init(config: &DoggyDnsConfig, middlewares: &mut Vec<Arc<dyn Middleware>>)
             let cache = mgr.take_cache();
             let middleware = XdpCacheMiddleware::new(cache, &config.xdp);
             middlewares.push(Arc::new(middleware));
+            // Drain kernel-side failure records into tracing. The task is
+            // cancelled with the runtime, so it needs no shutdown handle.
+            if let Some(logger) = mgr.take_log() {
+                doggy_dns_xdp::program::spawn_log_flush(logger);
+            }
             tracing::info!(
                 interface = %mgr.interface,
                 attach_mode = %config.xdp.attach_mode,

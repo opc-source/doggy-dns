@@ -8,6 +8,7 @@ use aya_ebpf::{
     maps::{Array, LruHashMap, PerCpuArray},
     programs::XdpContext,
 };
+use aya_log_ebpf::{error, warn};
 
 mod protocol;
 mod types;
@@ -60,7 +61,8 @@ pub fn dns_xdp(ctx: XdpContext) -> u32 {
     let (action, outcome) = match try_dns_xdp(&ctx) {
         Ok(result) => result,
         // Errors only happen after the frame has been resized, so the packet
-        // can no longer be handed on as the original query.
+        // can no longer be handed on as the original query. Every failure site
+        // logs before returning `Err`, so this catch-all stays silent.
         Err(()) => (xdp_action::XDP_DROP, Some(Outcome::Drop)),
     };
     if let Some(outcome) = outcome {
@@ -123,8 +125,11 @@ fn try_dns_xdp(ctx: &XdpContext) -> Result<(u32, Option<Outcome>), ()> {
     }
     let udp = unsafe { &*((data + udp_offset) as *const UdpHdr) };
     // The userspace server may listen on any port, so it is read from the
-    // configuration map the loader fills in before attaching.
+    // configuration map the loader fills in before attaching. A missing entry
+    // means the program was loaded without its runtime configuration, so the
+    // fast path silently degrades to pass-through — warn on every such packet.
     let Some(config) = XDP_CONFIG.get(0) else {
+        warn!(ctx, "XDP_CONFIG entry 0 missing, passing packet");
         return Ok((xdp_action::XDP_PASS, None));
     };
     if u16::from_be(udp.dest) != config.dns_port {
@@ -176,18 +181,35 @@ fn try_dns_xdp(ctx: &XdpContext) -> Result<(u32, Option<Outcome>), ()> {
         return Ok((xdp_action::XDP_PASS, Some(Outcome::Expired)));
     }
 
+    let txid = read_u16_be(dns_ptr, 0);
+
     // The query must be fully contained in the frame before we resize it.
     if data + dns_offset + old_dns_len > end {
+        warn!(
+            ctx,
+            "truncated query while occupying the frame, passing (txid {:x}, hash {:x}, qtype {})",
+            txid as u64,
+            name_hash,
+            qtype as u64
+        );
         return Ok((xdp_action::XDP_PASS, None));
     }
 
-    let txid = read_u16_be(dns_ptr, 0);
     let negative = entry.flags & FLAG_NEGATIVE != 0;
     let resp_len = entry.resp_len as usize;
     let new_dns_len = if negative {
         DNS_HDR_LEN + question_len
     } else {
+        // The duplicate bound inside `write_positive` exists for the verifier
+        // and stays silent; this is the diagnostic site for a poisoned entry.
         if resp_len < DNS_HDR_LEN || resp_len > MAX_DNS_LEN {
+            warn!(
+                ctx,
+                "cached response length out of range: {} (txid {:x}, hash {:x})",
+                resp_len as u64,
+                txid as u64,
+                name_hash
+            );
             return Ok((xdp_action::XDP_PASS, None));
         }
         resp_len
@@ -196,6 +218,14 @@ fn try_dns_xdp(ctx: &XdpContext) -> Result<(u32, Option<Outcome>), ()> {
     // 8. Resize the frame to the new DNS message length.
     let delta = new_dns_len as i32 - old_dns_len as i32;
     if unsafe { bpf_xdp_adjust_tail(ctx.ctx, delta) } != 0 {
+        warn!(
+            ctx,
+            "bpf_xdp_adjust_tail failed (old {}, new {}, txid {:x}, hash {:x}), passing packet",
+            old_dns_len as u64,
+            new_dns_len as u64,
+            txid as u64,
+            name_hash,
+        );
         return Ok((xdp_action::XDP_PASS, None));
     }
 
@@ -205,18 +235,27 @@ fn try_dns_xdp(ctx: &XdpContext) -> Result<(u32, Option<Outcome>), ()> {
     let data = ctx.data();
     let end = ctx.data_end();
     if data + dns_offset + new_dns_len > end {
+        error!(
+            ctx,
+            "frame too small after resize (need {} bytes at offset {}, txid {:x}, hash {:x}, qtype {})",
+            new_dns_len as u64,
+            dns_offset as u64,
+            txid as u64,
+            name_hash,
+            qtype as u64
+        );
         return Err(());
     }
     let dns = data + dns_offset;
 
     if negative {
-        write_nxdomain(dns, end)?;
+        write_nxdomain(ctx, dns, end, txid)?;
     } else {
-        write_positive(dns, end, entry, resp_len, txid)?;
+        write_positive(ctx, dns, end, entry, resp_len, txid)?;
     }
 
     // 9. Swap headers for reply, fix lengths, and recompute checksums.
-    finalize_headers(ctx, ip_hdr_len, udp_offset, new_dns_len)?;
+    finalize_headers(ctx, ip_hdr_len, udp_offset, new_dns_len, txid)?;
 
     let outcome = if negative {
         Outcome::NegativeHit
@@ -299,11 +338,20 @@ fn parse_dns_question(ctx: &XdpContext, dns_offset: usize) -> Option<(u64, u16, 
 // ---------------------------------------------------------------------------
 
 /// Rewrite the DNS header for a cached NXDOMAIN answer.
+///
+/// Failures happen after the frame was resized, so the packet is dropped and
+/// each site logs at error level before returning.
 #[inline(always)]
-fn write_nxdomain(dns: usize, end: usize) -> Result<(), ()> {
+fn write_nxdomain(ctx: &XdpContext, dns: usize, end: usize, txid: u16) -> Result<(), ()> {
     // A constant offset keeps the packet register's id, so the range proven by
     // this comparison also covers every access below.
     if dns + DNS_HDR_LEN > end {
+        error!(
+            ctx,
+            "nxdomain header does not fit after resize ({} bytes, txid {:x})",
+            DNS_HDR_LEN as u64,
+            txid as u64
+        );
         return Err(());
     }
 
@@ -329,12 +377,16 @@ fn write_nxdomain(dns: usize, end: usize) -> Result<(), ()> {
 /// folding the comparison into the rangeless `p >= end` form.
 #[inline(always)]
 fn write_positive(
+    ctx: &XdpContext,
     dns: usize,
     end: usize,
     entry: &CacheValue,
     resp_len: usize,
     txid: u16,
 ) -> Result<(), ()> {
+    // Verifier bound only: the poisoned-entry case is diagnosed and passed
+    // before the resize, and reaching this point means the frame was resized
+    // and must be answered or dropped.
     if resp_len < DNS_HDR_LEN || resp_len > MAX_DNS_LEN {
         return Err(());
     }
@@ -347,6 +399,10 @@ fn write_positive(
     let mut i = lead;
     if lead != 0 {
         if dns + COPY_CHUNK > end {
+            error!(
+                ctx,
+                "truncated frame while copying cached response (txid {:x})", txid as u64
+            );
             return Err(());
         }
         copy_chunk(dns, src, 0);
@@ -354,6 +410,10 @@ fn write_positive(
     while i < resp_len {
         let p = dns + i;
         if p + COPY_CHUNK > end {
+            error!(
+                ctx,
+                "truncated frame while copying cached response (txid {:x})", txid as u64
+            );
             return Err(());
         }
         copy_chunk(p, src, i);
@@ -363,6 +423,10 @@ fn write_positive(
     // The cached reply carries the transaction id of the query that populated
     // the cache; overwrite it with the current query's id.
     if dns + 2 > end {
+        error!(
+            ctx,
+            "truncated frame while writing transaction id (txid {:x})", txid as u64
+        );
         return Err(());
     }
     write_u16_be(dns as *mut u8, 0, txid);
@@ -380,6 +444,7 @@ fn finalize_headers(
     ip_hdr_len: usize,
     udp_offset: usize,
     new_dns_len: usize,
+    txid: u16,
 ) -> Result<(), ()> {
     let data = ctx.data();
     let end = ctx.data_end();
@@ -387,6 +452,10 @@ fn finalize_headers(
     // Ethernet: swap source and destination MAC addresses. Every access below
     // has a constant offset, so this single check covers all of them.
     if data + ETH_HDR_LEN > end {
+        error!(
+            ctx,
+            "ethernet header missing after resize (txid {:x})", txid as u64
+        );
         return Err(());
     }
     let eth = data as *mut u8;
@@ -403,6 +472,10 @@ fn finalize_headers(
     // and the verifier only accepts variable offsets that are re-checked
     // against data_end on every iteration.
     if data + ETH_HDR_LEN + core::mem::size_of::<IpHdr>() > end {
+        error!(
+            ctx,
+            "ipv4 header missing after resize (txid {:x})", txid as u64
+        );
         return Err(());
     }
     let ip = (data + ETH_HDR_LEN) as *mut u8;
@@ -435,6 +508,10 @@ fn finalize_headers(
     // UDP: swap ports, fix the datagram length, zero the checksum (optional
     // for IPv4, see RFC 768).
     if data + udp_offset + UDP_HDR_LEN > end {
+        error!(
+            ctx,
+            "udp header missing after resize (txid {:x})", txid as u64
+        );
         return Err(());
     }
     let udp = (data + udp_offset) as *mut u8;

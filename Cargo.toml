@@ -68,6 +68,8 @@ base64 = "0.23"
 
 # XDP / eBPF
 aya = "0.14"
+aya-log = "0.3"
+log = "0.4"
 
 # MCP server
 rmcp = { version = "3.7", features = ["server", "transport-streamable-http-server"] }
