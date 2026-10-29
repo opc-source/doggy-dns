@@ -8,11 +8,13 @@ use anyhow::{Context as _, Result};
 use aya::EbpfLoader;
 use aya::maps::{Array, MapData};
 use aya::programs::{Xdp, XdpMode};
+use aya_log::EbpfLogger;
 use std::fs;
 use std::path::Path;
 
 use crate::cache::DnsCacheMap;
 use crate::interface::resolve_interface;
+use crate::kernel_log::{TracingLog, XdpKernelLogger, kernel_log_level};
 use crate::stats::XdpStatsReader;
 use crate::types::XdpRuntimeConfig;
 use doggy_dns_basic::XdpConfig;
@@ -27,6 +29,7 @@ pub struct XdpManager {
     _link: Option<aya::programs::xdp::XdpLinkId>,
     cache: Option<DnsCacheMap>,
     stats: Option<XdpStatsReader>,
+    logger: Option<XdpKernelLogger>,
     pub interface: String,
 }
 
@@ -45,12 +48,33 @@ impl XdpManager {
             anyhow::bail!("eBPF ELF is empty — build the eBPF program first");
         }
 
+        let level = kernel_log_level();
         let mut ebpf = EbpfLoader::new()
             // Apply the configured cache capacity at map-creation time; the
             // eBPF program only declares the default size.
             .map_max_entries("DNS_CACHE", config.cache_size)
+            // Bakes the verbosity into the program before the verifier runs.
+            // `must_exist = false`: a build without log statements has no
+            // symbol, and the override is then a no-op.
+            .override_global(aya_log::LEVEL, &level, false)
             .load(elf_bytes)
             .context("failed to load eBPF ELF")?;
+
+        // Take the AYA_LOGS ring buffer before the program loads: dropping the
+        // logger closes the map FD and makes loading the program fail. A
+        // missing map only means this build carries no log statements, which
+        // must not disable the fast path.
+        let logger = match EbpfLogger::init_with_logger(&mut ebpf, TracingLog) {
+            Ok(logger) => Some(logger),
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    "XDP kernel-side logging unavailable, continuing without kernel logs"
+                );
+                None
+            }
+        };
+        tracing::debug!(level, "XDP kernel-side log level set");
 
         // Ensure the pin directory exists
         let pin_path = Path::new(&config.pin_path);
@@ -103,6 +127,7 @@ impl XdpManager {
             _link: link_id,
             cache: Some(cache),
             stats: Some(stats),
+            logger,
             interface: iface,
         })
     }
@@ -120,6 +145,13 @@ impl XdpManager {
         self.stats
             .take()
             .expect("XDP stats reader already taken or was never initialized")
+    }
+
+    /// Take the kernel log consumer, if the loaded program exposes the
+    /// `AYA_LOGS` map. Returns `None` at most once, and immediately when the
+    /// build carries no log statements.
+    pub fn take_log(&mut self) -> Option<XdpKernelLogger> {
+        self.logger.take()
     }
 }
 

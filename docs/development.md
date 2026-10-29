@@ -26,7 +26,7 @@ cargo build --features xdp                     # Root binary with XDP support
 cd xdp && cargo build --target bpfel-unknown-none --release  # eBPF program
 cargo test -p doggy-dns-xdp                    # XDP userspace crate tests
 cargo bench -p doggy-dns-xdp                   # XDP components
-sudo -E cargo test -p doggy-dns-xdp --test xdp_integration_test -- --ignored  # Integration (root)
+sudo env "PATH=$PATH" cargo test -p doggy-dns-xdp --test xdp_integration_test -- --ignored  # Integration (root)
 ```
 
 > **Note:** `cargo bench` output starts with "running 0 tests" lines from the

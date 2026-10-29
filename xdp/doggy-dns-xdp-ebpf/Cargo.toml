@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 aya-ebpf = "0.2"
+aya-log-ebpf = "0.2"
 
 [[bin]]
 name = "doggy-dns-xdp-ebpf"

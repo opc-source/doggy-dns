@@ -5,7 +5,7 @@
 // - sudo / root privileges
 // - veth pair support
 //
-// Run with: sudo -E cargo test -p doggy-dns-xdp --test xdp_integration_test -- --nocapture
+// Run with: sudo env "PATH=$PATH" cargo test -p doggy-dns-xdp --test xdp_integration_test -- --ignored --nocapture
 
 #[cfg(target_os = "linux")]
 mod linux_tests {
@@ -92,8 +92,39 @@ mod linux_tests {
             .output();
     }
 
+    /// Only one XDP program can be bound to `lo` at a time, and ignored tests
+    /// run in parallel threads by default: a second attach fails with EBUSY.
+    /// These tests therefore serialise on this lock, and waiting for it is
+    /// required — skipping instead would let CI pass without ever exercising
+    /// the attached program.
+    static LO_XDP_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// An XDP manager attached to `lo`, holding the attach lock for as long as
+    /// the manager lives.
+    struct LoXdpGuard {
+        manager: XdpManager,
+        _shared: std::sync::MutexGuard<'static, ()>,
+    }
+
+    /// Block until this thread may attach to `lo`, then load and attach.
+    fn attach_lo(config: &XdpConfig, port: u16) -> LoXdpGuard {
+        // A panicking test poisons the lock but still releases it, and this
+        // thread re-attaches from scratch, so recover the guard rather than
+        // failing on the poison.
+        let shared = LO_XDP_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        match XdpManager::new(config, port) {
+            Ok(manager) => LoXdpGuard {
+                manager,
+                _shared: shared,
+            },
+            Err(error) => panic!("load and attach XDP on port {port}: {error:#}"),
+        }
+    }
+
     #[test]
-    #[ignore] // Requires root; run with: sudo -E cargo test -- --ignored --nocapture
+    #[ignore] // Requires root; run with: sudo env "PATH=$PATH" cargo test -- --ignored --nocapture
     fn xdp_cache_hit_positive() {
         setup_netns();
         // TODO: Load XDP program on veth0, send DNS query, verify cache hit
@@ -140,14 +171,14 @@ mod linux_tests {
             pin_path: pin_path.clone(),
         };
 
-        let mut manager = XdpManager::new(&config, port).expect("load and attach XDP");
-        let mut cache = manager.take_cache();
+        let mut attach = attach_lo(&config, port);
+        let mut cache = attach.manager.take_cache();
         assert_eq!(
             cache.max_entries().expect("read map info"),
             config.cache_size,
             "DNS_CACHE must use the configured capacity"
         );
-        let stats = manager.take_stats();
+        let stats = attach.manager.take_stats();
         let now = now_ktime_ns();
 
         let hit_name = "hit.example.";
@@ -200,9 +231,21 @@ mod linux_tests {
                 .expect("send query");
         }
 
-        std::thread::sleep(Duration::from_millis(200));
-
-        let snapshot = stats.snapshot().expect("read stats map");
+        // Loopback XDP answers within microseconds; poll briefly instead of
+        // sleeping a fixed amount so a loaded CI box slows the run down rather
+        // than failing it.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        let snapshot = loop {
+            let snapshot = stats.snapshot().expect("read stats map");
+            let complete = snapshot.hit >= 1
+                && snapshot.negative_hit >= 1
+                && snapshot.expired >= 1
+                && snapshot.miss >= 1;
+            if complete || tokio::time::Instant::now() >= deadline {
+                break snapshot;
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        };
         assert!(snapshot.hit >= 1, "hit counter: {snapshot:?}");
         assert!(
             snapshot.negative_hit >= 1,
@@ -211,7 +254,144 @@ mod linux_tests {
         assert!(snapshot.expired >= 1, "expired counter: {snapshot:?}");
         assert!(snapshot.miss >= 1, "miss counter: {snapshot:?}");
 
-        drop(manager);
+        drop(cache);
+        drop(attach);
+        let _ = std::fs::remove_file(&pin_path);
+    }
+
+    #[test]
+    #[ignore] // Requires root, Linux, and XDP support on lo.
+    fn xdp_kernel_logs_reach_userspace() {
+        // The pipeline proof anchors on a warn-level path that the default
+        // level always forwards: a poisoned cache entry whose `resp_len`
+        // exceeds the DNS bounds. The kernel logs the mismatch and passes the
+        // query instead of answering it.
+        use std::sync::atomic::Ordering;
+        use tracing::Subscriber;
+        use tracing_subscriber::Layer;
+        use tracing_subscriber::layer::{Context, SubscriberExt};
+        use tracing_subscriber::util::SubscriberInitExt;
+
+        /// Counts the forwarded poisoned-entry records. `TracingLog` routes
+        /// every kernel record to the `doggy_dns_xdp::kernel` target and keeps
+        /// the eBPF module path in the message body.
+        #[derive(Default)]
+        struct CountSubscriber {
+            poison_warnings: std::sync::atomic::AtomicU32,
+        }
+
+        impl CountSubscriber {
+            fn observe(&self, message: &str) {
+                if message.contains("cached response length out of range: 600") {
+                    self.poison_warnings.fetch_add(1, Ordering::Relaxed);
+                }
+            }
+        }
+
+        struct CountLayer(std::sync::Arc<CountSubscriber>);
+
+        impl<S: Subscriber> Layer<S> for CountLayer {
+            fn on_event(&self, event: &tracing::Event<'_>, _ctx: Context<'_, S>) {
+                if event.metadata().target() != "doggy_dns_xdp::kernel" {
+                    return;
+                }
+                struct MessageVisitor(std::sync::Arc<CountSubscriber>);
+                impl tracing::field::Visit for MessageVisitor {
+                    fn record_debug(
+                        &mut self,
+                        _field: &tracing::field::Field,
+                        value: &dyn std::fmt::Debug,
+                    ) {
+                        self.0.observe(&format!("{value:?}"));
+                    }
+                }
+                event.record(&mut MessageVisitor(self.0.clone()));
+            }
+        }
+
+        let port: u16 = 5534;
+        let pin_path = format!("/sys/fs/bpf/doggy-dns-test/logs-{port}");
+        let _ = std::fs::remove_file(&pin_path);
+
+        let config = XdpConfig {
+            enabled: true,
+            interface: "lo".to_string(),
+            cache_size: 1024,
+            negative_ttl: 30,
+            attach_mode: "auto".to_string(),
+            pin_path: pin_path.clone(),
+        };
+
+        let mut attach = attach_lo(&config, port);
+
+        // The drain task runs on this thread's current-thread runtime below,
+        // and `TracingLog` records the kernel messages through whatever
+        // subscriber is the default on this thread, so the counting subscriber
+        // must stay installed until the assertion.
+        let counter = std::sync::Arc::new(CountSubscriber::default());
+        let _subscriber = tracing_subscriber::registry()
+            .with(CountLayer(counter.clone()))
+            .set_default();
+
+        let mut cache = attach.manager.take_cache();
+        let logger = attach
+            .manager
+            .take_log()
+            .expect("AYA_LOGS map missing from the loaded program");
+
+        // Drive the production drain path rather than calling `flush`
+        // directly: the current-thread runtime only polls the drain task while
+        // the test sleeps, so a forwarded record proves the AsyncFd wiring.
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build test runtime");
+        let enter = runtime.enter();
+        let _drain = doggy_dns_xdp::kernel_log::spawn_log_flush(logger);
+
+        let poison_name = "poison.example.";
+        let (key, mut value) = compute_cache_entry(
+            &Name::from_str(poison_name).expect("name"),
+            1,
+            1,
+            ResponseCode::NoError,
+            response_bytes(poison_name, ResponseCode::NoError),
+            Some(60),
+            30,
+            now_ktime_ns(),
+        );
+        value.resp_len = 600;
+        cache.insert(&key, &value).expect("insert poisoned entry");
+
+        let socket = UdpSocket::bind("127.0.0.1:0").expect("bind sender");
+        socket
+            .set_read_timeout(Some(Duration::from_millis(100)))
+            .ok();
+        socket
+            .send_to(&query_bytes(poison_name), ("127.0.0.1", port))
+            .expect("send poisoned query");
+
+        // Poll until the drain task has forwarded the record: a fixed sleep
+        // would either flake under load or slow every run down.
+        let warnings = runtime.block_on(async {
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+            while counter.poison_warnings.load(Ordering::Relaxed) == 0 {
+                if tokio::time::Instant::now() >= deadline {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+            counter.poison_warnings.load(Ordering::Relaxed)
+        });
+        assert!(
+            warnings >= 1,
+            "expected at least one kernel-side warn record for the poisoned cache entry, got {warnings}"
+        );
+
+        drop(cache);
+        drop(enter);
+        // The drain task polls forever by design; do not wait for it.
+        runtime.shutdown_background();
         let _ = std::fs::remove_file(&pin_path);
     }
 }

@@ -15,7 +15,12 @@ hickory-server = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 aya = { workspace = true }
+aya-log = { workspace = true }
+log = { workspace = true }
 libc = "0.2"
+
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+tracing-subscriber = { workspace = true }
 
 [dev-dependencies]
 criterion = { workspace = true }
