@@ -1,3 +1,4 @@
+use crate::builtin::wire_query_name;
 use anyhow::Result;
 use async_trait::async_trait;
 use hickory_proto::op::ResponseCode;
@@ -123,11 +124,10 @@ impl ZoneHandler for ForwardAuthority {
         _lookup_options: LookupOptions,
     ) -> LookupControlFlow<AuthLookup> {
         let name_str = name.to_string();
-        // Hand the resolver the name as already parsed from the wire. Going
-        // through `&str` would re-parse it under IDNA/STD3 rules, which reject
-        // interior underscores (Nacos' `DEFAULT_GROUP`) and turn a name the
-        // upstream could answer into a local SERVFAIL.
-        let query_name = Name::from(name.clone());
+        // See `wire_query_name`: a `&str` would make the resolver re-parse the
+        // name under IDNA/STD3 rules and reject interior underscores such as
+        // Nacos' `DEFAULT_GROUP`.
+        let query_name = wire_query_name(name);
         let span = tracing::info_span!(
             "dns.forward",
             otel.kind = "client",
