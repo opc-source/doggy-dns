@@ -44,9 +44,11 @@ pub fn fnv1a_64(data: &[u8]) -> u64 {
 /// exactly the same way, eight at a time; the length prefixes keep the
 /// encoding injective, so `ab.c` and `a.bc` hash differently.
 pub fn make_cache_key(name: &Name, qtype: u16, qclass: u16) -> CacheKey {
-    // `Name::extend_name` rejects any append that would push the encoded
-    // length past `Name::MAX_LENGTH`, so the wire form plus its root
-    // terminator always fits here: no allocation, no length check.
+    // hickory bounds the encoded length on both construction paths: appends go
+    // through `extend_name`, which rejects anything past `Name::MAX_LENGTH`
+    // (255, terminator included), and wire parsing rejects a name once its
+    // encoded length reaches 255. The wire form below therefore always fits:
+    // no allocation, no length check.
     //
     // Uninitialised on purpose: zeroing ~256 bytes costs more than the hash
     // itself on short names, and every byte below `pos` is written before
@@ -66,8 +68,13 @@ pub fn make_cache_key(name: &Name, qtype: u16, qclass: u16) -> CacheKey {
     unsafe { *wire.add(pos) = 0 };
     pos += 1;
 
-    // Safety: bytes `0..pos` are all initialised above, `pos <= 256` by the
-    // length invariant, and `storage` outlives the borrow.
+    // `Name::len()` is the encoded wire length and includes that terminator,
+    // so any break of the bound would be a hickory invariant change, not a
+    // bad caller: fail loudly in tests instead of writing past `storage`.
+    debug_assert!(pos <= Name::MAX_LENGTH, "wire name {pos} bytes");
+
+    // Safety: bytes `0..pos` are all initialised above, `pos <= Name::MAX_LENGTH`
+    // by the invariant just asserted, and `storage` outlives the borrow.
     let wire = unsafe { slice::from_raw_parts(wire, pos) };
 
     CacheKey {

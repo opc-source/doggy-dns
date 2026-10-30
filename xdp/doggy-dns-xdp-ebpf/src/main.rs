@@ -349,9 +349,15 @@ fn parse_dns_question(ctx: &XdpContext, dns_offset: usize) -> Option<(u64, u16, 
             // This block holds the root label: keep the bytes up to the
             // terminator and drop everything after it, which is the zero
             // padding the userspace side hashes.
+            let consumed = zero_index(word) + 1;
+            // The terminator can sit up to seven bytes past the top-of-loop
+            // check, so the block path is the one place a name past the wire
+            // limit would slip through: bound the post-block length here.
+            if name_len + consumed > MAX_QNAME_LEN {
+                return None;
+            }
             let first = zeros & zeros.wrapping_neg();
             hash = fnv1a_word(hash, lower_word(word) & (first - 1));
-            let consumed = zero_index(word) + 1;
             pos += consumed;
             name_len += consumed;
             break;

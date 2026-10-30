@@ -63,7 +63,7 @@ the TTL are answered by the kernel. The sequence diagram below shows both paths.
         |   1  eth / IPv4 / UDP?                     no -> XDP_PASS            |
         |   2  dport == XDP_CONFIG.dns_port?         no -> XDP_PASS            |
         |   3  QR=0 and QDCOUNT=1?                   no -> XDP_PASS            |
-        |   4  FNV-1a key over qname + qtype + qclass (8 bytes per round)      |
+        |   4  FNV-1a over qname wire bytes, 8 per round; qtype|qclass packed  |
         |   5  DNS_CACHE.get(key)      miss/expired -> XDP_PASS (counted)      |
         |   6  bpf_xdp_adjust_tail, then:                                      |
         |         positive hit : copy cached reply (<= 512 B), patch TXID      |

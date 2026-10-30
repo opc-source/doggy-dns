@@ -10,8 +10,9 @@ pub const MAX_RESPONSE_SIZE: usize = 512;
 pub struct CacheKey {
     pub name_hash: u64,
     pub qtype_class: u32,
-    /// The kernel hashes all key bytes, padding included, so it is spelled out
-    /// to keep the value deterministic on both sides.
+    /// Spelled out so the key struct is a stable 16 bytes on both sides. The
+    /// kernel hashes the QNAME stream only; this field is part of the key but
+    /// never of the hash.
     pub _pad: u32,
 }
 
