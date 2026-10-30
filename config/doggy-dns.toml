@@ -4,6 +4,8 @@ port = 15353
 tcp_timeout = 10
 shutdown_timeout = 5
 worker_threads = 1    # defaults to 1 (runs as DaemonSet, one per node)
+#rotate_answers = true # cycle multi-record answers so clients spread across
+#                      # instances; false keeps the authority's own order
 
 #[server.tls]
 #enabled = false

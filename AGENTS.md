@@ -94,6 +94,29 @@ by query type. The authority owns its whole zone: unknown services return
 authoritative `NXDOMAIN` and missing families/types return `NODATA` instead of falling
 through to later plugins.
 
+### Answer Rotation
+
+`handler::AnswerRotation` (built from `[server] rotate_answers`, default `true`)
+cycles the answer records of any response with more than one record, one step
+per rotated response on one process-wide cursor — not one per name, so no table
+grows with the names seen. The cursor is shared by every name and query type and
+advances only when rotation actually happens. It is applied in `DoggyDnsHandler`
+right after `take_answer_records`, before the response and the XDP cache payload
+are built, so all three authorities share one behaviour and single-record or
+negative answers are untouched. Rotation is an in-place `rotate_left` on the Vec
+the handler already owns, so it adds no allocation; `doggy-dns-nacos`'s
+`alloc_guard_test` budgets one `authority.lookup` call, which runs upstream of
+rotation and so cannot move. Every other handler test builds its handler with
+`AnswerRotation::new(false)`, so order-sensitive assertions — including the
+`wire_golden_test` bytes — stay pinned to the authority's own order; if a
+rotation change moves those bytes, it changed the response, not the expectation.
+The rotation itself is proven by tests that share one handler across several
+queries and assert the whole answer sequence: on (the `nacos` move path and the
+clone-collect path `native`/`forward` reach), off, and reaching the XDP cache
+payload rather than only the sent response. With XDP enabled a cache hit replays
+the order captured when the entry was written until its TTL expires (rotation
+then only spreads misses).
+
 ### Server (`core/server.rs`)
 
 `build_server()` binds UDP + TCP on the configured port. Optionally registers TLS (DoT, port 853) and HTTPS (DoH, port 443, path `/dns-query`) when `[server.tls]`/`[server.https]` are enabled. Uses `rustls` for TLS.

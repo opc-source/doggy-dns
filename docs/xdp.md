@@ -194,6 +194,11 @@ diagram leaves out:
   knowing before exposing it publicly.
 - **`cache_size` is fixed once the map is created** — it is applied at load
   time, not resized in place; restart to change it.
+- **Answer rotation is frozen by a cache hit** — with `rotate_answers = true`
+  (the default), the order that happens to be captured when an entry is written
+  is what every hit replays until the entry expires, because the kernel answers
+  without consulting userspace. Multi-instance services therefore spread only
+  across misses, not across hits. Startup logs one `warn` for this combination.
 - Kernel logs are deliberately sparse (`warn`/`error` only, no per-packet
   logging). The missing-`XDP_CONFIG` warning fires per packet, so a
   manual-mode loader that forgets to write the config map can flood the ring

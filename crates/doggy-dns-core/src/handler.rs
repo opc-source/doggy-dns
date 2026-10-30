@@ -10,13 +10,55 @@ use hickory_server::zone_handler::{
     AuthLookup, LookupControlFlow, LookupError, LookupRecords, MessageResponseBuilder,
 };
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use tokio::time::Instant;
 use tracing::Instrument;
+
+/// Cycles the answer records of a multi-record response, one step per rotated
+/// response.
+///
+/// A DNS client that takes the first record — which is what most resolvers and
+/// every `getaddrinfo` caller effectively do — otherwise keeps landing on the
+/// same instance, because the authority emits them in registration order.
+/// The cursor is one counter for the whole handler, not one per name: every
+/// rotated response moves it by one, whereas a per-name cursor would need a
+/// table that grows with the names seen and an eviction policy to go with it.
+/// Traffic on other names only makes a given name's step jump further ahead,
+/// which spreads no worse.
+/// Rotation moves records inside the already-owned `Vec`, so it costs no
+/// allocation.
+#[derive(Debug)]
+pub struct AnswerRotation {
+    enabled: bool,
+    cursor: AtomicUsize,
+}
+
+impl AnswerRotation {
+    pub fn new(enabled: bool) -> Self {
+        Self {
+            enabled,
+            cursor: AtomicUsize::new(0),
+        }
+    }
+
+    /// Advances the cursor and rotates `records` so its first entry walks the
+    /// instance list. Single-record and empty answers are left alone, which is
+    /// the common case: one instance, or a negative answer.
+    pub fn apply(&self, records: &mut [Record]) {
+        let len = records.len();
+        if !self.enabled || len < 2 {
+            return;
+        }
+        let offset = self.cursor.fetch_add(1, Ordering::Relaxed) % len;
+        records.rotate_left(offset);
+    }
+}
 
 pub struct DoggyDnsHandler {
     middlewares: Vec<Arc<dyn Middleware>>,
     authority_chain: Arc<AuthorityChain>,
     xdp_enabled: bool,
+    rotation: AnswerRotation,
 }
 
 impl DoggyDnsHandler {
@@ -24,11 +66,13 @@ impl DoggyDnsHandler {
         middlewares: Vec<Arc<dyn Middleware>>,
         authority_chain: Arc<AuthorityChain>,
         xdp_enabled: bool,
+        rotation: AnswerRotation,
     ) -> Self {
         Self {
             middlewares,
             authority_chain,
             xdp_enabled,
+            rotation,
         }
     }
 
@@ -169,7 +213,10 @@ impl RequestHandler for DoggyDnsHandler {
 
             let (response_info, outcome) = match resolve_result.outcome {
                 LookupControlFlow::Continue(Ok(lookup)) | LookupControlFlow::Break(Ok(lookup)) => {
-                    let records = take_answer_records(lookup);
+                    let mut records = take_answer_records(lookup);
+                    // Before anything reads the order: the response, the XDP
+                    // cache payload, and the answer count all see one sequence.
+                    self.rotation.apply(&mut records);
                     let answer_count = records.len();
 
                     let mut metadata = Metadata::response_from_request(&request.metadata);
