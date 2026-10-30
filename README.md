@@ -111,6 +111,8 @@ cargo tarpaulin --config tarpaulin.toml
 | [docs/configuration.md](docs/configuration.md) | Full TOML reference, validation rules, MCP |
 | [docs/observability.md](docs/observability.md) | OTLP signals, backend presets, metrics/traces/profiles, troubleshooting |
 | [docs/xdp.md](docs/xdp.md) | XDP kernel fast path: build, enable, how it works, limits |
+| [docs/deployment.md](docs/deployment.md) | Container images, ghcr publishing, image smoke test, Docker/podman & Kubernetes deployment |
+| [examples/deploy/README.md](examples/deploy/README.md) | Ready-to-edit manifests (ConfigMap + two DaemonSets) and their apply order |
 | [docs/development.md](docs/development.md) | Build/test/bench commands, coding rules, CI, test & benchmark structure, dependencies |
 | [AGENTS.md](AGENTS.md) | The above conventions mirrored for AI coding agents |
 

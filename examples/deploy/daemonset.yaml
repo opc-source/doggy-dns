@@ -1,0 +1,95 @@
+# Userspace resolver as a DaemonSet: one pod per node, answering port 53 in the
+# node's own network namespace. Apply the ConfigMaps in configmap.yaml first
+# (create the namespace with `kubectl create ns doggy-dns`).
+#
+# Point kubelet/node-DNS at it (kubeadm: edit the `node-local-dns`/CoreDNS
+# upstream or the kubelet `--cluster-dns`, depending on your cluster) — these
+# manifests only run the server.
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: doggy-dns
+  namespace: doggy-dns
+  labels:
+    app: doggy-dns
+spec:
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+  selector:
+    matchLabels:
+      app: doggy-dns
+  template:
+    metadata:
+      labels:
+        app: doggy-dns
+    spec:
+      hostNetwork: true
+      # The pod shares the node's network namespace, so without this it would
+      # inherit the node's resolv.conf instead of the cluster DNS policy.
+      dnsPolicy: ClusterFirstWithHostNet
+      # A node DNS resolver has to stay up under memory pressure and be
+      # schedulable on control-plane nodes.
+      priorityClassName: system-cluster-critical
+      tolerations:
+        - operator: Exists
+      containers:
+        - name: doggy-dns
+          image: ghcr.io/opc-source/doggy-dns:main
+          imagePullPolicy: Always
+          # No args: the binary reads /app/config/doggy-dns.toml, which the
+          # ConfigMap below mounts over the image's baked default.
+          envFrom:
+            - configMapRef:
+                name: doggy-dns-env
+          ports:
+            - name: dns-udp
+              containerPort: 53
+              protocol: UDP
+            - name: dns-tcp
+              containerPort: 53
+              protocol: TCP
+            - name: control
+              containerPort: 19090
+              protocol: TCP
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: 19090
+            periodSeconds: 10
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 19090
+            initialDelaySeconds: 10
+            periodSeconds: 20
+            failureThreshold: 3
+          securityContext:
+            # The image runs as uid 65532; port 53 comes from NET_BIND_SERVICE
+            # rather than from root.
+            runAsNonRoot: true
+            runAsUser: 65532
+            runAsGroup: 65532
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+              add: ["NET_BIND_SERVICE"]
+          resources:
+            requests:
+              cpu: 100m
+              memory: 64Mi
+            limits:
+              cpu: "1"
+              memory: 256Mi
+          volumeMounts:
+            - name: config
+              mountPath: /app/config/doggy-dns.toml
+              subPath: doggy-dns.toml
+              readOnly: true
+      volumes:
+        - name: config
+          configMap:
+            name: doggy-dns-config

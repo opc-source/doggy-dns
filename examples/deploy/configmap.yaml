@@ -1,0 +1,126 @@
+# Config for the node-side resolver, as two ConfigMaps: one for the userspace
+# DaemonSet, one for the XDP DaemonSet. The XDP one is the userspace config plus
+# the `[xdp]` block, so the two can be diffed by eye.
+#
+# The DaemonSets mount these at /app/config/doggy-dns.toml with `subPath`, which
+# means the file is fixed at container start: editing a ConfigMap does nothing
+# until `kubectl rollout restart daemonset/<name> -n doggy-dns`.
+#
+# `${ENV_VAR}` inside the config is expanded by the binary before parsing, and a
+# missing variable is fatal, so anything injected this way must be present in the
+# pod spec. `${DOGGY_UPSTREAM}` is supplied from the ConfigMap itself below.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: doggy-dns-config
+  namespace: doggy-dns
+data:
+  doggy-dns.toml: |
+    [server]
+    listen_addr = "0.0.0.0"
+    port = 53
+    worker_threads = 1
+    rotate_answers = true
+
+    [middleware]
+    logging = true
+
+    # Service discovery for `<service>.<group>.<namespace>.nacos.local`.
+    [[plugins]]
+    kind = "nacos"
+    enabled = true
+    server_addr = "${DOGGY_NACOS_ADDR}"
+    namespace = "public"
+    group = "DEFAULT_GROUP"
+    dns_zone = "nacos.local"
+    ttl = 6
+
+    # Everything else goes to the cluster's upstream DNS. `native` is left off
+    # deliberately: this pod uses the node's /etc/resolv.conf under hostNetwork,
+    # and on a node configured to use doggy-dns that is a loop.
+    [[plugins]]
+    kind = "forward"
+    enabled = true
+    upstream = ["${DOGGY_UPSTREAM}"]
+    cache_size = 4096
+    min_ttl = 10
+    max_ttl = 300
+
+    # Liveness and readiness for the probes in the DaemonSets below. 0.0.0.0
+    # because the pod shares the node's network namespace.
+    [control]
+    enabled = true
+    listen_addr = "0.0.0.0"
+    port = 19090
+    endpoints = ["healthz", "readyz"]
+    # `endpoints = ["mcp", ...]` additionally exposes the MCP tool surface at
+    # /mcp. Set `token` (or DOGGY_CONTROL_TOKEN below) if you do; without one the
+    # endpoint is unauthenticated.
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: doggy-dns-xdp-config
+  namespace: doggy-dns
+data:
+  doggy-dns.toml: |
+    [server]
+    listen_addr = "0.0.0.0"
+    port = 53
+    worker_threads = 1
+    rotate_answers = true
+
+    [middleware]
+    logging = true
+
+    [[plugins]]
+    kind = "nacos"
+    enabled = true
+    server_addr = "${DOGGY_NACOS_ADDR}"
+    namespace = "public"
+    group = "DEFAULT_GROUP"
+    dns_zone = "nacos.local"
+    ttl = 6
+
+    [[plugins]]
+    kind = "forward"
+    enabled = true
+    upstream = ["${DOGGY_UPSTREAM}"]
+    cache_size = 4096
+    min_ttl = 10
+    max_ttl = 300
+
+    [control]
+    enabled = true
+    listen_addr = "0.0.0.0"
+    port = 19090
+    endpoints = ["healthz", "readyz"]
+
+    # Kernel fast path. `interface` empty means: config → XDP_INTERFACE → the
+    # default-route interface read from /proc/net/route, which under hostNetwork
+    # is the node's own uplink.
+    #
+    # `pin_path` is where the cache map is pinned. A restart opens
+    # <pin_path>_v1 first and continues on the map already there, so cached
+    # answers survive a pod restart on the same node; the path must not contain
+    # a dot (bpffs cannot pin such a name). `cache_size` is applied only when the
+    # map is created — changing it takes effect once the pin file is removed, and
+    # startup warns when the two disagree.
+    [xdp]
+    enabled = true
+    interface = ""
+    cache_size = 65536
+    negative_ttl = 30
+    attach_mode = "auto"
+    pin_path = "/sys/fs/bpf/doggy-dns/dns_cache"
+---
+# Values the `${...}` placeholders above expand to. Keeping them here rather than
+# in the config text means one place to edit per cluster.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: doggy-dns-env
+  namespace: doggy-dns
+data:
+  DOGGY_NACOS_ADDR: "nacos-cs.nacos.svc.cluster.local:8848"
+  DOGGY_UPSTREAM: "10.96.0.10:53"
