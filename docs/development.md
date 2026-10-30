@@ -101,7 +101,7 @@ All jobs use dependency caching (`Swatinem/rust-cache@v2`).
 | `crates/doggy-dns-core/tests/wire_golden_test.rs` | 5 | Golden wire bytes for the Nacos paths: hit (name lowercased), NXDOMAIN, NODATA, apex SOA |
 | `crates/doggy-dns-nacos/tests/alloc_guard_test.rs` | 1 | Allocation budget for `NacosAuthority::lookup`: 6 on a hit, 2 on an in-zone miss |
 | `crates/doggy-dns-nacos/tests/authority_test.rs` | 15 | Nacos authority: hit, dotted names, NOERROR/NXDOMAIN/NODATA, family filtering, zone boundaries, apex SOA |
-| `crates/doggy-dns-nacos/tests/mapping_test.rs` | 10 | Name-to-key mapping (zone boundaries, dotted services), family-filtered record creation |
+| `crates/doggy-dns-nacos/tests/mapping_test.rs` | 11 | Name-to-key mapping (zone boundaries, dotted services), family-filtered record creation |
 | `crates/doggy-dns-nacos/tests/watcher_test.rs` | 11 | Instance cache: insert, filter, remove, replace, lowercase keys, push-freshness stamp, address parsing at push |
 | `crates/doggy-dns-plugin/tests/authority_chain_test.rs` | 12 | Chain resolution: empty, hit, authoritative miss, zone fallthrough, all-skip, Break, error, is_empty |
 | `crates/doggy-dns-plugin/tests/forward_test.rs` | 8 | Forward resolver: local mock upstream, custom/bare IP parsing, validation, NXDOMAIN/NODATA/SERVFAIL mapping |
