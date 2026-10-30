@@ -15,7 +15,7 @@ mod types;
 
 use protocol::{
     COPY_CHUNK, ETH_HDR_LEN, ETH_P_IP, EthHdr, IPPROTO_UDP, IpHdr, UDP_HDR_LEN, UdpHdr, copy_chunk,
-    read_u16_be, swap_u8, write_u16_be,
+    read_u16_be, swap_u16, swap_u32, write_u16_be,
 };
 use types::{CacheKey, CacheValue, FLAG_NEGATIVE, XdpRuntimeConfig, XdpStats};
 
@@ -27,6 +27,10 @@ use types::{CacheKey, CacheValue, FLAG_NEGATIVE, XdpRuntimeConfig, XdpStats};
 const MAX_QNAME_LEN: usize = 255;
 const DNS_HDR_LEN: usize = 12;
 const MAX_DNS_LEN: usize = 512;
+// The shortest possible positive reply: header, a one-byte QNAME (the root)
+// and QTYPE/QCLASS. The 16-byte copy chunk relies on this, because it always
+// writes a whole chunk even when the reply length is not a multiple of it.
+const MIN_POSITIVE_LEN: usize = DNS_HDR_LEN + 1 + 4;
 
 /// Why a packet fetched or matched nothing in the cache.
 enum Outcome {
@@ -202,7 +206,7 @@ fn try_dns_xdp(ctx: &XdpContext) -> Result<(u32, Option<Outcome>), ()> {
     } else {
         // The duplicate bound inside `write_positive` exists for the verifier
         // and stays silent; this is the diagnostic site for a poisoned entry.
-        if resp_len < DNS_HDR_LEN || resp_len > MAX_DNS_LEN {
+        if resp_len < MIN_POSITIVE_LEN || resp_len > MAX_DNS_LEN {
             warn!(
                 ctx,
                 "cached response length out of range: {} (txid {:x}, hash {:x})",
@@ -267,19 +271,59 @@ fn try_dns_xdp(ctx: &XdpContext) -> Result<(u32, Option<Outcome>), ()> {
 }
 
 // ---------------------------------------------------------------------------
-// DNS question parsing + FNV-1a hash
+// DNS question parsing + word-wise FNV-1a hash
 // ---------------------------------------------------------------------------
 
 const FNV_OFFSET_BASIS: u64 = 0xcbf29ce484222325;
 const FNV_PRIME: u64 = 0x100000001b3;
 
+const BYTE_ONES: u64 = 0x0101_0101_0101_0101;
+const BYTE_HIGHS: u64 = 0x8080_8080_8080_8080;
+
+/// Fold one little-endian 8-byte word of QNAME into the running hash.
+#[inline(always)]
+fn fnv1a_word(hash: u64, word: u64) -> u64 {
+    (hash ^ word).wrapping_mul(FNV_PRIME)
+}
+
+/// Lowercase ASCII letters in every byte, branchlessly.
+///
+/// `b >= 0x41` and `b >= 0x5B` come from the padded-subtraction SWAR trick:
+/// `word | BYTE_HIGHS` keeps each byte's borrow to itself, and `!word` drops
+/// bytes that already have the high bit set (never ASCII letters).
+#[inline(always)]
+fn lower_word(word: u64) -> u64 {
+    let ge_a = ((word | BYTE_HIGHS) - 0x4141_4141_4141_4141) & !word & BYTE_HIGHS;
+    let gt_z = ((word | BYTE_HIGHS) - 0x5B5B_5B5B_5B5B_5B5B) & !word & BYTE_HIGHS;
+    // `'A'..='Z'` leaves bit 7 set; moving it to bit 5 gives the +0x20 offset.
+    word | ((ge_a & !gt_z) >> 2)
+}
+
+/// Index of the first zero byte in `word`, or 8 if there is none.
+///
+/// Only called for the block that holds the root label, so the eight-way
+/// scan runs once per packet rather than once per word.
+#[inline(always)]
+fn zero_index(word: u64) -> usize {
+    let mut i = 0;
+    while i < 8 {
+        if ((word >> (i * 8)) & 0xFF) == 0 {
+            return i;
+        }
+        i += 1;
+    }
+    8
+}
+
 fn parse_dns_question(ctx: &XdpContext, dns_offset: usize) -> Option<(u64, u16, u16, usize)> {
     let data = ctx.data();
     let end = ctx.data_end();
-    // The QNAME is hashed as one flat stream of wire bytes (length-prefixed
-    // labels, lowercased), matching the userspace key builder. A per-label
-    // loop does not fit the verifier budget: every label length re-splits the
-    // path, so the explored state count grows with each nesting level.
+    // The QNAME is hashed as its wire bytes (length-prefixed labels,
+    // lowercased, root label's zero included) zero-padded to a whole 8-byte
+    // word and folded in one little-endian u64 at a time — the same shape as
+    // `fnv1a_64` in the userspace key builder. Besides running one multiply
+    // per eight bytes instead of one per byte, a word read needs a single
+    // bounds check instead of one per byte.
     let mut hash = FNV_OFFSET_BASIS;
     let mut pos = dns_offset + DNS_HDR_LEN;
     let mut name_len = 0usize;
@@ -288,26 +332,58 @@ fn parse_dns_question(ctx: &XdpContext, dns_offset: usize) -> Option<(u64, u16, 
         if name_len >= MAX_QNAME_LEN {
             return None;
         }
-        // Compare packet-relative addresses, not bare offsets: the verifier
-        // only tracks bounds for pointers derived from the packet. The check
-        // asks for two bytes because on a pointer with a zero fixed offset a
-        // right-open range grants nothing, and the constant addend also keeps
-        // the compiler from folding the comparison to `end > cur` (which moves
-        // the proven range to the wrong branch).
         let cur = data + pos;
-        if cur + 2 > end {
+        if cur + 8 <= end {
+            // Safety: the comparison above proves eight readable bytes.
+            // A plain deref, not `read_unaligned`: LLVM spills the latter
+            // into eight byte loads, while the verifier accepts unaligned
+            // packet accesses and emits one `ldxdw`.
+            let word = unsafe { *(cur as *const u64) };
+            let zeros = word.wrapping_sub(BYTE_ONES) & !word & BYTE_HIGHS;
+            if zeros == 0 {
+                hash = fnv1a_word(hash, lower_word(word));
+                pos += 8;
+                name_len += 8;
+                continue;
+            }
+            // This block holds the root label: keep the bytes up to the
+            // terminator and drop everything after it, which is the zero
+            // padding the userspace side hashes.
+            let first = zeros & zeros.wrapping_neg();
+            hash = fnv1a_word(hash, lower_word(word) & (first - 1));
+            let consumed = zero_index(word) + 1;
+            pos += consumed;
+            name_len += consumed;
+            break;
+        }
+        // Fewer than eight bytes remain in the frame: assemble the same
+        // little-endian word one byte at a time.
+        let mut word = 0u64;
+        let mut i = 0usize;
+        let mut terminated = false;
+        while i < 8 {
+            if name_len >= MAX_QNAME_LEN {
+                return None;
+            }
+            let p = data + pos;
+            if p + 2 > end {
+                return None;
+            }
+            let byte = unsafe { *(p as *const u8) };
+            word |= (byte.to_ascii_lowercase() as u64) << (i * 8);
+            pos += 1;
+            name_len += 1;
+            i += 1;
+            if byte == 0 {
+                terminated = true;
+                break;
+            }
+        }
+        if !terminated {
             return None;
         }
-        let byte = unsafe { *(cur as *const u8) };
-        // Length bytes and the root's zero are below 'A', so lowercasing them
-        // is an identity and the whole name can be folded uniformly.
-        hash ^= byte.to_ascii_lowercase() as u64;
-        hash = hash.wrapping_mul(FNV_PRIME);
-        pos += 1;
-        name_len += 1;
-        if byte == 0 {
-            break; // Root label — end of QNAME
-        }
+        hash = fnv1a_word(hash, word);
+        break;
     }
 
     // QTYPE follows the QNAME (pos is already past the root label). Read both
@@ -387,14 +463,14 @@ fn write_positive(
     // Verifier bound only: the poisoned-entry case is diagnosed and passed
     // before the resize, and reaching this point means the frame was resized
     // and must be answered or dropped.
-    if resp_len < DNS_HDR_LEN || resp_len > MAX_DNS_LEN {
+    if resp_len < MIN_POSITIVE_LEN || resp_len > MAX_DNS_LEN {
         return Err(());
     }
 
     let src = entry.resp_data.as_ptr();
     // Copy the leading chunk so that the loop below is aligned to it and ends
-    // exactly at resp_len. resp_len >= DNS_HDR_LEN, so four bytes are always
-    // available.
+    // exactly at resp_len. resp_len >= MIN_POSITIVE_LEN, so a full chunk is
+    // always available even when resp_len is not a multiple of it.
     let lead = resp_len & (COPY_CHUNK - 1);
     let mut i = lead;
     if lead != 0 {
@@ -459,12 +535,10 @@ fn finalize_headers(
         return Err(());
     }
     let eth = data as *mut u8;
-    swap_u8(eth, 0, 6);
-    swap_u8(eth, 1, 7);
-    swap_u8(eth, 2, 8);
-    swap_u8(eth, 3, 9);
-    swap_u8(eth, 4, 10);
-    swap_u8(eth, 5, 11);
+    // Two 4-byte halves of each 6-byte address: dst[0..4] <-> src[0..4] and
+    // dst[4..6] <-> src[4..6].
+    swap_u32(eth, 0, 6);
+    swap_u16(eth, 4, 10);
 
     // IPv4: swap addresses, set DF, fix the total length and update the header
     // checksum. The checksum is updated incrementally (RFC 1624) rather than
@@ -484,10 +558,7 @@ fn finalize_headers(
     let old_check = read_u16_be(ip, 10);
 
     // Swapping the two addresses leaves the one's complement sum unchanged.
-    swap_u8(ip, 12, 16);
-    swap_u8(ip, 13, 17);
-    swap_u8(ip, 14, 18);
-    swap_u8(ip, 15, 19);
+    swap_u32(ip, 12, 16);
 
     let new_tot_len = (ip_hdr_len + UDP_HDR_LEN + new_dns_len) as u16;
     let new_frag_off = old_frag_off | 0x4000; // Don't Fragment
@@ -515,8 +586,7 @@ fn finalize_headers(
         return Err(());
     }
     let udp = (data + udp_offset) as *mut u8;
-    swap_u8(udp, 0, 2);
-    swap_u8(udp, 1, 3);
+    swap_u16(udp, 0, 2);
     write_u16_be(udp, 4, (UDP_HDR_LEN + new_dns_len) as u16);
     write_u16_be(udp, 6, 0);
 

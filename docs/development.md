@@ -46,7 +46,8 @@ sudo env "PATH=$PATH" cargo test -p doggy-dns-xdp --test xdp_integration_test --
 > measured but has no `change:` line. The end-to-end Nacos scenario is absent by
 > necessity — the server aborts boot when Nacos is unreachable — so the Nacos
 > paths are covered by benches only. `docs/benchmarks/userspace-baseline.md`
-> holds the reference numbers.
+> holds the reference numbers, and `docs/benchmarks/xdp-kernel-hot-path.md`
+> holds the XDP program's instruction counts and component benchmarks.
 
 Reports: `cobertura.xml` (for CI/Codecov) and `tarpaulin-report.html` (local).
 

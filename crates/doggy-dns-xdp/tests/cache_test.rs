@@ -26,8 +26,29 @@ fn fnv1a_empty_string() {
 
 #[test]
 fn fnv1a_known_value() {
-    // FNV-1a of "a" = 0xaf63dc4c8601ec8c
+    // A lone byte is one zero-padded word, so the classic byte-wise FNV-1a
+    // constant still applies: FNV-1a of "a" = 0xaf63dc4c8601ec8c.
     assert_eq!(fnv1a_64(b"a"), 0xaf63dc4c8601ec8c);
+}
+
+#[test]
+fn fnv1a_hashes_eight_byte_words() {
+    // One little-endian u64 word: byte-wise FNV-1a of the same input would
+    // run eight multiply steps and produce a different value.
+    assert_eq!(fnv1a_64(b"abcdefgh"), 0x3919eeb00ee1e68c);
+}
+
+#[test]
+fn fnv1a_pads_to_whole_words() {
+    // Nine bytes are two words: 0x6867666564636261, then 0x69 with the
+    // remaining seven bytes zero-padded.
+    assert_eq!(fnv1a_64(b"abcdefghi"), 0xe8f77a2949db571f);
+
+    // Padding is to the next whole word, not to a fixed length: four bytes
+    // and the same four bytes followed by four zeros hash identically, while
+    // eight explicit zeros are a second, extra word.
+    assert_eq!(fnv1a_64(b"abcd"), fnv1a_64(b"abcd\0\0\0\0"));
+    assert_ne!(fnv1a_64(b"abcd"), fnv1a_64(b"abcd\0\0\0\0\0\0\0\0"));
 }
 
 #[test]
