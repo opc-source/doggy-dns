@@ -14,16 +14,17 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use tokio::time::Instant;
 use tracing::Instrument;
 
-/// Cycles the answer records of a multi-record response, one step per query.
+/// Cycles the answer records of a multi-record response, one step per rotated
+/// response.
 ///
 /// A DNS client that takes the first record — which is what most resolvers and
 /// every `getaddrinfo` caller effectively do — otherwise keeps landing on the
 /// same instance, because the authority emits them in registration order.
-/// The cursor is one counter for the whole handler, not one per name: a name
-/// with several instances still advances by exactly one on each of its own
-/// queries, while a per-name cursor would need a table that grows with the
-/// names seen and an eviction policy to go with it. Concurrent traffic on other
-/// names only makes a name's step jump further ahead, which spreads no worse.
+/// The cursor is one counter for the whole handler, not one per name: every
+/// rotated response moves it by one, whereas a per-name cursor would need a
+/// table that grows with the names seen and an eviction policy to go with it.
+/// Traffic on other names only makes a given name's step jump further ahead,
+/// which spreads no worse.
 /// Rotation moves records inside the already-owned `Vec`, so it costs no
 /// allocation.
 #[derive(Debug)]

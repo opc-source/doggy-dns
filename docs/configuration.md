@@ -13,7 +13,7 @@ port = 15353
 tcp_timeout = 10          # seconds, default 10
 shutdown_timeout = 5      # seconds, default 5
 worker_threads = 1        # default 1 (suitable for DaemonSet, one per node)
-rotate_answers = true     # default true: cycle multi-record answers per query
+rotate_answers = true     # default true: cycle multi-record answers per response
 
 # Optional: DNS over TLS
 #[server.tls]
