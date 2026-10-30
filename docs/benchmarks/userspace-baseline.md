@@ -79,10 +79,13 @@ cargo bench -p doggy-dns-core --bench handler_bench -- --save-baseline base
 Recorded 2026-10-30 on branch `perf/userspace-hot-path` (HEAD `7bcb6a2`), locally
 on the M1 machine named above, from `cargo bench` (release profile: `lto = "fat"`,
 one codegen unit). Component rows are `threads=1` medians; the thread-count table
-in `target/criterion` has the rest. The end-to-end row is the one number this
-branch cannot supply: it is produced only by the `Performance` job, so it stays
-pending until the merged `main` run, which is also the row a later PR compares
-against.
+in `target/criterion` has the rest.
+
+The end-to-end row and a same-runner comparison come from the first `Performance`
+job run on the PR ([PR #22](https://github.com/opc-source/doggy-dns/pull/22),
+run `40980082420`, job `123817684705`, hosted `ubuntu-26.04`): the job benches
+`origin/main` first and the PR second in the same process, so its `change:` lines
+share one runner and are the numbers to trust over any cross-machine delta.
 
 | Measurement | Before | After | Target |
 |-------------|--------|-------|--------|
@@ -90,7 +93,7 @@ against.
 | `nacos_authority_lookup_hit` | 1.4314 µs | 0.299 µs | <= 0.8 µs (met) |
 | `service_key_from_name_hit` (was `parse_dns_name_hit` 0.556 µs) | 0.556 µs | 0.0958 µs | <= 0.15 µs (met) |
 | `handler_pipeline_nacos_nxdomain` | 2.9053 µs | 0.898 µs (−69%) | lower (met) |
-| end-to-end dnsperf QPS | 43,288 (XDP stress job's userspace-only reference, default `RUST_LOG`; never measured by the `Performance` job before this round) | pending the merged-main `Performance` run | not gated |
+| end-to-end dnsperf QPS | 43,288 (XDP stress job's userspace-only reference, default `RUST_LOG`) | 64,371 (`RUST_LOG=warn`, PR `Performance` job; first of ten repeated runs of 10,000 queries, 0 lost, avg latency 1.3 ms) | not gated |
 | `NacosAuthority::lookup` allocations (hit / miss) | ~20 / ~15 (estimated before the guard existed) | 6 / 2 | <= 8 / <= 3 (met) |
 
 The allocation row comes from `cargo test -p doggy-dns-nacos --test alloc_guard_test`,
@@ -101,3 +104,28 @@ runs but not a general "allocations per answer" figure.
 All four component rows are single-run medians from one machine; the `Performance`
 job's base-vs-PR `change:` lines on one runner remain the comparison that matters
 for a future regression.
+
+### Same runner, base (`main`) against this branch
+
+`threads=1` medians from the job above. The 43,288 figure in the E2E row was never
+measured with this config and logging level, and the job only runs the E2E scenario
+on the PR side, so that row is a reference for future runs, not a before/after pair.
+
+| Benchmark | `main` | This branch | `change:` |
+|-----------|--------|-------------|-----------|
+| `handler_pipeline_nacos_hit` | 2.649 µs | 1.188 µs | −55.0% |
+| `handler_pipeline_nacos_nxdomain` | — (new ID) | 1.229 µs | — (new ID) |
+| `handler_pipeline_nxdomain` | 684.0 ns | 581.0 ns | −15.1% |
+| `authority_chain_empty` | 99.7 ns | 74.0 ns | −23.9% |
+| `authority_chain_nacos_hit` | 1.643 µs | 413.4 ns | −74.8% |
+| `nacos_authority_lookup_hit` | 1.452 µs | 348.7 ns | −76.1% |
+| `nacos_authority_lookup_miss` | 1.258 µs | 246.8 ns | −80.6% |
+| `parse_dns_name_hit` → `service_key_from_name_hit` | 539.7 ns | 113.1 ns | — (renamed ID) |
+| `parse_dns_name_miss` → `service_key_from_name_miss` | 275.8 ns | 27.0 ns | — (renamed ID) |
+| `to_dns_records_10_ips` | 488.5 ns | 341.4 ns | −30.6% |
+
+The two `—` rows are exactly what `--baseline-lenient` exists for: a renamed ID has
+no saved base data, so criterion prints the time and omits the `change:` line instead
+of panicking. `handler_pipeline_nacos_nxdomain` is new in this round, so it has no
+`main` measurement at all; its pre-refactor cost is the local 2.9053 µs in the table
+above, and 1.229 µs is the CI runner's post-refactor figure (the local one is lower).
