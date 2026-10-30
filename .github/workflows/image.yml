@@ -89,8 +89,8 @@ jobs:
       # The smoke serves a query through a fake upstream the script owns on an
       # unprivileged port, checks /healthz + /readyz, and asserts the declared
       # user from the matrix. For both variants it runs the container with
-      # `--cap-drop ALL` and no bpffs — stricter than the manifests, which
-      # (for the XDP variant) also need NET_BIND_SERVICE to bind port 53.
+      # `--cap-drop ALL` and no bpffs — stricter than the manifests, which grant
+      # NET_BIND_SERVICE so port 53 can be bound.
       #
       # `--xdp` is deliberately not passed here. It would additionally mount the
       # host's bpffs and attach a program to the runner's NIC, which needs an
