@@ -5,10 +5,13 @@ Two kinds of number live here, and they are not interchangeable:
 - **Component benchmarks** are criterion medians measured locally on the machine
   named below, from the committed benches. They are the starting point later PRs
   compare against.
-- **End-to-end** is measured only by the `Performance` CI job, whose base-vs-PR
-  comparison happens on one runner inside one job. That job's first run lands
-  with this PR, so the end-to-end row below is the reference from the XDP stress
-  job's historical userspace-only run, not a measurement taken by this job.
+- **End-to-end** is measured on a fixed runner only by the `Performance` CI job,
+  whose base-vs-PR comparison happens on one runner inside one job. (The XDP
+  stress job also runs a userspace dnsperf pass; that is where the reference
+  below came from, and it did not set `RUST_LOG=warn`, so it is a
+  same-order-of-magnitude reference rather than a comparable baseline.) The
+  `Performance` job's first run lands with this PR, so the end-to-end row below
+  is that historical run, not a measurement taken by this job.
 
 Numbers are runner/machine specific; only same-job base-vs-PR comparisons are
 meaningful.
@@ -33,6 +36,10 @@ meaningful.
 
 Reference: **43,288 QPS** with four worker threads, from the XDP stress job's
 userspace-only run recorded in `docs/superpowers/specs/2026-10-29-userspace-perf-design.md`.
+That run left `RUST_LOG` at its default (`info`), so per-query request logs were
+on; the `Performance` job suppresses them with `RUST_LOG=warn`. Treat the figure
+as an order-of-magnitude reference, not a baseline the new job's number should
+match to the digit.
 The first `Performance` job on this PR replaces the table above with its own
 number; if it is not the same order of magnitude, the job is measuring something
 other than the transport (check the `RUST_LOG=warn` suppression and the warm-up).
@@ -83,7 +90,7 @@ against.
 | `nacos_authority_lookup_hit` | 1.4314 µs | 0.299 µs | <= 0.8 µs (met) |
 | `service_key_from_name_hit` (was `parse_dns_name_hit` 0.556 µs) | 0.556 µs | 0.0958 µs | <= 0.15 µs (met) |
 | `handler_pipeline_nacos_nxdomain` | 2.9053 µs | 0.898 µs (−69%) | lower (met) |
-| end-to-end dnsperf QPS | 43,288 (XDP stress job's userspace-only reference; never measured by the `Performance` job before this round) | pending the merged-main `Performance` run | not gated |
+| end-to-end dnsperf QPS | 43,288 (XDP stress job's userspace-only reference, default `RUST_LOG`; never measured by the `Performance` job before this round) | pending the merged-main `Performance` run | not gated |
 | `NacosAuthority::lookup` allocations (hit / miss) | ~20 / ~15 (estimated before the guard existed) | 6 / 2 | <= 8 / <= 3 (met) |
 
 The allocation row comes from `cargo test -p doggy-dns-nacos --test alloc_guard_test`,

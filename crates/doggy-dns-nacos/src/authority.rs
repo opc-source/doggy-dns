@@ -120,8 +120,9 @@ impl ZoneHandler for NacosAuthority {
             return LookupControlFlow::Continue(Err(LookupError::NameExists));
         }
 
-        // Answers carry an owned name, which only this path pays for. K records
-        // cost K Name clones; that is the floor a Vec<Record> gives us.
+        // Answers carry an owned name: one clone for the answer itself (paid
+        // even when the family filter then finds no record) plus one per
+        // record. That is the floor a `Vec<Record>` gives us.
         let answer_name = Name::from(name.clone());
         let records = to_dns_records(&answer_name, entry.value(), self.ttl, rtype);
 

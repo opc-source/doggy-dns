@@ -39,9 +39,11 @@ sudo env "PATH=$PATH" cargo test -p doggy-dns-xdp --test xdp_integration_test --
 > PR second) and prints criterion `change:` lines, plus one end-to-end dnsperf run
 > against `config/doggy-dns-stress.toml` with `RUST_LOG=warn`. It never fails a PR:
 > shared-runner variance is not characterised well enough to gate merges. The
-> end-to-end Nacos scenario is absent by necessity — the server aborts boot when
-> Nacos is unreachable — so the Nacos paths are covered by benches only.
-> `docs/benchmarks/userspace-baseline.md` holds the reference numbers.
+> comparison is lenient, so a bench ID that is new or renamed on the PR side is
+> measured but has no `change:` line. The end-to-end Nacos scenario is absent by
+> necessity — the server aborts boot when Nacos is unreachable — so the Nacos
+> paths are covered by benches only. `docs/benchmarks/userspace-baseline.md`
+> holds the reference numbers.
 
 Reports: `cobertura.xml` (for CI/Codecov) and `tarpaulin-report.html` (local).
 

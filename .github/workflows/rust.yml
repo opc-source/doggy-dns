@@ -49,6 +49,9 @@ jobs:
   performance:
     name: Performance
     runs-on: ubuntu-latest
+    # Two LTO builds plus six criterion runs on two vCPUs; without a bound a
+    # stuck build would hold the concurrency slot until the default timeout.
+    timeout-minutes: 60
     permissions:
       contents: read
       pull-requests: write
@@ -88,12 +91,16 @@ jobs:
         run: git checkout "$HEAD_SHA"
         env:
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+      # Lenient on purpose: a bench ID that is new or renamed on the PR side has
+      # no data under `base`, and plain `--baseline base` panics when one is
+      # missing. Lenient runs it uncompared instead, which is what a report-only
+      # job wants.
       - name: Component benchmarks (PR)
         if: github.event_name == 'pull_request'
         run: |
-          cargo bench -p doggy-dns-core --bench handler_bench -- --baseline base | tee /tmp/bench-pr.txt
-          cargo bench -p doggy-dns-plugin --bench chain_bench -- --baseline base | tee -a /tmp/bench-pr.txt
-          cargo bench -p doggy-dns-nacos --bench nacos_bench -- --baseline base | tee -a /tmp/bench-pr.txt
+          cargo bench -p doggy-dns-core --bench handler_bench -- --baseline-lenient base | tee /tmp/bench-pr.txt
+          cargo bench -p doggy-dns-plugin --bench chain_bench -- --baseline-lenient base | tee -a /tmp/bench-pr.txt
+          cargo bench -p doggy-dns-nacos --bench nacos_bench -- --baseline-lenient base | tee -a /tmp/bench-pr.txt
       # A push to main has no PR to compare against; keep a fresh baseline.
       - name: Component benchmarks (main)
         if: github.event_name != 'pull_request'
