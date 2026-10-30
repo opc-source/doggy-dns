@@ -611,8 +611,9 @@ def smoke(args):
                 name = None
             if not args.xdp:
                 print(
-                    f"[ok] {args.image}: declares uid 65532, ran with no capabilities, answered "
-                    f"{args.name_to_query} over UDP and TCP, forwarded {upstream.requests} queries"
+                    f"[ok] {args.image}: declares {expected_user(args)}, ran with no capabilities, "
+                    f"answered {args.name_to_query} over UDP and TCP, "
+                    f"forwarded {upstream.requests} queries"
                 )
                 return
             # FakeUpstream has left its `with` block and closed its socket, so the

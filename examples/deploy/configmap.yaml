@@ -42,8 +42,9 @@ data:
     ttl = 6
 
     # Everything else goes to the cluster's upstream DNS. `native` is left off
-    # deliberately: this pod uses the node's /etc/resolv.conf under hostNetwork,
-    # and on a node configured to use doggy-dns that is a loop.
+    # deliberately: it reads /etc/resolv.conf, which under this pod's
+    # ClusterFirstWithHostNet policy is the cluster DNS config, so the upstream
+    # is spelled out above instead of being inherited implicitly.
     [[plugins]]
     kind = "forward"
     enabled = true

@@ -111,8 +111,9 @@ CI runs this script for both images but never with `--xdp`: attaching a program
 needs a writable bpffs and an XDP-capable NIC, and a GitHub runner that happens
 to lack either would block every publish. The `:main-xdp` image still gets its
 userspace path checked there, because without an `[xdp]` block in the config the
-fast path stays dormant. The kernel reuse behaviour is covered by the root-only
-`xdp_integration_test` cases.
+fast path stays dormant; since that run has no `--xdp` to imply the user, CI
+passes `--expect-user root` explicitly. The kernel reuse behaviour is covered by
+the root-only `xdp_integration_test` cases.
 
 ## Registry
 

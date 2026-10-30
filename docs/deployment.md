@@ -151,7 +151,14 @@ variables, no volumes.
 ```bash
 python3 scripts/image_smoke.py --image ghcr.io/<org>/doggy-dns:main
 python3 scripts/image_smoke.py --image ghcr.io/<org>/doggy-dns:main-xdp --xdp
+# CI's case: the XDP image, checked through its userspace path only
+python3 scripts/image_smoke.py --image ghcr.io/<org>/doggy-dns:main-xdp --expect-user root
 ```
+
+The expected user defaults to `65532:65532`, or to root when `--xdp` is given,
+because `--xdp` implies the root-running variant. Pass `--expect-user` when the
+two disagree — CI smokes the XDP image without `--xdp` (no bpffs on the
+runner), so it has to expect root anyway.
 
 The script serves its own one-record forward upstream on loopback, so a run needs
 no outbound internet, and the expected answer is a fixed TEST-NET address. It also

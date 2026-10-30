@@ -100,8 +100,9 @@ Reports: `cobertura.xml` (for CI/Codecov) and `tarpaulin-report.html` (local).
 | **Nacos CI** | standalone Nacos server + `--ignored` end-to-end tests (subscribe → push → DNS answer) |
 | **Image** | builds both container variants on native amd64/arm64 runners, smoke-tests each, then publishes multi-arch manifests to ghcr.io |
 
-Every Rust job uses dependency caching (`Swatinem/rust-cache@v2`). The Image job
-does not: it builds inside a container, which the action cannot cache.
+Every job that compiles Rust caches the dependency build
+(`Swatinem/rust-cache@v2`); the format-only checks do not need it, and the Image
+job cannot use it because it compiles inside a container.
 
 The Image job is the only workflow that produces artifacts rather than verdicts,
 so it is a push trigger on `main` alone. [deployment.md](deployment.md) covers the
