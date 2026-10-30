@@ -47,10 +47,10 @@ the TTL are answered by the kernel. The sequence diagram below shows both paths.
 |-----|---------|---------|
 | `enabled` | `false` | Master switch; a failed init degrades to running without the fast path. |
 | `interface` | `""` | Resolve order: config value → `XDP_INTERFACE` env → default route parsed from `/proc/net/route`. |
-| `cache_size` | `65536` | Maximum entries in the kernel cache. Applied when the map is created at load time (`EbpfLoader::map_max_entries`); the eBPF program only declares the default size. |
+| `cache_size` | `65536` | Maximum entries in the kernel cache. Applied when the map is created at load time (`EbpfLoader::map_max_entries`); the eBPF program only declares the default size. A restart reuses the pinned map, so it keeps the capacity it was created with — startup logs a `warn` naming both numbers when they differ. |
 | `negative_ttl` | `30` | Seconds a cached NXDOMAIN is served. Also the fallback TTL when a positive answer exposes none. |
 | `attach_mode` | `"auto"` | `auto`: attach to the interface at startup. `manual`: load only, leaving attachment to an external tool. |
-| `pin_path` | `/sys/fs/bpf/doggy-dns/dns_cache` | Where the cache map is pinned so it survives (and can be re-attached across) restarts. |
+| `pin_path` | `/sys/fs/bpf/doggy-dns/dns_cache` | Where the cache map is pinned. The loader appends the cache layout version, so the bpffs file is `<pin_path>_v1`: a restart opens that path first and continues on the map already pinned there, which is what lets cached answers survive a restart. A layout change bumps the version and starts cold. bpffs cannot pin a name containing a dot, so the path must not contain one. |
 
 ## How it works
 
@@ -152,10 +152,17 @@ diagram leaves out:
 
 ### Userspace side (`crates/doggy-dns-xdp` + `src/xdp/`)
 
-- **`XdpManager`** loads the embedded ELF, takes and pins `DNS_CACHE`, wraps
-  `XDP_STATS`, writes `XDP_CONFIG { dns_port }`, then loads the program and
-  (in `auto` mode) attaches it to the interface. The manager must stay alive
-  for the server lifetime — dropping it detaches the program.
+- **`XdpManager`** loads the embedded ELF, hands `DNS_CACHE` and its versioned
+  pin path to the loader (`EbpfLoader::map_pin_path`), wraps `XDP_STATS`, writes
+  `XDP_CONFIG { dns_port }`, then loads the program and (in `auto` mode)
+  attaches it to the interface. The loader opens the pin path before creating
+  anything: an existing map there is reused — that is how the cache survives a
+  restart — and only a missing path is created and pinned. Startup logs which of
+  the two happened, and a `warn` if the reused map's type, key size, value size
+  or capacity is not what this build asks for; it never refuses to start over a
+  mismatch, because the pinned map is working state a restarted node has to come
+  up on. The manager must stay alive for the server lifetime — dropping it
+  detaches the program, but leaves the pinned map and its entries in bpffs.
 - **`XdpCacheMiddleware`** is appended to the middleware chain on success. In
   `after_request` it caches only `NoError` and `NXDomain` responses that carry
   the serialized reply: positive entries expire at the minimum TTL across the
@@ -192,8 +199,11 @@ diagram leaves out:
 - **Keyed by 64-bit FNV-1a hash, not the name itself** — a collision would
   serve another name's answer. Acceptable for a private resolver cache, worth
   knowing before exposing it publicly.
-- **`cache_size` is fixed once the map is created** — it is applied at load
-  time, not resized in place; restart to change it.
+- **`cache_size` is fixed when the map is created** — it is applied at load
+  time, not resized in place, and a restart reuses the pinned map instead of
+  creating a new one. Editing `cache_size` therefore changes nothing until the
+  pin file is removed (`rm <pin_path>_v1`); startup warns when the configured
+  capacity and the pinned map's capacity disagree.
 - **Answer rotation is frozen by a cache hit** — with `rotate_answers = true`
   (the default), the order that happens to be captured when an entry is written
   is what every hit replays until the entry expires, because the kernel answers

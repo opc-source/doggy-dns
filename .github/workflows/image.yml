@@ -1,0 +1,161 @@
+name: Image
+
+# Rolling images from `main` only — there is no tag-triggered release flow and
+# no `:latest`. Every push to main publishes four things:
+#
+#   :main          userspace resolver, multi-arch (amd64 + arm64)
+#   :main-xdp      the same plus the XDP fast path, multi-arch
+#   :sha-<7>       the userspace image for that exact commit
+#   :sha-<7>-xdp   the XDP image for that exact commit
+#
+# Each build job compiles one architecture on a native runner (no QEMU: the
+# workspace's fat-LTO release profile is slow enough without emulation), smoke
+# tests it, and pushes a per-arch tag. The publish job then joins the two
+# per-arch images into a manifest list under the rolling names, so a node pulls
+# `:main-xdp` and gets the image built for its own architecture.
+
+on:
+  push:
+    branches: ["main"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE: ghcr.io/${{ github.repository }}
+
+concurrency:
+  group: image-${{ github.ref }}
+  # Rolling tags are overwritten by design, but a half-published set is worse
+  # than a queued run: let the previous build finish.
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build (${{ matrix.variant }}, ${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - variant: userspace
+            arch: amd64
+            runner: ubuntu-latest
+            target: runtime
+            features: ""
+            user: "65532:65532"
+          - variant: userspace
+            arch: arm64
+            runner: ubuntu-24.04-arm
+            target: runtime
+            features: ""
+            user: "65532:65532"
+          - variant: xdp
+            arch: amd64
+            runner: ubuntu-latest
+            target: runtime-xdp
+            features: xdp
+            user: root
+          - variant: xdp
+            arch: arm64
+            runner: ubuntu-24.04-arm
+            target: runtime-xdp
+            features: xdp
+            user: root
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Log in to ghcr.io
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build
+        run: |
+          set -euo pipefail
+          docker build \
+            --build-arg FEATURES="${{ matrix.features }}" \
+            --target "${{ matrix.target }}" \
+            -t "${IMAGE}:tmp-${GITHUB_SHA}-${{ matrix.variant }}-${{ matrix.arch }}" \
+            .
+
+      # The smoke serves a query through a fake upstream the script owns on an
+      # unprivileged port, checks /healthz + /readyz, and asserts the declared
+      # user from the matrix. For both variants it runs the container with
+      # `--cap-drop ALL` and no bpffs — stricter than the manifests, which grant
+      # NET_BIND_SERVICE so port 53 can be bound.
+      #
+      # `--xdp` is deliberately not passed here. It would additionally mount the
+      # host's bpffs and attach a program to the runner's NIC, which needs an
+      # XDP-capable driver and a writable /sys/fs/bpf — neither is guaranteed on
+      # a GitHub-hosted runner, and a machine that happens to lack them would
+      # block every image publish. The `xdp` build still gets its userspace path
+      # exercised below, and the pinned-map reuse behaviour is proven by the
+      # root-only integration tests:
+      #
+      #   sudo env "PATH=$PATH" cargo test -p doggy-dns-xdp \
+      #     --test xdp_integration_test -- --ignored
+      #
+      # Run the full image-level proof on any Linux box with bpffs mounted:
+      #
+      #   python3 scripts/image_smoke.py --image <tag> --runtime podman --xdp
+      - name: Smoke test
+        run: |
+          set -euo pipefail
+          python3 scripts/image_smoke.py \
+            --image "${IMAGE}:tmp-${GITHUB_SHA}-${{ matrix.variant }}-${{ matrix.arch }}" \
+            --runtime docker \
+            --expect-user "${{ matrix.user }}"
+
+      # Only push what the smoke test accepted: a rolling `:main` is what every
+      # node pulls next, so a broken image must never reach it.
+      #
+      # The `tmp-<sha>-<variant>-<arch>` tags stay in the package. Deleting them
+      # would need the packages API (a DELETE per version, not expressible with
+      # `docker push`), and they are harmless: a manifest list addresses them by
+      # digest once created, and a re-run of the same commit overwrites them.
+      - name: Push per-arch image
+        run: |
+          set -euo pipefail
+          docker push "${IMAGE}:tmp-${GITHUB_SHA}-${{ matrix.variant }}-${{ matrix.arch }}"
+
+  publish:
+    name: Publish manifest (${{ matrix.variant }})
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      matrix:
+        variant: [userspace, xdp]
+    steps:
+      - name: Log in to ghcr.io
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create and push multi-arch manifests
+        env:
+          SHORT_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          suffix=""
+          if [ "${{ matrix.variant }}" = "xdp" ]; then suffix="-xdp"; fi
+          short="${SHORT_SHA:0:7}"
+          amd64="${IMAGE}:tmp-${SHORT_SHA}-${{ matrix.variant }}-amd64"
+          arm64="${IMAGE}:tmp-${SHORT_SHA}-${{ matrix.variant }}-arm64"
+          # `imagetools create` merges the two manifests without pulling either
+          # image's layers, and the same digest serves both rolling tags.
+          docker buildx imagetools create \
+            -t "${IMAGE}:main${suffix}" \
+            -t "${IMAGE}:sha-${short}${suffix}" \
+            "$amd64" "$arm64"
+          docker buildx imagetools inspect "${IMAGE}:main${suffix}"

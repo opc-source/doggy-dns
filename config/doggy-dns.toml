@@ -98,6 +98,8 @@ data_id = "doggy-dns.toml"
 # negative_ttl = 30           # NXDomain cache TTL in seconds
 # attach_mode = "auto"        # "auto" or "manual"
 # pin_path = "/sys/fs/bpf/doggy-dns/dns_cache"
+#                             # bpffs file is <pin_path>_v1; a restart reuses
+#                             # that map, so no '.' in the path
 
 # Node-side service control plane. Disabled by default.
 # One HTTP listener; `endpoints` chooses what it exposes:

@@ -68,6 +68,12 @@ pub fn validate_config(config: &DoggyDnsConfig) -> anyhow::Result<()> {
             config.xdp.pin_path.starts_with("/sys/fs/bpf/"),
             "xdp.pin_path must be under /sys/fs/bpf/"
         );
+        // bpffs will not pin an object whose name contains a dot — the loader's
+        // `BPF_OBJ_PIN` fails with `EPERM` — so a dotted path can never attach.
+        anyhow::ensure!(
+            !config.xdp.pin_path.contains('.'),
+            "xdp.pin_path must not contain '.': bpffs cannot pin an object with that name"
+        );
     }
     if config.control.enabled {
         crate::net::socket_addr(&config.control.listen_addr, config.control.port).map_err(

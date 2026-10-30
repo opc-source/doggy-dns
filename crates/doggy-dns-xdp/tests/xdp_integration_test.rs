@@ -11,8 +11,10 @@
 mod linux_tests {
     use doggy_dns_basic::XdpConfig;
     use doggy_dns_xdp::XdpManager;
+    use doggy_dns_xdp::cache::make_cache_key;
     use doggy_dns_xdp::cache::now_ktime_ns;
     use doggy_dns_xdp::middleware::compute_cache_entry;
+    use doggy_dns_xdp::pin::versioned_pin_path;
     use doggy_dns_xdp::stats::XdpStatsReader;
     use doggy_dns_xdp::types::XdpStats;
     use hickory_proto::op::{Message, MessageType, OpCode, Query, ResponseCode};
@@ -55,6 +57,13 @@ mod linux_tests {
     /// run in any order without one test unlinking another's map.
     fn pin_path(tag: &str, port: u16) -> String {
         format!("/sys/fs/bpf/doggy-dns-test/{tag}-{port}")
+    }
+
+    /// The bpffs file `XdpManager` actually creates for the config path above:
+    /// the loader appends the cache layout version, so every cleanup here has
+    /// to name that same file or the next run inherits this run's map.
+    fn pinned_file(config_pin_path: &str) -> String {
+        versioned_pin_path(config_pin_path)
     }
 
     fn config_for(pin_path: &str) -> XdpConfig {
@@ -133,7 +142,7 @@ mod linux_tests {
     fn xdp_cache_hit_positive() {
         let port: u16 = 5531;
         let pin = pin_path("hit", port);
-        let _ = std::fs::remove_file(&pin);
+        let _ = std::fs::remove_file(pinned_file(&pin));
 
         let mut attach = attach_lo(&config_for(&pin), port);
         let mut cache = attach.manager.take_cache();
@@ -173,7 +182,7 @@ mod linux_tests {
 
         drop(cache);
         drop(attach);
-        let _ = std::fs::remove_file(&pin);
+        let _ = std::fs::remove_file(pinned_file(&pin));
     }
 
     #[test]
@@ -181,7 +190,7 @@ mod linux_tests {
     fn xdp_cache_hit_negative_nxdomain() {
         let port: u16 = 5532;
         let pin = pin_path("nx", port);
-        let _ = std::fs::remove_file(&pin);
+        let _ = std::fs::remove_file(pinned_file(&pin));
 
         let mut attach = attach_lo(&config_for(&pin), port);
         let mut cache = attach.manager.take_cache();
@@ -223,7 +232,7 @@ mod linux_tests {
 
         drop(cache);
         drop(attach);
-        let _ = std::fs::remove_file(&pin);
+        let _ = std::fs::remove_file(pinned_file(&pin));
     }
 
     #[test]
@@ -231,7 +240,7 @@ mod linux_tests {
     fn xdp_cache_ttl_expiry() {
         let port: u16 = 5536;
         let pin = pin_path("expired", port);
-        let _ = std::fs::remove_file(&pin);
+        let _ = std::fs::remove_file(pinned_file(&pin));
 
         let mut attach = attach_lo(&config_for(&pin), port);
         let mut cache = attach.manager.take_cache();
@@ -267,7 +276,7 @@ mod linux_tests {
 
         drop(cache);
         drop(attach);
-        let _ = std::fs::remove_file(&pin);
+        let _ = std::fs::remove_file(pinned_file(&pin));
     }
 
     #[test]
@@ -276,7 +285,7 @@ mod linux_tests {
         let port: u16 = 5530;
         let other_port: u16 = 5539;
         let pin = pin_path("passthrough", port);
-        let _ = std::fs::remove_file(&pin);
+        let _ = std::fs::remove_file(pinned_file(&pin));
 
         let mut attach = attach_lo(&config_for(&pin), port);
         let stats = attach.manager.take_stats();
@@ -317,7 +326,7 @@ mod linux_tests {
         );
 
         drop(attach);
-        let _ = std::fs::remove_file(&pin);
+        let _ = std::fs::remove_file(pinned_file(&pin));
     }
 
     #[test]
@@ -325,7 +334,7 @@ mod linux_tests {
     fn xdp_cached_reply_edge_lengths() {
         let port: u16 = 5535;
         let pin = pin_path("edges", port);
-        let _ = std::fs::remove_file(&pin);
+        let _ = std::fs::remove_file(pinned_file(&pin));
 
         /// The kernel copies a cached reply verbatim and patches only the
         /// transaction id, so the copy paths only care about the length; the
@@ -391,7 +400,7 @@ mod linux_tests {
 
         drop(cache);
         drop(attach);
-        let _ = std::fs::remove_file(&pin);
+        let _ = std::fs::remove_file(pinned_file(&pin));
     }
 
     #[test]
@@ -399,7 +408,7 @@ mod linux_tests {
     fn xdp_stats_reflect_cache_outcomes() {
         let port: u16 = 5533;
         let pin = pin_path("stats", port);
-        let _ = std::fs::remove_file(&pin);
+        let _ = std::fs::remove_file(pinned_file(&pin));
 
         let mut attach = attach_lo(&config_for(&pin), port);
         let mut cache = attach.manager.take_cache();
@@ -480,7 +489,7 @@ mod linux_tests {
 
         drop(cache);
         drop(attach);
-        let _ = std::fs::remove_file(&pin);
+        let _ = std::fs::remove_file(pinned_file(&pin));
     }
 
     #[test]
@@ -535,7 +544,7 @@ mod linux_tests {
 
         let port: u16 = 5534;
         let pin = pin_path("logs", port);
-        let _ = std::fs::remove_file(&pin);
+        let _ = std::fs::remove_file(pinned_file(&pin));
 
         let mut attach = attach_lo(&config_for(&pin), port);
 
@@ -607,6 +616,183 @@ mod linux_tests {
         drop(enter);
         // The drain task polls forever by design; do not wait for it.
         runtime.shutdown_background();
-        let _ = std::fs::remove_file(&pin);
+        let _ = std::fs::remove_file(pinned_file(&pin));
+    }
+
+    #[test]
+    #[ignore] // Requires root, Linux, and XDP support on lo.
+    fn xdp_pinned_cache_survives_a_restart() {
+        let port: u16 = 5541;
+        let pin = pin_path("reuse", port);
+        let on_disk = pinned_file(&pin);
+        let _ = std::fs::remove_file(&on_disk);
+
+        let name = "survivor.example.";
+        let cached = response_bytes(name, ResponseCode::NoError);
+
+        // First generation: the loader creates and pins the map, one entry is
+        // written, then the manager goes away — which detaches the program but
+        // leaves the pinned map and its entry in bpffs.
+        {
+            let mut attach = attach_lo(&config_for(&pin), port);
+            let mut cache = attach.manager.take_cache();
+            let (key, value) = compute_cache_entry(
+                &Name::from_str(name).expect("name"),
+                1,
+                1,
+                ResponseCode::NoError,
+                cached.clone(),
+                Some(600),
+                30,
+                now_ktime_ns(),
+            );
+            cache.insert(&key, &value).expect("insert survivor entry");
+            drop(cache);
+        }
+
+        // Second generation on the same path, asking for a different capacity.
+        // Reusing the pinned map is the only way this can come up: creating a
+        // map at an existing pin path fails with `File exists`.
+        let second = XdpConfig {
+            cache_size: 2048,
+            ..config_for(&pin)
+        };
+        let mut attach = attach_lo(&second, port);
+        let mut cache = attach.manager.take_cache();
+        assert_eq!(
+            cache.max_entries().expect("read map info"),
+            1024,
+            "the second start must reuse the pinned map, whose capacity comes \
+             from the first config, not the 2048 the second one asks for"
+        );
+        let survivor_key = make_cache_key(&Name::from_str(name).expect("name"), 1, 1);
+        assert!(
+            cache
+                .get(&survivor_key)
+                .expect("lookup surviving entry")
+                .is_some(),
+            "the entry written before the restart must still be in the map"
+        );
+        let stats = attach.manager.take_stats();
+
+        // The newly attached program answers from that entry without ever
+        // having written it, so the kernel side holds the same map.
+        let socket = UdpSocket::bind("127.0.0.1:0").expect("bind sender");
+        let query_id: u16 = 0x6666;
+        socket
+            .send_to(
+                &query_for(&Name::from_str(name).expect("name"), query_id),
+                ("127.0.0.1", port),
+            )
+            .expect("send query");
+        let reply = recv_datagram(&socket).expect("surviving entry not answered in time");
+        let mut expected = cached;
+        expected[..2].copy_from_slice(&query_id.to_be_bytes());
+        assert_eq!(
+            reply, expected,
+            "the restarted program must replay the entry its predecessor wrote"
+        );
+
+        let snapshot = wait_for_stats(&stats, |snapshot| snapshot.hit >= 1);
+        assert!(snapshot.hit >= 1, "hit counter: {snapshot:?}");
+        assert_eq!(
+            snapshot.miss, 0,
+            "a freshly created map would have missed this query: {snapshot:?}"
+        );
+
+        drop(cache);
+        drop(attach);
+        let _ = std::fs::remove_file(&on_disk);
+    }
+
+    #[test]
+    #[ignore] // Requires root, Linux, and XDP support on lo.
+    fn xdp_reuse_warns_when_the_pinned_map_does_not_fit() {
+        use tracing::Subscriber;
+        use tracing_subscriber::Layer;
+        use tracing_subscriber::layer::{Context, SubscriberExt};
+        use tracing_subscriber::util::SubscriberInitExt;
+
+        /// Collects the text of every `doggy_dns_xdp::program` record so the
+        /// assertion can name the mismatch the loader is expected to report.
+        #[derive(Default)]
+        struct ProseSubscriber {
+            records: std::sync::Mutex<Vec<String>>,
+        }
+
+        impl ProseSubscriber {
+            fn observe(&self, text: &str) {
+                self.records
+                    .lock()
+                    .expect("records lock")
+                    .push(text.to_string());
+            }
+
+            fn joined(&self) -> String {
+                self.records.lock().expect("records lock").join("\n")
+            }
+        }
+
+        struct CollectLayer(std::sync::Arc<ProseSubscriber>);
+
+        impl<S: Subscriber> Layer<S> for CollectLayer {
+            fn on_event(&self, event: &tracing::Event<'_>, _ctx: Context<'_, S>) {
+                if event.metadata().target() != "doggy_dns_xdp::program" {
+                    return;
+                }
+                struct TextField(std::sync::Arc<ProseSubscriber>);
+                impl tracing::field::Visit for TextField {
+                    fn record_debug(
+                        &mut self,
+                        field: &tracing::field::Field,
+                        value: &dyn std::fmt::Debug,
+                    ) {
+                        // `message` is the event's own text; `details` and
+                        // friends are the named fields, and a capacity
+                        // mismatch arrives as `details`.
+                        self.0.observe(&format!("{}={:?}", field.name(), value));
+                    }
+                }
+                event.record(&mut TextField(self.0.clone()));
+            }
+        }
+
+        let port: u16 = 5542;
+        let pin = pin_path("reuse-warn", port);
+        let on_disk = pinned_file(&pin);
+        let _ = std::fs::remove_file(&on_disk);
+
+        // First generation pins a map of 1024 entries.
+        {
+            let attach = attach_lo(&config_for(&pin), port);
+            drop(attach);
+        }
+
+        // Second generation asks for 2048. The pinned map cannot be resized, so
+        // the operator has to be told the configured value did not take effect.
+        let second = XdpConfig {
+            cache_size: 2048,
+            ..config_for(&pin)
+        };
+        let subscriber = std::sync::Arc::new(ProseSubscriber::default());
+        let _default = tracing_subscriber::registry()
+            .with(CollectLayer(subscriber.clone()))
+            .set_default();
+        let mut attach = attach_lo(&second, port);
+        let cache = attach.manager.take_cache();
+        assert_eq!(
+            cache.max_entries().expect("read map info"),
+            1024,
+            "the pinned map's capacity wins"
+        );
+        let records = subscriber.joined();
+        assert!(
+            records.contains("capacity 1024 != configured 2048"),
+            "expected a warning naming the capacity mismatch, got: {records}"
+        );
+
+        drop(cache);
+        drop(attach);
+        let _ = std::fs::remove_file(&on_disk);
     }
 }

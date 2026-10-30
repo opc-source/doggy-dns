@@ -4,8 +4,9 @@
 //! `libc` freely without per-item `cfg` attributes.
 
 use anyhow::Result;
-use aya::maps::{HashMap, IterableMap, Map, MapData};
+use aya::maps::{HashMap, IterableMap, Map, MapData, MapType};
 
+use crate::pin::PinnedCacheShape;
 use crate::types::{CacheKey, CacheValue};
 
 /// Wrapper around the BPF [`HashMap`] for DNS cache operations.
@@ -41,6 +42,19 @@ impl DnsCacheMap {
     /// Capacity the map was created with, as reported by the kernel.
     pub fn max_entries(&self) -> Result<u32> {
         Ok(self.inner.map().info()?.max_entries())
+    }
+
+    /// The kernel's own description of this map, shaped for the reuse check in
+    /// the `pin` module. The map type comparison lives here because it needs
+    /// `aya`, which only builds on Linux.
+    pub fn shape(&self) -> Result<PinnedCacheShape> {
+        let info = self.inner.map().info()?;
+        Ok(PinnedCacheShape {
+            is_lru_hash: info.map_type()? == MapType::LruHash,
+            key_size: info.key_size(),
+            value_size: info.value_size(),
+            max_entries: info.max_entries(),
+        })
     }
 }
 

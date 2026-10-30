@@ -98,8 +98,22 @@ Reports: `cobertura.xml` (for CI/Codecov) and `tarpaulin-report.html` (local).
 | **Coverage** | `cargo-tarpaulin` -> Codecov (target: 60% project, 70% patch) |
 | **XDP CI** | fmt, integration tests (`--ignored`, root), component benches vs. base, dnsperf stress |
 | **Nacos CI** | standalone Nacos server + `--ignored` end-to-end tests (subscribe → push → DNS answer) |
+| **Image** | builds both container variants on native amd64/arm64 runners, smoke-tests each, then publishes multi-arch manifests to ghcr.io |
 
-All jobs use dependency caching (`Swatinem/rust-cache@v2`).
+Every job that compiles Rust caches the dependency build
+(`Swatinem/rust-cache@v2`); the format-only checks do not need it, and the Image
+job cannot use it because it compiles inside a container.
+
+The Image job is the only workflow that produces artifacts rather than verdicts,
+so it is a push trigger on `main` alone. [deployment.md](deployment.md) covers the
+Dockerfile's build arguments, the `CARGO_EXTRA_ARGS` memory workaround for small
+build machines, and how to run the same smoke locally:
+
+```bash
+python3 scripts/image_smoke.py --image <tag> --runtime podman          # userspace
+python3 scripts/image_smoke.py --image <tag> --runtime podman --xdp    # + pinned-map reuse
+python3 -m unittest scripts.test_image_smoke                          # the script's own tests
+```
 
 ### Running the Nacos end-to-end tests locally
 

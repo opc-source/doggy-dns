@@ -1,0 +1,21 @@
+# The build context is what `cargo build --release` reads: the two workspaces,
+# their manifests and lockfiles, the source trees, and the default config.
+# Everything excluded here is either a host build artifact (large, and built for
+# the wrong architecture) or something only tests, docs and CI consume — the
+# image never runs tests, and `Cargo.toml` dev-dependencies do not need the test
+# files to exist for `cargo build` to succeed.
+.git/
+.github/
+.superpowers/
+.worktrees/
+target/
+xdp/target/
+docs/
+scripts/
+tests/
+crates/*/tests/
+*.md
+Dockerfile
+.dockerignore
+.gitignore
+*.log

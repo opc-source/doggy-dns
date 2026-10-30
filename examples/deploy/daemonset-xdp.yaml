@@ -1,0 +1,132 @@
+# The XDP variant: the same resolver with the kernel fast path compiled in and
+# turned on by config. It differs from daemonset.yaml in three places — the
+# capabilities the loader needs, the host's bpffs mounted into the pod so the
+# cache map can be pinned there and survive a restart, and running as root.
+#
+# Prerequisite on every node: bpffs already mounted at /sys/fs/bpf. This pod does
+# not mount it for you, because mounting a filesystem needs CAP_SYS_ADMIN on the
+# host's mount namespace; on a systemd node put this in place first:
+#
+#   # /etc/systemd/system/sys-fs-bpf.mount
+#   [Unit]
+#   Description=BPFFS
+#   Before=kubelet.service
+#
+#   [Mount]
+#   What=bpffs
+#   Where=/sys/fs/bpf
+#   Type=bpf
+#   Options=mode=700
+#
+#   [Install]
+#   WantedBy=multi-user.target
+#
+#   # The file name must match Where= (systemd derives a mount unit's name from
+#   # its path), so a unit covering /sys/fs/bpf is named sys-fs-bpf.mount.
+#   systemctl enable --now sys-fs-bpf.mount
+#
+# Apply the ConfigMaps in configmap.yaml first, and create the namespace with
+# `kubectl create ns doggy-dns`.
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: doggy-dns-xdp
+  namespace: doggy-dns
+  labels:
+    app: doggy-dns-xdp
+spec:
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+  selector:
+    matchLabels:
+      app: doggy-dns-xdp
+  template:
+    metadata:
+      labels:
+        app: doggy-dns-xdp
+    spec:
+      hostNetwork: true
+      # The pod shares the node's network namespace, so without this it would
+      # inherit the node's resolv.conf instead of the cluster DNS policy.
+      dnsPolicy: ClusterFirstWithHostNet
+      priorityClassName: system-cluster-critical
+      tolerations:
+        - operator: Exists
+      containers:
+        - name: doggy-dns-xdp
+          image: ghcr.io/opc-source/doggy-dns:main-xdp
+          imagePullPolicy: Always
+          # No args: the binary reads /app/config/doggy-dns.toml, which the
+          # ConfigMap below mounts over the image's baked default. That config is
+          # the one with the [xdp] block enabled.
+          envFrom:
+            - configMapRef:
+                name: doggy-dns-env
+          ports:
+            - name: dns-udp
+              containerPort: 53
+              protocol: UDP
+            - name: dns-tcp
+              containerPort: 53
+              protocol: TCP
+            - name: control
+              containerPort: 19090
+              protocol: TCP
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: 19090
+            periodSeconds: 10
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 19090
+            initialDelaySeconds: 10
+            periodSeconds: 20
+            failureThreshold: 3
+          securityContext:
+            # Loading a program, pinning the map into the host's bpffs and setting
+            # the interface's XDP fd all run as root inside this container.
+            runAsUser: 0
+            privileged: false
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+              # BPF loads programs and maps, PERFMON lets the process read map
+              # info (which is how the reuse warning is produced), NET_ADMIN sets
+              # the interface's XDP fd. NET_BIND_SERVICE is needed even though the
+              # container runs as root: dropping ALL takes away root's implicit
+              # right to bind a port below ip_unprivileged_port_start, so without
+              # it the server exits with "Permission denied" on port 53.
+              # SYS_ADMIN is deliberately absent: the pod never mounts bpffs
+              # itself, it only writes into the mount the node already has.
+              add: ["BPF", "PERFMON", "NET_ADMIN", "NET_BIND_SERVICE"]
+          resources:
+            requests:
+              cpu: 100m
+              memory: 64Mi
+            limits:
+              cpu: "1"
+              memory: 256Mi
+          volumeMounts:
+            - name: config
+              mountPath: /app/config/doggy-dns.toml
+              subPath: doggy-dns.toml
+              readOnly: true
+            # The pinned cache map lives here. Sharing the host's bpffs is what
+            # lets a restarted pod find the map its predecessor pinned and keep
+            # serving from it.
+            - name: bpffs
+              mountPath: /sys/fs/bpf
+      volumes:
+        - name: config
+          configMap:
+            name: doggy-dns-xdp-config
+        - name: bpffs
+          hostPath:
+            path: /sys/fs/bpf
+            type: Directory
