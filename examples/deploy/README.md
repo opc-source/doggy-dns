@@ -31,13 +31,16 @@ port 53. Pick one variant per cluster.
 
 ## Which image
 
-`:main` is the userspace resolver. It drops every capability, runs as uid 65532,
-and needs nothing from the host.
+`:main` is the userspace resolver. It drops every capability except
+`NET_BIND_SERVICE` (needed to bind port 53 as uid 65532), runs as uid 65532, and
+needs nothing else from the host.
 
 `:main-xdp` is the same binary with the `xdp` feature compiled in, running as
-root with `BPF` + `PERFMON` + `NET_ADMIN`, because loading a program and setting
-an interface's XDP fd are privileged. It is the only variant that reads the
-`[xdp]` block; with `enabled = false` it behaves exactly like `:main`.
+root with `BPF` + `PERFMON` + `NET_ADMIN` + `NET_BIND_SERVICE`, because loading a
+program and setting an interface's XDP fd are privileged, and dropping all
+capabilities takes away root's own right to bind port 53. It is the only variant
+that reads the `[xdp]` block; with `enabled = false` it behaves exactly like
+`:main`.
 
 ## Config
 

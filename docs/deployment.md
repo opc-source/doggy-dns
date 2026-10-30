@@ -18,7 +18,7 @@ differ in one cargo feature and one user:
 | build | `--target runtime` | `--target runtime-xdp --build-arg FEATURES=xdp` |
 | fast path | not compiled in | eBPF program embedded in the binary |
 | runs as | uid 65532 | root |
-| host access needed | bind port 53 (`NET_BIND_SERVICE`) | `BPF` + `PERFMON` + `NET_ADMIN`, and the host's bpffs |
+| host access needed | bind port 53 (`NET_BIND_SERVICE`) | `BPF` + `PERFMON` + `NET_ADMIN` + `NET_BIND_SERVICE`, and the host's bpffs |
 | reads `[xdp]` | ignores it | acts on it |
 
 The runtime base is glibc Debian rather than a musl or distroless image because
@@ -110,6 +110,10 @@ ghcr.io/<org>/doggy-dns:sha-<7>       ← same images, pinned to one commit
 ghcr.io/<org>/doggy-dns:sha-<7>-xdp
 ```
 
+The `tmp-*` tags are not cleaned up afterwards — removing a tag needs the
+registry's package API, and the manifest list addresses the images by digest, so
+they cost nothing but a line in the package's tag list. Each push adds four.
+
 Three deliberate properties:
 
 - **No `:latest`.** A node's resolver should report which build it is running, and
@@ -193,12 +197,15 @@ docker run -d --cap-drop ALL --cap-add NET_BIND_SERVICE -p 53:53/udp -p 53:53/tc
 ```
 
 The XDP variant needs `--privileged`-adjacent access that is easier to express as
-the three capabilities in `examples/deploy/daemonset-xdp.yaml`, the host's bpffs
-mounted in, and the host's network namespace:
+the capabilities in `examples/deploy/daemonset-xdp.yaml`, the host's bpffs
+mounted in, and the host's network namespace. It runs as root, but still passes
+`NET_BIND_SERVICE`: `--cap-drop ALL` strips root's implicit right to bind a
+privileged port, so port 53 needs that capability back.
 
 ```bash
 docker run -d --network host --user 0:0 \
-  --cap-drop ALL --cap-add BPF --cap-add PERFMON --cap-add NET_ADMIN \
+  --cap-drop ALL \
+  --cap-add BPF --cap-add PERFMON --cap-add NET_ADMIN --cap-add NET_BIND_SERVICE \
   -v /sys/fs/bpf:/sys/fs/bpf \
   -v "$PWD/xdp-config.toml:/app/config/doggy-dns.toml:ro" \
   ghcr.io/<org>/doggy-dns:main-xdp
@@ -206,10 +213,10 @@ docker run -d --network host --user 0:0 \
 
 ## Kubernetes
 
-`examples/deploy/` holds the bare manifests — a namespace-scoped ConfigMap pair,
-and one DaemonSet per variant — with the apply order, the bpffs prerequisite and
-the config-refresh caveat documented in
-[`examples/deploy/README.md`](../examples/deploy/README.md).
+`examples/deploy/` holds the bare manifests — three ConfigMaps (the userspace
+config, the XDP config, and the shared env vars), and one DaemonSet per variant —
+with the apply order, the bpffs prerequisite and the config-refresh caveat
+documented in [`examples/deploy/README.md`](../examples/deploy/README.md).
 
 They are DaemonSets because doggy-dns answers in the **node's** network namespace
 (`hostNetwork: true`): a per-cluster service ClusterIP would put a resolver in
@@ -260,9 +267,10 @@ start a cold start on a fresh path rather than mixing formats.
   rejects a dotted one at startup rather than failing when the program attaches.
 - **Config edits not taking effect** — a `subPath` mount is bound at mount time.
   `kubectl rollout restart` after editing a ConfigMap.
-- **A cached answer outlives its TTL** — `cache_size` is fixed when the pinned map
-  is created; editing it changes nothing until the pin file is removed. The server
-  warns at startup when the pinned map's capacity and the config disagree.
+- **Changing `cache_size` has no effect** — the capacity is fixed when the pinned
+  map is created; editing the config changes nothing until the pin file is
+  removed. The server warns at startup when the pinned map's capacity and the
+  config disagree, and keeps running on the pinned map.
 - **DoT/DoH not reachable** — the manifests publish 53 and the control plane only.
   `[server.tls]` binds 853 and `[server.https]` binds 443; add those container
   ports and host ports yourself if you turn them on.

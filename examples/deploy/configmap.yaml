@@ -1,6 +1,7 @@
-# Config for the node-side resolver, as two ConfigMaps: one for the userspace
-# DaemonSet, one for the XDP DaemonSet. The XDP one is the userspace config plus
-# the `[xdp]` block, so the two can be diffed by eye.
+# Config for the node-side resolver, as three ConfigMaps: one for the userspace
+# DaemonSet, one for the XDP DaemonSet, and one holding the env vars both load
+# with `envFrom`. The XDP config is the userspace config plus the `[xdp]` block,
+# so the two can be diffed by eye.
 #
 # The DaemonSets mount these at /app/config/doggy-dns.toml with `subPath`, which
 # means the file is fixed at container start: editing a ConfigMap does nothing
@@ -26,9 +27,14 @@ data:
     logging = true
 
     # Service discovery for `<service>.<group>.<namespace>.nacos.local`.
+    #
+    # Shipped disabled: the watcher subscribes during startup, and a Nacos that
+    # cannot be reached fails the process (the container exits 1 and crash-loops)
+    # rather than degrading. Point DOGGY_NACOS_ADDR at your server first, then
+    # flip this to true.
     [[plugins]]
     kind = "nacos"
-    enabled = true
+    enabled = false
     server_addr = "${DOGGY_NACOS_ADDR}"
     namespace = "public"
     group = "DEFAULT_GROUP"
@@ -73,9 +79,11 @@ data:
     [middleware]
     logging = true
 
+    # Same as the userspace config: off until DOGGY_NACOS_ADDR points at a
+    # reachable server, because an unreachable one fails startup.
     [[plugins]]
     kind = "nacos"
-    enabled = true
+    enabled = false
     server_addr = "${DOGGY_NACOS_ADDR}"
     namespace = "public"
     group = "DEFAULT_GROUP"

@@ -7,7 +7,7 @@
 # not mount it for you, because mounting a filesystem needs CAP_SYS_ADMIN on the
 # host's mount namespace; on a systemd node put this in place first:
 #
-#   # /etc/systemd/system/bpffs.mount
+#   # /etc/systemd/system/sys-fs-bpf.mount
 #   [Unit]
 #   Description=BPFFS
 #   Before=kubelet.service
@@ -21,7 +21,9 @@
 #   [Install]
 #   WantedBy=multi-user.target
 #
-#   systemctl enable --now bpffs.mount
+#   # The file name must match Where= (systemd derives a mount unit's name from
+#   # its path), so a unit covering /sys/fs/bpf is named sys-fs-bpf.mount.
+#   systemctl enable --now sys-fs-bpf.mount
 #
 # Apply the ConfigMaps in configmap.yaml first, and create the namespace with
 # `kubectl create ns doggy-dns`.
@@ -96,10 +98,13 @@ spec:
               drop: ["ALL"]
               # BPF loads programs and maps, PERFMON lets the process read map
               # info (which is how the reuse warning is produced), NET_ADMIN sets
-              # the interface's XDP fd. SYS_ADMIN is deliberately absent: the pod
-              # never mounts bpffs itself, it only writes into the mount the node
-              # already has.
-              add: ["BPF", "PERFMON", "NET_ADMIN"]
+              # the interface's XDP fd. NET_BIND_SERVICE is needed even though the
+              # container runs as root: dropping ALL takes away root's implicit
+              # right to bind a port below ip_unprivileged_port_start, so without
+              # it the server exits with "Permission denied" on port 53.
+              # SYS_ADMIN is deliberately absent: the pod never mounts bpffs
+              # itself, it only writes into the mount the node already has.
+              add: ["BPF", "PERFMON", "NET_ADMIN", "NET_BIND_SERVICE"]
           resources:
             requests:
               cpu: 100m
