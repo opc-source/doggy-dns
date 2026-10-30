@@ -26,8 +26,29 @@ fn fnv1a_empty_string() {
 
 #[test]
 fn fnv1a_known_value() {
-    // FNV-1a of "a" = 0xaf63dc4c8601ec8c
+    // A lone byte is one zero-padded word, so the classic byte-wise FNV-1a
+    // constant still applies: FNV-1a of "a" = 0xaf63dc4c8601ec8c.
     assert_eq!(fnv1a_64(b"a"), 0xaf63dc4c8601ec8c);
+}
+
+#[test]
+fn fnv1a_hashes_eight_byte_words() {
+    // One little-endian u64 word: byte-wise FNV-1a of the same input would
+    // run eight multiply steps and produce a different value.
+    assert_eq!(fnv1a_64(b"abcdefgh"), 0x3919eeb00ee1e68c);
+}
+
+#[test]
+fn fnv1a_pads_to_whole_words() {
+    // Nine bytes are two words: 0x6867666564636261, then 0x69 with the
+    // remaining seven bytes zero-padded.
+    assert_eq!(fnv1a_64(b"abcdefghi"), 0xe8f77a2949db571f);
+
+    // Padding is to the next whole word, not to a fixed length: four bytes
+    // and the same four bytes followed by four zeros hash identically, while
+    // eight explicit zeros are a second, extra word.
+    assert_eq!(fnv1a_64(b"abcd"), fnv1a_64(b"abcd\0\0\0\0"));
+    assert_ne!(fnv1a_64(b"abcd"), fnv1a_64(b"abcd\0\0\0\0\0\0\0\0"));
 }
 
 #[test]
@@ -38,9 +59,22 @@ fn fnv1a_case_sensitive() {
 }
 
 #[test]
-fn fnv1a_deterministic() {
-    let input = b"svc-1.nacos.default.doggy.test";
-    assert_eq!(fnv1a_64(input), fnv1a_64(input));
+fn fnv1a_pads_every_partial_word() {
+    let bytes = b"abcdefghi";
+    // A short tail is the same word as those bytes zero-padded to eight, so
+    // every tail length 1..=8 must fold identically.
+    for n in 1..=8 {
+        let mut padded = bytes[..n].to_vec();
+        padded.resize(8, 0);
+        assert_eq!(
+            fnv1a_64(&bytes[..n]),
+            fnv1a_64(&padded),
+            "tail of {n} bytes"
+        );
+    }
+    // Nine bytes are two words: the ninth byte cannot be folded into the
+    // first word, so the eight-byte prefix hashes differently on its own.
+    assert_ne!(fnv1a_64(&bytes[..8]), fnv1a_64(&bytes[..9]));
 }
 
 #[test]
@@ -65,4 +99,23 @@ fn make_cache_key_keeps_label_boundaries() {
         make_cache_key(&name("ab.c.example.com."), 1, 1).name_hash,
         make_cache_key(&name("a.bc.example.com."), 1, 1).name_hash,
     );
+}
+
+#[test]
+fn make_cache_key_hashes_wire_form_at_max_length() {
+    // The widest name hickory accepts: four labels, 255 wire bytes including
+    // the length prefixes and the root terminator. This is the exact input
+    // that fills `make_cache_key`'s uninitialised stack buffer.
+    let long = "a".repeat(63);
+    let tail = "b".repeat(61);
+    let name = name(&format!("{long}.{long}.{long}.{tail}."));
+    let labels: [&[u8]; 4] = [
+        long.as_bytes(),
+        long.as_bytes(),
+        long.as_bytes(),
+        tail.as_bytes(),
+    ];
+    let wire = wire_qname(&labels);
+    assert_eq!(wire.len(), 255);
+    assert_eq!(make_cache_key(&name, 1, 1).name_hash, fnv1a_64(&wire));
 }

@@ -46,7 +46,16 @@ sudo env "PATH=$PATH" cargo test -p doggy-dns-xdp --test xdp_integration_test --
 > measured but has no `change:` line. The end-to-end Nacos scenario is absent by
 > necessity — the server aborts boot when Nacos is unreachable — so the Nacos
 > paths are covered by benches only. `docs/benchmarks/userspace-baseline.md`
-> holds the reference numbers.
+> holds the reference numbers, and `docs/benchmarks/xdp-kernel-hot-path.md`
+> holds the XDP program's instruction counts and component benchmarks.
+
+> Both end-to-end arms — here and in the `XDP Stress Test` job — are limited by
+> dnsperf's `-l` wall clock (30 s), not by `-n`: `-n` only cycles the input
+> file, and 10 cycles of 1000 names finish in well under a second, which
+> measured warm-up rather than steady state. The stress job reports XDP against
+> userspace from one run, not PR against main, so a ratio that moves a few
+> percent says nothing about a kernel change; the component benches and the
+> instruction counts are the kernel signals.
 
 Reports: `cobertura.xml` (for CI/Codecov) and `tarpaulin-report.html` (local).
 

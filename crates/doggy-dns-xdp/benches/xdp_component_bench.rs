@@ -6,18 +6,20 @@ use doggy_dns_xdp::types::CacheValue;
 use hickory_proto::rr::Name;
 
 fn bench_fnv1a_hash(c: &mut Criterion) {
-    let names = [
-        "svc-1.nacos.default.doggy.test",
-        "api-gateway.production.cluster.local",
-        "a.b.c.d.e.f.g.h.i.j.k.l.m.n.o.p",
-    ];
+    let short = "svc-1.nacos.default.doggy.test";
+    // 255 bytes: the longest name hickory accepts, four 63-byte labels.
+    let long = {
+        let label = "a".repeat(63);
+        format!("{label}.{label}.{label}.{label}")
+    };
+    assert_eq!(long.len(), 255);
 
     c.bench_function("fnv1a_64_short", |b| {
-        b.iter(|| fnv1a_64(black_box(names[0].as_bytes())))
+        b.iter(|| fnv1a_64(black_box(short.as_bytes())))
     });
 
     c.bench_function("fnv1a_64_long", |b| {
-        b.iter(|| fnv1a_64(black_box(names[2].as_bytes())))
+        b.iter(|| fnv1a_64(black_box(long.as_bytes())))
     });
 }
 

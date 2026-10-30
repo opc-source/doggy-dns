@@ -63,7 +63,7 @@ the TTL are answered by the kernel. The sequence diagram below shows both paths.
         |   1  eth / IPv4 / UDP?                     no -> XDP_PASS            |
         |   2  dport == XDP_CONFIG.dns_port?         no -> XDP_PASS            |
         |   3  QR=0 and QDCOUNT=1?                   no -> XDP_PASS            |
-        |   4  FNV-1a key over qname + qtype + qclass                          |
+        |   4  FNV-1a over qname wire bytes, 8 per round; qtype|qclass packed  |
         |   5  DNS_CACHE.get(key)      miss/expired -> XDP_PASS (counted)      |
         |   6  bpf_xdp_adjust_tail, then:                                      |
         |         positive hit : copy cached reply (<= 512 B), patch TXID      |
@@ -119,13 +119,26 @@ diagram leaves out:
 
 - The cache key is FNV-1a over the QNAME's raw wire bytes (length prefixes
   included, lowercased) plus `qtype`/`qclass`; the userspace key builder
-  produces the identical hash.
+  produces the identical hash. The hash runs one **little-endian word per eight
+  bytes** — `hash = (hash ^ word) * prime` — with the final partial word
+  zero-padded, so the program multiplies once per block instead of once per
+  byte. The QNAME is scanned in the same 8-byte blocks: a word with no zero
+  byte is lowercased with SWAR shifts and hashed whole, and the word that
+  contains the root label's terminator is masked down to the bytes before it.
+  Frames with fewer than eight bytes left fall back to a byte-at-a-time path
+  that assembles the same word.
 - Freshness uses `expires_at` against `bpf_ktime_get_ns`, the same monotonic
   clock userspace timestamps with.
-- Positive replies are copied chunked and bounds-checked, capped at 512 bytes,
-  with the transaction ID overwritten by the current query's.
-- Header rewrite swaps MACs/IPs/ports, fixes IP total length and UDP length, and
-  updates the IPv4 checksum incrementally (RFC 1624).
+- Positive replies are copied in 16-byte chunks (two `u64` moves) with a length
+  and bounds check per chunk, capped at 512 bytes, with the transaction ID
+  overwritten by the current query's. The chunking relies on a cached positive
+  reply being at least 17 bytes — header, a one-byte QNAME and QTYPE/QCLASS —
+  so a full chunk is always readable at offset zero even when the length is not
+  a multiple of 16; shorter or longer-than-512 lengths are rejected with a
+  warning and the query is passed.
+- Header rewrite swaps the MAC, IP addresses and ports with `u32`/`u16` moves
+  (the 6-byte MAC takes one `u32` and one `u16`), fixes IP total length and UDP
+  length, and updates the IPv4 checksum incrementally (RFC 1624).
 - After `bpf_xdp_adjust_tail` the original query no longer exists, so any later
   failure drops the packet rather than passing a truncated frame upward.
 - Failure paths log through `aya-log-ebpf` into the `AYA_LOGS` ring buffer:
@@ -202,3 +215,8 @@ The BPF struct layout (`CacheKey`, `CacheValue`, `XdpStats`,
 `crates/doggy-dns-xdp/src/types.rs` and
 `xdp/doggy-dns-xdp-ebpf/src/types.rs`; `XdpStats` has a drift-guard test, but
 the others must be edited in both places together.
+
+[benchmarks/xdp-kernel-hot-path.md](benchmarks/xdp-kernel-hot-path.md) records
+the kernel-side measurements: static instruction counts for the whole program
+and for the QNAME, copy and header-rewrite loops, the component benchmarks, and
+why there is no per-packet runtime number for the XDP program itself.

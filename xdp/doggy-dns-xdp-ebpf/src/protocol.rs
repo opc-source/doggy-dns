@@ -14,7 +14,7 @@ pub(crate) const UDP_HDR_LEN: usize = core::mem::size_of::<UdpHdr>();
 
 /// Chunk size used when copying cached responses into the frame. See
 /// [`copy_chunk`] for why this shape matters to the verifier.
-pub(crate) const COPY_CHUNK: usize = 4;
+pub(crate) const COPY_CHUNK: usize = 16;
 
 #[repr(C)]
 pub(crate) struct EthHdr {
@@ -53,22 +53,50 @@ pub(crate) struct UdpHdr {
 }
 
 /// Copy [`COPY_CHUNK`] bytes, all at constant offsets from `dst`.
+///
+/// Two 64-bit moves instead of sixteen byte moves: the caller's one
+/// `dst + COPY_CHUNK > data_end` check still proves every byte written, and a
+/// quarter as many instructions hit the verifier and the CPU. Plain derefs,
+/// not `read_unaligned`/`write_unaligned`: LLVM turns those into byte-by-byte
+/// accesses, while the verifier is happy with unaligned loads and stores on
+/// packet data and map values.
 #[inline(always)]
 pub(crate) fn copy_chunk(dst: usize, src: *const u8, src_off: usize) {
     unsafe {
-        *(dst as *mut u8) = *src.add(src_off);
-        *((dst + 1) as *mut u8) = *src.add(src_off + 1);
-        *((dst + 2) as *mut u8) = *src.add(src_off + 2);
-        *((dst + 3) as *mut u8) = *src.add(src_off + 3);
+        let lo = *(src.add(src_off) as *const u64);
+        let hi = *(src.add(src_off + 8) as *const u64);
+        *(dst as *mut u64) = lo;
+        *((dst + 8) as *mut u64) = hi;
+    }
+}
+
+/// Swap the two-byte words at `a` and `b`; [`swap_u32`] does the same for
+/// four-byte words.
+///
+/// Both helpers below rely on the same target-specific assumption as
+/// [`copy_chunk`]: these derefs may be unaligned (`swap_u32(ip, 12, 16)` puts
+/// one at IPv4 offset 14 + 12), which is fine because the BPF target accepts
+/// unaligned packet and map accesses and emits one `ldxh`/`stxh` or
+/// `ldxw`/`stxw`; `read_unaligned` would be lowered to byte loads instead.
+/// They are only ever used on packet memory inside the bounds checks in
+/// `main.rs`, which is why no alignment-bearing reference is formed.
+#[inline(always)]
+pub(crate) fn swap_u16(p: *mut u8, a: usize, b: usize) {
+    unsafe {
+        let x = *(p.add(a) as *const u16);
+        let y = *(p.add(b) as *const u16);
+        *(p.add(a) as *mut u16) = y;
+        *(p.add(b) as *mut u16) = x;
     }
 }
 
 #[inline(always)]
-pub(crate) fn swap_u8(p: *mut u8, a: usize, b: usize) {
+pub(crate) fn swap_u32(p: *mut u8, a: usize, b: usize) {
     unsafe {
-        let tmp = *p.add(a);
-        *p.add(a) = *p.add(b);
-        *p.add(b) = tmp;
+        let x = *(p.add(a) as *const u32);
+        let y = *(p.add(b) as *const u32);
+        *(p.add(a) as *mut u32) = y;
+        *(p.add(b) as *mut u32) = x;
     }
 }
 
