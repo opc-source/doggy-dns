@@ -4,31 +4,74 @@ use nacos_sdk::api::naming::{
     NamingChangeEvent, NamingEventListener, NamingService, NamingServiceBuilder, ServiceInstance,
 };
 use nacos_sdk::api::props::ClientProps;
+use std::net::IpAddr;
+use std::str::FromStr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicI64, Ordering};
 
-/// Key for the service instance cache.
+/// Separator inside [`ServiceKey`].
+///
+/// Not a byte that can appear in a DNS label anyone will register, so a service
+/// name containing dots can never be re-read as a group or namespace boundary.
+pub const KEY_SEPARATOR: char = '\u{1}';
+
+/// Key for the service instance cache: `service SEPARATOR group SEPARATOR
+/// namespace`, all lowercase.
+///
+/// One composite string instead of three fields: a lookup used to allocate the
+/// three parts and then lowercase each of them, six allocations for a value the
+/// caller already had in lowercase.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct ServiceKey {
-    pub service_name: String,
-    pub group: String,
-    pub namespace: String,
+pub struct ServiceKey(String);
+
+impl ServiceKey {
+    pub fn new(service_name: &str, group: &str, namespace: &str) -> Self {
+        let mut key = String::with_capacity(service_name.len() + group.len() + namespace.len() + 2);
+        key.push_str(service_name);
+        key.push(KEY_SEPARATOR);
+        key.push_str(group);
+        key.push(KEY_SEPARATOR);
+        key.push_str(namespace);
+        Self(key)
+    }
+
+    /// The composite text. For logs and assertions; not used for lookup.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// True when no part contains the composite key separator, so the assembled key
+/// cannot alias a different `(service, group, namespace)` triple.
+fn parts_are_separable(parts: [&str; 3]) -> bool {
+    parts.iter().all(|part| !part.contains(KEY_SEPARATOR))
 }
 
 /// Simplified service instance for DNS resolution.
 #[derive(Debug, Clone)]
 pub struct CachedInstance {
-    pub ip: String,
+    pub ip: IpAddr,
     pub port: i32,
     pub healthy: bool,
 }
 
-impl From<&ServiceInstance> for CachedInstance {
-    fn from(instance: &ServiceInstance) -> Self {
-        Self {
-            ip: instance.ip.clone(),
-            port: instance.port,
-            healthy: instance.healthy,
+impl CachedInstance {
+    /// Build a cache entry, rejecting an instance whose address is not an IP.
+    ///
+    /// Parsed once per push instead of once per query. An unparsable address is
+    /// dropped here rather than skipped while answering, so the warn log keeps
+    /// its level and text but no longer repeats for every query.
+    pub fn from_service_instance(instance: &ServiceInstance) -> Option<Self> {
+        match IpAddr::from_str(&instance.ip) {
+            Ok(ip) => Some(Self {
+                ip,
+                port: instance.port,
+                healthy: instance.healthy,
+            }),
+            Err(e) => {
+                tracing::warn!("skipping invalid IP '{}': {}", instance.ip, e);
+                None
+            }
         }
     }
 }
@@ -47,18 +90,28 @@ impl NamingEventListener for InstanceChangeListener {
         tracing::info!("nacos service changed: {}", service_name);
         self.last_push.store(unix_now_secs(), Ordering::Relaxed);
 
-        let key = ServiceKey {
-            service_name: service_name.to_lowercase(),
-            group: self.group.to_lowercase(),
-            namespace: self.namespace.to_lowercase(),
-        };
+        if !parts_are_separable([&service_name, &self.group, &self.namespace]) {
+            tracing::warn!(
+                service_name = %service_name,
+                group = %self.group,
+                namespace = %self.namespace,
+                "nacos identifiers contain the cache key separator; skipping this update"
+            );
+            return;
+        }
+
+        let key = ServiceKey::new(
+            &service_name.to_lowercase(),
+            &self.group.to_lowercase(),
+            &self.namespace.to_lowercase(),
+        );
 
         match &event.instances {
             Some(instances) => {
                 let cached: Vec<CachedInstance> = instances
                     .iter()
                     .filter(|i| i.healthy && i.enabled)
-                    .map(CachedInstance::from)
+                    .filter_map(CachedInstance::from_service_instance)
                     .collect();
                 // Immutable replacement: insert replaces the entire value
                 self.cache.insert(key, cached);

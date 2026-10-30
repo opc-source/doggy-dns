@@ -1,0 +1,5 @@
+Queries sent: 1298645
+Queries completed: 1298645
+Queries lost: 0
+Queries per second: 43288.123
+Average Latency (s): 0.000921 (min 0.000102, max 0.051234)

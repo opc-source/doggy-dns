@@ -80,3 +80,15 @@ chrono = { version = "0.4", features = ["serde"] }
 tokio-util = { version = "0.7", features = ["rt"] }
 serde_json = "1"
 thiserror = "2"
+
+# Release and bench both inherit this. `panic = "abort"` stays out: the test
+# suite and the criterion benches need unwinding to isolate a failing case.
+# `strip` takes debuginfo, not symbols: the OTLP profile signal resolves frame
+# names from the executable's own symbol table at runtime
+# (crates/doggy-dns-observability/src/profiles/mod.rs, symbol.name()/sys_name()),
+# and Rust keeps its functions in .symtab rather than .dynsym, so
+# `strip = "symbols"` would ship flame graphs full of addresses.
+[profile.release]
+lto = "fat"
+codegen-units = 1
+strip = "debuginfo"

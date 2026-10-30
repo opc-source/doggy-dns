@@ -1,9 +1,9 @@
-use hickory_proto::rr::{LowerName, Name, Record, RecordType};
+use hickory_proto::rr::{LowerName, Record, RecordType};
 use hickory_server::server::RequestInfo;
 use hickory_server::zone_handler::{
     AuthLookup, LookupControlFlow, LookupOptions, ZoneHandler, ZoneType,
 };
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 /// Result of a chain resolution, including which handler responded.
 pub struct ResolveResult {
@@ -20,6 +20,23 @@ pub struct ResolveResult {
 struct NamedHandler {
     name: String,
     handler: Arc<dyn ZoneHandler>,
+    /// Apex SOA for this handler's negative answers, fetched once.
+    ///
+    /// Lazily filled rather than fetched in `new`, because `new` is synchronous
+    /// and has 38 call sites. Two concurrent first-timers may both fetch; the
+    /// loser's `set` is ignored, which is benign and keeps this off the
+    /// async-lock path. The value goes stale only if plugin TTLs ever become
+    /// hot-reloadable - the chain is rebuilt with the config in that case, as
+    /// it already is for `[[plugins]]` changes.
+    ///
+    /// The first negative answer's `RequestInfo` is the one the fetch sees,
+    /// and every later query reuses that record. That is sound only while
+    /// `<handler>.lookup(origin, SOA, ..)` does not vary by request: every
+    /// authoritative handler today ignores the argument (`NacosAuthority`
+    /// discards it), and the `ZoneType::External` handlers never reach this
+    /// code. A future view/ACL-per-client handler would have to key this cache
+    /// by client - note that in the comment if you add one.
+    apex_soa: OnceLock<Option<Record>>,
 }
 
 /// Iterates through a chain of ZoneHandlers.
@@ -32,26 +49,33 @@ impl AuthorityChain {
     pub fn new(handlers: Vec<(String, Arc<dyn ZoneHandler>)>) -> Self {
         let handlers = handlers
             .into_iter()
-            .map(|(name, handler)| NamedHandler { name, handler })
+            .map(|(name, handler)| NamedHandler {
+                name,
+                handler,
+                apex_soa: OnceLock::new(),
+            })
             .collect();
         Self { handlers }
     }
 
     /// Resolve a query by iterating the chain.
+    ///
+    /// Takes the already-lowercased name the server parsed: `ZoneHandler::lookup`
+    /// wants a `&LowerName` anyway, so cloning and re-lowercasing here cost four
+    /// allocations per request for nothing.
     /// Returns the first non-Skip result with the handler name, or Skip if all handlers skip.
     pub async fn resolve(
         &self,
-        name: &Name,
+        name: &LowerName,
         record_type: RecordType,
         request_info: Option<&RequestInfo<'_>>,
     ) -> ResolveResult {
-        let lower_name = LowerName::new(name);
         let lookup_options = LookupOptions::default();
 
         for entry in &self.handlers {
             let result = entry
                 .handler
-                .lookup(&lower_name, record_type, request_info, lookup_options)
+                .lookup(name, record_type, request_info, lookup_options)
                 .await;
 
             match &result {
@@ -66,7 +90,22 @@ impl AuthorityChain {
                             result,
                             LookupControlFlow::Continue(Err(_)) | LookupControlFlow::Break(Err(_))
                         ) {
-                        apex_soa(entry.handler.as_ref(), request_info).await
+                        match entry.apex_soa.get() {
+                            Some(cached) => cached.clone(),
+                            None => {
+                                let fetched = apex_soa(entry.handler.as_ref(), request_info).await;
+                                // Only a hit is cached. A `None` can be a
+                                // transient failure of the handler's own SOA
+                                // lookup, and pinning it would drop the SOA
+                                // from every later negative for the rest of
+                                // the process; a miss retries, as the
+                                // uncached code did.
+                                if fetched.is_some() {
+                                    let _ = entry.apex_soa.set(fetched.clone());
+                                }
+                                fetched
+                            }
+                        }
                     } else {
                         None
                     };

@@ -55,7 +55,12 @@ through on lookup failure so a later `forward` plugin can still answer.
 
 - Connects to Nacos naming service via `nacos-sdk`
 - Subscribes to all services on startup; receives push updates on instance changes
-- Maintains an in-memory `DashMap<ServiceKey, Vec<CachedInstance>>` cache; updates replace the entire `Vec` for a key (immutable update)
+- Maintains an in-memory `DashMap<ServiceKey, Vec<CachedInstance>>` cache; updates
+  replace the entire `Vec` for a key (immutable update). `ServiceKey` is a single
+  composite lowercase string and `CachedInstance.ip` is an `IpAddr`, so a query builds
+  one key and does no address parsing.
+- The apex `SOA` is built once at authority construction and cached again on the
+  authority chain entry, so a negative answer costs no extra lookup after the first.
 - DNS name format: `<service>.<group>.<namespace>.<zone_suffix>.`
 - Example: `dig user-service.DEFAULT_GROUP.public.nacos.local A`
 - The name is split from the right, so service names may contain dots

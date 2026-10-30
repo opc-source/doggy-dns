@@ -3,6 +3,7 @@
 use dashmap::DashMap;
 use doggy_dns_nacos::authority::NacosAuthority;
 use doggy_dns_nacos::watcher::{CachedInstance, ServiceKey};
+use doggy_dns_plugin::authority_chain::AuthorityChain;
 use hickory_proto::op::ResponseCode;
 use hickory_proto::rr::{LowerName, Name, RData, RecordType};
 use hickory_server::zone_handler::{LookupControlFlow, LookupError, LookupOptions, ZoneHandler};
@@ -13,19 +14,15 @@ fn make_test_cache() -> Arc<DashMap<ServiceKey, Vec<CachedInstance>>> {
     let cache = Arc::new(DashMap::new());
     // Keys are stored lowercase since DNS names are case-insensitive
     cache.insert(
-        ServiceKey {
-            service_name: "user-service".to_string(),
-            group: "default_group".to_string(),
-            namespace: "public".to_string(),
-        },
+        ServiceKey::new("user-service", "default_group", "public"),
         vec![
             CachedInstance {
-                ip: "10.0.1.5".to_string(),
+                ip: "10.0.1.5".parse().unwrap(),
                 port: 8080,
                 healthy: true,
             },
             CachedInstance {
-                ip: "10.0.1.6".to_string(),
+                ip: "10.0.1.6".parse().unwrap(),
                 port: 8080,
                 healthy: true,
             },
@@ -59,13 +56,9 @@ async fn resolves_known_service() {
 async fn resolves_dotted_service_name() {
     let cache = Arc::new(DashMap::new());
     cache.insert(
-        ServiceKey {
-            service_name: "com.example.api".to_string(),
-            group: "default_group".to_string(),
-            namespace: "public".to_string(),
-        },
+        ServiceKey::new("com.example.api", "default_group", "public"),
         vec![CachedInstance {
-            ip: "10.0.2.7".to_string(),
+            ip: "10.0.2.7".parse().unwrap(),
             port: 8080,
             healthy: true,
         }],
@@ -194,19 +187,15 @@ async fn family_without_records_returns_nodata() {
 async fn a_query_returns_only_a_records() {
     let cache = Arc::new(DashMap::new());
     cache.insert(
-        ServiceKey {
-            service_name: "user-service".to_string(),
-            group: "default_group".to_string(),
-            namespace: "public".to_string(),
-        },
+        ServiceKey::new("user-service", "default_group", "public"),
         vec![
             CachedInstance {
-                ip: "10.0.1.5".to_string(),
+                ip: "10.0.1.5".parse().unwrap(),
                 port: 8080,
                 healthy: true,
             },
             CachedInstance {
-                ip: "2001:db8::1".to_string(),
+                ip: "2001:db8::1".parse().unwrap(),
                 port: 8080,
                 healthy: true,
             },
@@ -234,19 +223,15 @@ async fn a_query_returns_only_a_records() {
 async fn aaaa_query_returns_only_aaaa_records() {
     let cache = Arc::new(DashMap::new());
     cache.insert(
-        ServiceKey {
-            service_name: "user-service".to_string(),
-            group: "default_group".to_string(),
-            namespace: "public".to_string(),
-        },
+        ServiceKey::new("user-service", "default_group", "public"),
         vec![
             CachedInstance {
-                ip: "10.0.1.5".to_string(),
+                ip: "10.0.1.5".parse().unwrap(),
                 port: 8080,
                 healthy: true,
             },
             CachedInstance {
-                ip: "2001:db8::1".to_string(),
+                ip: "2001:db8::1".parse().unwrap(),
                 port: 8080,
                 healthy: true,
             },
@@ -316,4 +301,88 @@ async fn skips_sibling_zone_with_shared_suffix() {
         .await;
 
     assert!(matches!(result, LookupControlFlow::Skip));
+}
+
+/// The apex SOA is built once. Rebuilding it per answer was the cost; equal
+/// rdata across calls is what a caller can observe, so assert that plus the
+/// fact that a negative answer and an apex SOA query publish the same record.
+#[tokio::test]
+async fn apex_soa_is_identical_across_lookups() {
+    let cache = make_test_cache();
+    let authority = NacosAuthority::new(cache, "nacos.local", 6);
+    let apex = LowerName::from(Name::from_str("nacos.local.").unwrap());
+
+    let mut soas = Vec::new();
+    for _ in 0..3 {
+        match authority
+            .lookup(&apex, RecordType::SOA, None, LookupOptions::default())
+            .await
+        {
+            LookupControlFlow::Continue(Ok(lookup)) => {
+                soas.push(
+                    lookup
+                        .iter()
+                        .next()
+                        .expect("apex SOA query returns one record")
+                        .clone(),
+                );
+            }
+            other => panic!("expected Continue(Ok) for an apex SOA query, got {other}"),
+        }
+    }
+
+    assert!(
+        soas.windows(2).all(|pair| pair[0].data == pair[1].data
+            && pair[0].name == pair[1].name
+            && pair[0].ttl == pair[1].ttl),
+        "repeated apex SOA lookups must return the same record"
+    );
+}
+
+#[tokio::test]
+async fn apex_soa_matches_the_record_a_negative_answer_carries() {
+    let cache = make_test_cache();
+    let authority = Arc::new(NacosAuthority::new(cache, "nacos.local", 6));
+    let apex = LowerName::from(Name::from_str("nacos.local.").unwrap());
+    let missing =
+        LowerName::from(Name::from_str("unknown.default_group.public.nacos.local.").unwrap());
+
+    let published = match authority
+        .lookup(&apex, RecordType::SOA, None, LookupOptions::default())
+        .await
+    {
+        LookupControlFlow::Continue(Ok(lookup)) => lookup.iter().next().cloned(),
+        other => panic!("expected an apex SOA, got {other}"),
+    };
+
+    let handler: Arc<dyn ZoneHandler> = authority.clone();
+    let chain = AuthorityChain::new(vec![("nacos".to_string(), handler)]);
+    let attached = chain.resolve(&missing, RecordType::A, None).await.soa;
+
+    assert!(
+        published.is_some() && attached == published,
+        "the chain must attach the same SOA the zone publishes"
+    );
+}
+
+/// A client sends the QNAME in whatever case it likes. The cache key is
+/// lowercase, and the only reason it matches is that the server hands every
+/// handler a `LowerName` - so this is the contract the refactor relies on.
+#[tokio::test]
+async fn uppercase_wire_name_resolves_from_the_lowercase_cache() {
+    let cache = make_test_cache();
+    let authority = NacosAuthority::new(cache, "nacos.local", 6);
+
+    let name =
+        LowerName::from(Name::from_str("USER-SERVICE.DEFAULT_GROUP.PUBLIC.NACOS.LOCAL.").unwrap());
+    let result = authority
+        .lookup(&name, RecordType::A, None, LookupOptions::default())
+        .await;
+
+    match result {
+        LookupControlFlow::Continue(Ok(lookup)) => {
+            assert_eq!(lookup.iter().count(), 2, "both seeded instances answer");
+        }
+        other => panic!("uppercase QNAME must still resolve, got {other}"),
+    }
 }

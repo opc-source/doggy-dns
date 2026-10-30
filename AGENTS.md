@@ -18,7 +18,7 @@ cargo test -p doggy-dns-basic --test config_test -- parse_full_config  # Run a s
 cargo clippy --all-features --all-targets -- -D warnings    # Lint (CI uses -D, not -W)
 cargo fmt --all -- --check                     # Format check
 cargo bench --no-run --workspace               # Verify benchmarks compile
-cargo bench --workspace                        # Run all benchmarks
+cargo bench --workspace                        # Run all benchmarks (release profile: LTO, 1 codegen unit)
 cargo bench -p doggy-dns-core                 # Run handler pipeline benchmarks only
 cargo bench --bench nacos_bench                # Run a single benchmark file
 cargo bench --bench handler_bench -- handler_pipeline_nacos_hit  # Filter by name
@@ -79,9 +79,20 @@ All implement hickory's `ZoneHandler` trait. Plugins are evaluated in `[[plugins
 
 ### Nacos Integration Flow
 
-`NacosServiceWatcher` → subscribes to Nacos naming service → `InstanceChangeListener` receives push events → replaces entire `Vec<CachedInstance>` for a `ServiceKey` in `DashMap` (immutable update) → `NacosAuthority.lookup()` reads from cache.
+`NacosServiceWatcher` → subscribes to Nacos naming service → `InstanceChangeListener`
+receives push events → replaces entire `Vec<CachedInstance>` for a `ServiceKey` in
+`DashMap` (immutable update) → `NacosAuthority.lookup()` reads through the `DashMap`
+read guard and builds records from borrowed instances.
 
-DNS name format: `<service>.<group>.<namespace>.<zone_suffix>.` (parsed by `mapping::parse_dns_name`, split from the right so service names may contain dots). Only `A`/`AAAA` record types are served, filtered by query type. The authority owns its whole zone: unknown services return authoritative `NXDOMAIN` and missing families/types return `NODATA` instead of falling through to later plugins.
+DNS name format: `<service>.<group>.<namespace>.<zone_suffix>.` (zone membership by
+`Name::zone_of`, key by `mapping::service_key_from_name`, split from the right so
+service names may contain dots). `ServiceKey` is one composite lowercase string
+(`service \u{1} group \u{1} namespace`) and `CachedInstance.ip` is an `IpAddr`, parsed
+when the push arrives; the authority never lowercases or re-parses per query because
+the handler receives a `LowerName`. Only `A`/`AAAA` record types are served, filtered
+by query type. The authority owns its whole zone: unknown services return
+authoritative `NXDOMAIN` and missing families/types return `NODATA` instead of falling
+through to later plugins.
 
 ### Server (`core/server.rs`)
 

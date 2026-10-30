@@ -6,7 +6,9 @@ use hickory_proto::rr::Record;
 use hickory_proto::serialize::binary::BinEncoder;
 use hickory_server::net::xfer::Protocol;
 use hickory_server::server::{Request, RequestHandler, ResponseHandler, ResponseInfo};
-use hickory_server::zone_handler::{LookupControlFlow, LookupError, MessageResponseBuilder};
+use hickory_server::zone_handler::{
+    AuthLookup, LookupControlFlow, LookupError, LookupRecords, MessageResponseBuilder,
+};
 use std::sync::Arc;
 use tokio::time::Instant;
 use tracing::Instrument;
@@ -139,10 +141,11 @@ impl RequestHandler for DoggyDnsHandler {
             );
             span_for_body.record("client.port", request_info.src.port());
 
-            // Resolve through authority chain
-            let query_name = request_info.query.name().to_owned();
+            // Resolve through authority chain. `query.name()` is the `LowerName`
+            // the server already lowercased once at parse time, so it goes to the
+            // chain by reference; the log string is the only owned copy.
             let query_type = request_info.query.query_type();
-            let query_display = query_name.to_string();
+            let query_display = request_info.query.name().to_string();
             let resolve_span = tracing::info_span!(
                 "dns.resolve",
                 "dns.question.name" = %query_display,
@@ -152,7 +155,7 @@ impl RequestHandler for DoggyDnsHandler {
             );
             let resolve_result = self
                 .authority_chain
-                .resolve(&query_name.into(), query_type, Some(&request_info))
+                .resolve(request_info.query.name(), query_type, Some(&request_info))
                 .instrument(resolve_span.clone())
                 .await;
 
@@ -166,7 +169,7 @@ impl RequestHandler for DoggyDnsHandler {
 
             let (response_info, outcome) = match resolve_result.outcome {
                 LookupControlFlow::Continue(Ok(lookup)) | LookupControlFlow::Break(Ok(lookup)) => {
-                    let records: Vec<_> = lookup.iter().cloned().collect();
+                    let records = take_answer_records(lookup);
                     let answer_count = records.len();
 
                     let mut metadata = Metadata::response_from_request(&request.metadata);
@@ -448,6 +451,27 @@ fn serialize_for_xdp(
     }
 
     Some(bytes)
+}
+
+/// Move the answer records out of a zone lookup instead of cloning them.
+///
+/// The authorities we own build answers as `LookupRecords::Section`, an owned
+/// `Vec`, so handing it over is a free transfer of records that used to be
+/// rebuilt by `iter().cloned()`: one `Vec` allocation plus a `Name` clone per
+/// record, and that clone allocates as soon as the name outgrows `Name`'s
+/// inline buffer. `forward` and `native` return `AuthLookup::Resolved`, whose
+/// records live behind an `Arc`, so those keep the clone path. Order is
+/// preserved: `Section` iterates forward, the same direction the clone walked,
+/// and `AuthLookup::iter` already ignored `additionals`, so the `..` binding
+/// drops nothing the response carried.
+fn take_answer_records(lookup: AuthLookup) -> Vec<Record> {
+    match lookup {
+        AuthLookup::Records {
+            answers: LookupRecords::Section(records),
+            ..
+        } => records,
+        lookup => lookup.iter().cloned().collect(),
+    }
 }
 
 /// Extract the minimum TTL from a slice of DNS records.
