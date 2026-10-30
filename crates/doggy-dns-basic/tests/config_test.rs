@@ -710,6 +710,29 @@ pin_path = "/tmp/dns_cache"
     assert!(err.to_string().contains("pin_path"));
 }
 
+/// bpffs refuses to pin an object whose name contains a dot: the loader's
+/// `BPF_OBJ_PIN` fails with `EPERM`, so a dotted path is a start that cannot
+/// work. Catching it here turns a kernel rejection at attach time into a config
+/// error that names the field.
+#[test]
+fn validate_xdp_pin_path_with_dot_rejected() {
+    let toml = r#"
+[server]
+listen_addr = "0.0.0.0"
+port = 53
+
+[xdp]
+enabled = true
+pin_path = "/sys/fs/bpf/doggy-dns/dns_cache.v1"
+"#;
+    let config: DoggyDnsConfig = toml::from_str(toml).expect("parse failed");
+    let err = validate_config(&config).unwrap_err();
+    assert!(
+        err.to_string().contains("pin_path"),
+        "error should name the field: {err}"
+    );
+}
+
 #[test]
 fn validate_xdp_disabled_skips_validation() {
     let toml = r#"

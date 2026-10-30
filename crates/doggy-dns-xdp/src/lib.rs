@@ -2,6 +2,7 @@ pub mod cache;
 pub mod interface;
 pub mod kernel_log;
 pub mod middleware;
+pub mod pin;
 #[cfg(target_os = "linux")]
 mod pod_impls;
 #[cfg(target_os = "linux")]

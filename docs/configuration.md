@@ -110,6 +110,8 @@ cache_size = 65536          # kernel cache entries; applied when the map is crea
 negative_ttl = 30           # seconds, default 30
 attach_mode = "auto"        # "auto" attaches at startup, "manual" loads only
 pin_path = "/sys/fs/bpf/doggy-dns/dns_cache"
+                            # the bpffs file is <pin_path>_v1; a restart reuses
+                            # that map, so the path must not contain a dot
 ```
 
 `listen_addr` (`[server]` and `[control]`) takes an IPv4 or IPv6 literal. IPv6 may
