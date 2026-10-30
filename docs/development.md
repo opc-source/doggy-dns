@@ -21,6 +21,9 @@ cargo bench --bench handler_bench -- handler_pipeline_nacos_hit  # Filter by nam
 cargo tarpaulin --config tarpaulin.toml        # Coverage (XML + HTML reports)
 cargo tarpaulin --workspace --out Stdout       # Coverage quick summary
 
+# Nacos end-to-end (requires a standalone Nacos server; see "CI pipeline")
+DOGGY_NACOS_ADDR=127.0.0.1:8848 cargo test --test nacos_e2e_test -- --ignored --nocapture
+
 # XDP (optional feature; requires Linux + bpf-linker; see xdp.md for usage)
 cargo build --features xdp                     # Root binary with XDP support
 cd xdp && cargo build --target bpfel-unknown-none --release  # eBPF program
@@ -85,8 +88,35 @@ Reports: `cobertura.xml` (for CI/Codecov) and `tarpaulin-report.html` (local).
 | **Benchmarks** | `cargo bench --no-run` (compile check) + `Performance` job (component benches base-vs-PR, one end-to-end dnsperf run) |
 | **Coverage** | `cargo-tarpaulin` -> Codecov (target: 60% project, 70% patch) |
 | **XDP CI** | fmt, integration tests (`--ignored`, root), component benches vs. base, dnsperf stress |
+| **Nacos CI** | standalone Nacos server + `--ignored` end-to-end tests (subscribe → push → DNS answer) |
 
 All jobs use dependency caching (`Swatinem/rust-cache@v2`).
+
+### Running the Nacos end-to-end tests locally
+
+The cases in `tests/nacos_e2e_test.rs` drive a real `doggy-dns` process against
+a live Nacos server, so they are `#[ignore]`d and only run when asked for:
+
+```bash
+podman run -d --name doggy-nacos \
+  -e MODE=standalone -e JVM_XMS=384m -e JVM_XMX=512m \
+  -p 8848:8848 -p 9848:9848 \
+  docker.m.daocloud.io/nacos/nacos-server:v2.5.4
+DOGGY_NACOS_ADDR=127.0.0.1:8848 \
+  cargo test --test nacos_e2e_test -- --ignored --nocapture
+```
+
+Points worth knowing before reading a failure:
+
+- **Subscriptions are established once, at start-up** (`subscribe_all()` in
+  `src/main.rs`); there is no periodic rescan and no subscribe-on-miss, so a
+  service created in Nacos after doggy-dns started is only picked up on restart.
+- **Ephemeral instances live and die with the registering client's connection.**
+  The test keeps its `NamingService` handle alive for exactly this reason.
+- **A batch registration replaces the service's instance list** rather than
+  appending to it, so adding an instance means re-registering the whole list.
+- `namespaceId=public` and the empty namespace are the same namespace on the
+  server, so the config's `namespace = "public"` needs no special handling.
 
 ## Test structure
 
@@ -101,19 +131,22 @@ All jobs use dependency caching (`Swatinem/rust-cache@v2`).
 | `crates/doggy-dns-core/tests/wire_golden_test.rs` | 5 | Golden wire bytes for the Nacos paths: hit (name lowercased), NXDOMAIN, NODATA, apex SOA |
 | `crates/doggy-dns-nacos/tests/alloc_guard_test.rs` | 1 | Allocation budget for `NacosAuthority::lookup`: 6 on a hit, 2 on an in-zone miss |
 | `crates/doggy-dns-nacos/tests/authority_test.rs` | 15 | Nacos authority: hit, dotted names, NOERROR/NXDOMAIN/NODATA, family filtering, zone boundaries, apex SOA |
-| `crates/doggy-dns-nacos/tests/mapping_test.rs` | 11 | Name-to-key mapping (zone boundaries, dotted services), family-filtered record creation |
+| `crates/doggy-dns-nacos/tests/mapping_test.rs` | 11 | Name-to-key mapping (zone boundaries, dotted services, escaped labels), family-filtered record creation |
 | `crates/doggy-dns-nacos/tests/watcher_test.rs` | 11 | Instance cache: insert, filter, remove, replace, lowercase keys, push-freshness stamp, address parsing at push |
 | `crates/doggy-dns-plugin/tests/authority_chain_test.rs` | 12 | Chain resolution: empty, hit, authoritative miss, zone fallthrough, all-skip, Break, error, is_empty |
-| `crates/doggy-dns-plugin/tests/forward_test.rs` | 8 | Forward resolver: local mock upstream, custom/bare IP parsing, validation, NXDOMAIN/NODATA/SERVFAIL mapping |
+| `crates/doggy-dns-plugin/tests/forward_test.rs` | 9 | Forward resolver: local mock upstream, custom/bare IP parsing, validation, NXDOMAIN/NODATA/SERVFAIL mapping, underscore labels still forwarded |
 | `crates/doggy-dns-plugin/tests/request_outcome_test.rs` | 3 | `RequestOutcome` construction: success, response bytes, NXDOMAIN TTL |
 | `crates/doggy-dns-plugin/tests/system_dns_test.rs` | 1 | Native resolver (requires network) |
+| `crates/doggy-dns-plugin/tests/wire_query_name_test.rs` | 2 | The wire-name handoff both fallback authorities use: label bytes survive, and the `&str` path's underscore rejection stays a premise |
 | `crates/doggy-dns-xdp/tests/*` | 22 + 6 ignored | Userspace cache/interface/middleware/stats; XDP attach tests need root + Linux |
 | `crates/doggy-dns-control/tests/*` | 28 | Control plane: HTTP contract, endpoint selection, token scoping, live signals, state snapshots, redaction |
 | `tests/integration_test.rs` | 3 | End-to-end chain: Nacos hit, outside-zone fallthrough, in-zone miss stays authoritative |
+| `tests/nacos_e2e_test.rs` | 4 ignored | Live Nacos: boot-time instances, push after start-up, in-zone NXDOMAIN, IPv4-only NODATA |
 
 Forward tests run against a local mock upstream, native tests make real
-network calls, and Nacos tests use mock DashMap caches (no Nacos server
-needed).
+network calls, and the Nacos unit tests use mock DashMap caches (no Nacos
+server needed); only `tests/nacos_e2e_test.rs` requires a running server, which
+`.github/workflows/nacos-ci.yml` provides.
 
 ## Benchmark structure
 
@@ -122,8 +155,8 @@ parameterize over `worker_threads` 1..4.
 
 | Bench File | Benchmarks | Description |
 |------------|------------|-------------|
-| `crates/doggy-dns-core/benches/handler_bench.rs` | 2 x 4 | Handler pipeline (nacos hit, nxdomain) x worker_threads 1..4 |
-| `crates/doggy-dns-nacos/benches/nacos_bench.rs` | 2 x 4 + 3 | Authority lookup (hit, miss) x worker_threads 1..4 + sync benchmarks |
+| `crates/doggy-dns-core/benches/handler_bench.rs` | 3 x 4 | Handler pipeline (nacos hit, nacos nxdomain, empty-chain nxdomain) x worker_threads 1..4 |
+| `crates/doggy-dns-nacos/benches/nacos_bench.rs` | 2 x 4 + 4 | Authority lookup (hit, miss) x worker_threads 1..4 + service-key hit/miss/dotted and `to_dns_records` |
 | `crates/doggy-dns-plugin/benches/chain_bench.rs` | 2 x 4 | Authority chain (empty, nacos hit) x worker_threads 1..4 |
 
 ## Key dependencies

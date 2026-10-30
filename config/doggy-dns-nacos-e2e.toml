@@ -1,0 +1,26 @@
+# Configuration for tests/nacos_e2e_test.rs (a live Nacos server is required).
+#
+# DOGGY_NACOS_ADDR must be exported (a missing ${VAR} reference is fatal, by
+# design); the test rewrites the `port` line per case into target/nacos-e2e-*.toml
+# so several cases can run in parallel without fighting over a port.
+#
+# Only the nacos plugin is enabled: inside `dns_zone` the authority is
+# authoritative (unknown service -> NXDOMAIN, no fallthrough), so a case that
+# expects NXDOMAIN proves the zone boundary without touching any upstream.
+
+[server]
+listen_addr = "127.0.0.1"
+port = 15411
+worker_threads = 1
+
+[middleware]
+logging = false
+
+[[plugins]]
+kind = "nacos"
+enabled = true
+server_addr = "${DOGGY_NACOS_ADDR}"
+namespace = "public"
+group = "DEFAULT_GROUP"
+dns_zone = "nacos.e2e.test"
+ttl = 6

@@ -697,6 +697,7 @@ dependencies = [
  "doggy-dns-xdp",
  "hickory-proto",
  "hickory-server",
+ "nacos-sdk",
  "tokio",
  "tracing",
 ]

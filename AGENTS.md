@@ -24,6 +24,7 @@ cargo bench --bench nacos_bench                # Run a single benchmark file
 cargo bench --bench handler_bench -- handler_pipeline_nacos_hit  # Filter by name
 cargo tarpaulin --config tarpaulin.toml        # Coverage (XML + HTML reports)
 cargo tarpaulin --workspace --out Stdout       # Coverage quick summary
+DOGGY_NACOS_ADDR=127.0.0.1:8848 cargo test --test nacos_e2e_test -- --ignored  # Live-Nacos e2e (needs a standalone Nacos server)
 cargo build --features xdp                 # Build with XDP support (requires Linux + bpf-linker)
 cd xdp && cargo build --target bpfel-unknown-none --release  # Build eBPF program
 cargo test -p doggy-dns-xdp                # Test XDP userspace crate
