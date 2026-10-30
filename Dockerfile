@@ -138,6 +138,14 @@ RUN set -eux; \
 FROM ${RUNTIME_IMAGE} AS runtime-base
 
 ARG APT_MIRROR=
+# The repository this image belongs to, published as the OCI `source`
+# annotation. It is what GitHub uses to link the ghcr package to the repository
+# when the image is pushed from a command line (a workflow push links it on its
+# own), and what the package page shows. Override it if you publish a fork
+# elsewhere.
+ARG SOURCE_URL=https://github.com/opc-source/doggy-dns
+
+LABEL org.opencontainers.image.source="${SOURCE_URL}"
 
 RUN if [ -n "${APT_MIRROR}" ]; then \
         for f in /etc/apt/sources.list /etc/apt/sources.list.d/debian.sources; do \

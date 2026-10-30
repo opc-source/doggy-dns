@@ -127,7 +127,10 @@ There is deliberately no `:latest`: a node DNS resolver should say which build i
 is running. `imagePullPolicy: Always` on the rolling tags is what makes that
 trade-off explicit — pin a `:sha-*` tag if you would rather control the rollout.
 
-The first publish also needs a one-time step in the organization's UI: ghcr shows
-a private package until the repository is linked as a "Connected repository" with
-write access, and a workflow run cannot fix that itself. Until then the push in CI
-fails with `denied`.
+Publishing needs no manual step: the workflow's `GITHUB_TOKEN` links the
+repository to the package on the first push. What needs one is pulling — a new
+package is **private**. Make it public (package page → Package settings →
+Danger Zone → Change visibility) so nodes pull it anonymously, or keep it
+private and add an `imagePullSecret` to the DaemonSets. A push only fails with
+`denied` when a package of that name exists without this repository linked to
+it; Manage Actions access → Add repository → Write resolves that.

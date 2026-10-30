@@ -73,6 +73,12 @@ or unreachable can be redirected without editing the file:
 | `RUSTUP_MIRROR` | empty (`static.rust-lang.org`) | `https://rsproxy.cn` |
 | `CARGO_EXTRA_ARGS` | empty | see below |
 
+One ARG is not about mirrors: `SOURCE_URL` (default
+`https://github.com/opc-source/doggy-dns`) becomes the image's
+`org.opencontainers.image.source` annotation — what links a ghcr package to a
+repository when an image is pushed by hand. Workflow pushes are linked
+automatically, so a fork publishing under its own name should override it.
+
 `RUSTUP_MIRROR` matters more than it looks: both workspaces pin a toolchain in
 `rust-toolchain.toml` (`stable` for the binary, `nightly` + `rust-src` for the
 eBPF program), so rustup downloads one before compiling anything. In a local
@@ -128,10 +134,18 @@ Three deliberate properties:
   appears in the sample manifests and why `:sha-*` exists. Pin a `:sha-*` tag if
   you would rather choose the moment a node updates.
 
-The first publish also needs a one-time action in the organization's UI: connect
-the repository to the package with write access. Until that is done the registry
-rejects the push and CI reports it as a `denied` error; no workflow permission can
-fix it from inside the run.
+Pushing needs no manual setup: an image published by the workflow's
+`GITHUB_TOKEN` links the repository to the package automatically, and the
+publishing repository gets admin on it. What does need a decision is who may
+**pull**: a new package is private. Either make it public (package page →
+Package settings → Danger Zone → Change visibility; organization owners and
+package admins can do this), so nodes pull anonymously, or keep it private
+and give the nodes a pull secret as described in Troubleshooting. A push is
+reported as `denied` only when a package with that name already exists
+without this repository linked to it — for example after an earlier
+command-line push. Package settings → Manage Actions access → Add repository
+→ Write fixes that, or delete the stale package and let the workflow
+recreate it.
 
 ## Verifying an image
 
@@ -259,12 +273,13 @@ start a cold start on a fresh path rather than mixing formats.
 
 ## Troubleshooting
 
-- **`ImagePullBackOff` with `denied`** — the package is still private, or the node
-  has no pull secret. ghcr packages are private until the repository is linked or
-  the package's visibility is set to public:
+- **`ImagePullBackOff` with `denied`** — the package is private and the
+  node has no pull secret. Make it public (Package settings → Danger Zone →
+  Change visibility), or keep it private and create a pull secret with a
+  classic token that has `read:packages`:
   `kubectl -n doggy-dns create secret docker-registry ghcr --docker-server=ghcr.io
-  --docker-username=<github-user> --docker-password=<token with read:packages>`,
-  then `imagePullSecrets: [name: ghcr]`.
+  --docker-username=<github-user> --docker-password=<token>`, then add
+  `imagePullSecrets: [{name: ghcr}]` to both DaemonSets.
 - **Pod starts and answers, but the `[xdp]` block did nothing** — the fast path is
   compiled out (`:main` instead of `:main-xdp`), or the container is not root, or
   bpffs is not mounted at the pin path. The server logs a warning at startup and
