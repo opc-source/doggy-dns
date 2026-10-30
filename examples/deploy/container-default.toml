@@ -1,0 +1,37 @@
+# Baked into both images at /app/config/doggy-dns.toml, which is the path the
+# binary uses when it is started without a config argument. It is deliberately
+# the smallest thing that answers DNS: forward-only (no `native`, so a
+# hostNetwork pod cannot read the node's own /etc/resolv.conf and loop back into
+# itself), no observability (an OTLP endpoint is site-specific, and the sample
+# config in config/doggy-dns.toml needs ${OPENOBSERVE_PASSWORD} to even start),
+# and the control plane on, because that is what the container probes talk to.
+#
+# A real deployment replaces this file: mount a ConfigMap over it (see
+# configmap.yaml + daemonset.yaml in this directory).
+
+[server]
+listen_addr = "0.0.0.0"
+port = 53
+worker_threads = 1
+
+[middleware]
+logging = true
+
+[observability]
+enabled = false
+
+[[plugins]]
+kind = "forward"
+enabled = true
+upstream = ["8.8.8.8:53", "1.1.1.1:53"]
+cache_size = 1024
+min_ttl = 30
+max_ttl = 600
+
+[control]
+enabled = true
+listen_addr = "0.0.0.0"
+port = 19090
+# healthz/readyz only: the baked default exposes no MCP endpoint, because /mcp
+# without a `token` is an unauthenticated control surface.
+endpoints = ["healthz", "readyz"]

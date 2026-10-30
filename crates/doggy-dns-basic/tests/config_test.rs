@@ -1129,3 +1129,28 @@ rotate_answers = false
     let config: DoggyDnsConfig = toml::from_str(toml_str).expect("parse failed");
     assert!(!config.server.rotate_answers);
 }
+
+/// The container image runs `doggy-dns` with no arguments, so it loads
+/// `/app/config/doggy-dns.toml` — the baked copy of this file — before anything
+/// else happens. It is the one config in the repository that has to work as
+/// written: no environment variables set, no volumes mounted. The image smoke
+/// test mounts its own config over that path, so nothing else checks it.
+#[test]
+fn container_default_config_loads_with_no_environment() {
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../examples/deploy/container-default.toml"
+    );
+    let (config, _raw) =
+        load_config(path).expect("the container's baked config must load as shipped");
+    validate_config(&config).expect("the container's baked config must pass validation as shipped");
+    assert!(
+        config
+            .plugins
+            .iter()
+            .any(|plugin| plugin.enabled
+                && matches!(plugin.kind, doggy_dns_basic::PluginKind::Forward)),
+        "the baked config has to answer something, and `native` would loop back \
+         to the resolver itself under hostNetwork"
+    );
+}
