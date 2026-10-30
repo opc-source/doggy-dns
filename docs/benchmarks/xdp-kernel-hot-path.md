@@ -101,6 +101,12 @@ are the reasons, so a future round does not repeat the dead ends:
 - `bpftool prog profile` refuses aya-built objects (`prog FD 3 doesn't have
   valid btf`).
 
+The CI `XDP Stress Test` job is not a substitute either: it compares XDP
+against userspace inside one run, never the PR against `main`, so its ratio
+cannot show what a kernel round changed — and the same-code spread across runs
+(87,000–246,000 QPS on PRs #19–#23) is far wider than anything a per-query
+nanosecond change can move.
+
 What backs the change instead: the static counts above, the component
 benchmarks, and the seven `xdp_integration_test` cases, which load and attach
 the real program on loopback and assert the bytes the client receives:

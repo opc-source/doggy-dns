@@ -122,7 +122,12 @@ jobs:
           echo $! > /tmp/server.pid
           sleep 2
           dnsperf -s 127.0.0.1 -p 5353 -d /tmp/queries.txt -n 1 -l 5 > /dev/null 2>&1 || true
-          dnsperf -s 127.0.0.1 -p 5353 -d /tmp/queries.txt -n 10 -T 4 -l 30 > /tmp/e2e-result.txt 2>&1 || true
+          # `-n 100000` rather than `-n 10` so the `-l 30` wall-clock limit is
+          # what ends the run: 10 cycles of a 1000-name file finish in a quarter
+          # of a second on this transport (~40k QPS), which measured a startup
+          # burst instead of steady state. Same window as the XDP stress job, so
+          # the two reports are comparable.
+          dnsperf -s 127.0.0.1 -p 5353 -d /tmp/queries.txt -n 100000 -T 4 -l 30 > /tmp/e2e-result.txt 2>&1 || true
           kill $(cat /tmp/server.pid) 2>/dev/null || echo "server had already exited"
       - name: Generate report
         run: |

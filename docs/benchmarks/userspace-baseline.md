@@ -23,8 +23,15 @@ meaningful.
 - Binary: `cargo build --release`, feature `xdp` off
 - Server config: `config/doggy-dns-stress.toml` (forward to 8.8.8.8:53,
   `worker_threads = 4`), `RUST_LOG=warn`
-- Load: `dnsperf -s 127.0.0.1 -p 5353 -d /tmp/queries.txt -n 10 -T 4 -l 30`
-  over 1000 names, after one 5 s warm-up pass
+- Load: `dnsperf -s 127.0.0.1 -p 5353 -d /tmp/queries.txt -n 100000 -T 4 -l 30`
+  over 1000 names, after one 5 s warm-up pass — `-l 30` ends the run, so the
+  the sample is 30 s of steady state. CI used `-n 10` before this change, which
+  capped the run at 10 cycles of the file (10,000 queries: ~80 ms with XDP,
+  ~250 ms without), so the end-to-end figures recorded here — taken on that
+  short window — are not comparable with runs of the command above. The window
+  is now 100x longer, and this config forwards to `8.8.8.8:53`, so cached
+  answers can expire inside it in a way they never did during a burst; read the
+  first runs of the new window as a fresh series rather than a continuation.
 
 ## End-to-end
 
@@ -59,7 +66,7 @@ other than the transport (check the `RUST_LOG=warn` suppression and the warm-up)
 ```bash
 cargo build --release
 RUST_LOG=warn ./target/release/doggy-dns config/doggy-dns-stress.toml &
-dnsperf -s 127.0.0.1 -p 5353 -d /tmp/queries.txt -n 10 -T 4 -l 30
+dnsperf -s 127.0.0.1 -p 5353 -d /tmp/queries.txt -n 100000 -T 4 -l 30
 cargo bench -p doggy-dns-core --bench handler_bench -- --save-baseline base
 ```
 

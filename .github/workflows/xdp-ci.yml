@@ -189,7 +189,17 @@ jobs:
           echo $! > /tmp/server.pid
           sleep 2
           dnsperf -s 127.0.0.1 -p 5353 -d /tmp/queries.txt -n 1 -l 5 > /dev/null 2>&1 || true
-          dnsperf -s 127.0.0.1 -p 5353 -d /tmp/queries.txt -n 10 -T 4 -l 30 > /tmp/userspace-result.txt 2>&1 || true
+          # `-n` cycles the input at most N times, `-l` caps wall clock, and
+          # whichever binds first ends the run. At `-n 10` the cycle count won:
+          # 10,000 queries, i.e. ~250 ms in this arm and ~80 ms in the XDP arm,
+          # so this "30 second stress test" measured a startup burst instead of
+          # steady state. `-n 100000` leaves `-l 30` in charge, giving both arms
+          # a 30 second window so the reported ratio compares like with like.
+          # Caveat: this config forwards to 8.8.8.8:53, so a window 100x longer
+          # may include upstream refreshes the burst never reached; treat the
+          # userspace figure as new-series, not comparable with the pre-change
+          # numbers in docs/benchmarks/userspace-baseline.md.
+          dnsperf -s 127.0.0.1 -p 5353 -d /tmp/queries.txt -n 100000 -T 4 -l 30 > /tmp/userspace-result.txt 2>&1 || true
           kill $(cat /tmp/server.pid)
       - name: Stress test (XDP)
         continue-on-error: true
@@ -198,7 +208,8 @@ jobs:
           echo $! | sudo tee /tmp/server.pid
           sleep 2
           sudo dnsperf -s 127.0.0.1 -p 5353 -d /tmp/queries.txt -n 1 -l 5 > /dev/null 2>&1 || true
-          sudo dnsperf -s 127.0.0.1 -p 5353 -d /tmp/queries.txt -n 10 -T 4 -l 30 > /tmp/xdp-result.txt 2>&1 || true
+          # Time-bounded window, matching the userspace arm above.
+          sudo dnsperf -s 127.0.0.1 -p 5353 -d /tmp/queries.txt -n 100000 -T 4 -l 30 > /tmp/xdp-result.txt 2>&1 || true
           sudo kill $(cat /tmp/server.pid) || true
         env:
           XDP_INTERFACE: lo
