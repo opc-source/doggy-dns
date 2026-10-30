@@ -13,6 +13,7 @@ port = 15353
 tcp_timeout = 10          # seconds, default 10
 shutdown_timeout = 5      # seconds, default 5
 worker_threads = 1        # default 1 (suitable for DaemonSet, one per node)
+rotate_answers = true     # default true: cycle multi-record answers per query
 
 # Optional: DNS over TLS
 #[server.tls]
@@ -117,6 +118,25 @@ interfaces. TLS and HTTPS reuse `[server].listen_addr` with their own port.
 
 If no `[[plugins]]` are configured, defaults to forwarding to `8.8.8.8` and
 `1.1.1.1`.
+
+## Answer rotation
+
+`rotate_answers` (default `true`) cycles the answers of a response carrying
+more than one record: the *k*-th query starts at the *k*-th instance, so a
+client that follows the usual convention of using the first record spreads
+across the service instead of pinning to whatever the registry happened to
+report first. One cursor covers the whole process rather than one per name,
+which costs no memory and no eviction policy; concurrent traffic on other names
+only makes a name's step jump further ahead, which spreads no worse. Set it to
+`false` to get the authority's own order on every query — useful when a client
+or a test needs a stable answer set.
+
+Rotation happens in the handler, so `nacos`, `native` and `forward` all get it,
+and it never touches a single-record answer, a `NODATA`, an `NXDOMAIN` or the
+apex `SOA`. With the XDP fast path enabled the kernel answers a cache hit
+without consulting userspace again, so a hit replays the order that was captured
+when the entry was written until its TTL expires; startup logs one `warn` when
+both settings are on. See [xdp.md](xdp.md#limitations--notes).
 
 ## Endpoint formats
 

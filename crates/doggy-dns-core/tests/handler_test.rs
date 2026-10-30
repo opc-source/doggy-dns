@@ -2,7 +2,7 @@
 
 use async_trait::async_trait;
 use dashmap::DashMap;
-use doggy_dns_core::handler::DoggyDnsHandler;
+use doggy_dns_core::handler::{AnswerRotation, DoggyDnsHandler};
 use doggy_dns_nacos::authority::NacosAuthority;
 use doggy_dns_nacos::watcher::{CachedInstance, ServiceKey};
 use doggy_dns_plugin::authority_chain::AuthorityChain;
@@ -311,7 +311,7 @@ impl Middleware for OutcomeCaptureMiddleware {
 async fn handler_resolves_query_returns_no_error() {
     let authority = make_nacos_authority_with_hit();
     let chain = AuthorityChain::new(vec![("nacos".to_string(), Arc::new(authority))]);
-    let handler = DoggyDnsHandler::new(vec![], Arc::new(chain), false);
+    let handler = DoggyDnsHandler::new(vec![], Arc::new(chain), false, AnswerRotation::new(false));
 
     let request = make_dns_request("my-svc.DEFAULT_GROUP.public.nacos.local.", RecordType::A);
     let mock = MockResponseHandler::new();
@@ -325,7 +325,7 @@ async fn handler_resolves_query_returns_no_error() {
 #[tokio::test]
 async fn handler_all_skip_returns_nxdomain() {
     let chain = AuthorityChain::new(vec![]);
-    let handler = DoggyDnsHandler::new(vec![], Arc::new(chain), false);
+    let handler = DoggyDnsHandler::new(vec![], Arc::new(chain), false, AnswerRotation::new(false));
 
     let request = make_dns_request("unknown.example.com.", RecordType::A);
     let mock = MockResponseHandler::new();
@@ -339,7 +339,7 @@ async fn handler_all_skip_returns_nxdomain() {
 #[tokio::test]
 async fn handler_authority_error_returns_servfail() {
     let chain = AuthorityChain::new(vec![("error".to_string(), Arc::new(ErrorZoneHandler))]);
-    let handler = DoggyDnsHandler::new(vec![], Arc::new(chain), false);
+    let handler = DoggyDnsHandler::new(vec![], Arc::new(chain), false, AnswerRotation::new(false));
 
     let request = make_dns_request("anything.example.com.", RecordType::A);
     let mock = MockResponseHandler::new();
@@ -358,6 +358,7 @@ async fn handler_middleware_short_circuit_returns_refused() {
         vec![sc_mw.clone() as Arc<dyn Middleware>],
         Arc::new(chain),
         false,
+        AnswerRotation::new(false),
     );
 
     let request = make_dns_request("example.com.", RecordType::A);
@@ -377,6 +378,7 @@ async fn handler_after_request_called_on_short_circuit() {
         vec![sc_mw.clone() as Arc<dyn Middleware>],
         Arc::new(chain),
         false,
+        AnswerRotation::new(false),
     );
 
     let request = make_dns_request("example.com.", RecordType::A);
@@ -393,7 +395,7 @@ async fn handler_after_request_called_on_short_circuit() {
 async fn handler_no_middlewares_resolves_normally() {
     let authority = make_nacos_authority_with_hit();
     let chain = AuthorityChain::new(vec![("nacos".to_string(), Arc::new(authority))]);
-    let handler = DoggyDnsHandler::new(vec![], Arc::new(chain), false);
+    let handler = DoggyDnsHandler::new(vec![], Arc::new(chain), false, AnswerRotation::new(false));
 
     let request = make_dns_request("my-svc.DEFAULT_GROUP.public.nacos.local.", RecordType::A);
     let mock = MockResponseHandler::new();
@@ -417,6 +419,7 @@ async fn handler_edns_query_caches_small_response() {
         vec![capture.clone() as Arc<dyn Middleware>],
         Arc::new(chain),
         true,
+        AnswerRotation::new(false),
     );
 
     let request = make_edns_dns_request(
@@ -451,6 +454,7 @@ async fn handler_oversized_response_is_not_cached() {
         vec![capture.clone() as Arc<dyn Middleware>],
         Arc::new(chain),
         true,
+        AnswerRotation::new(false),
     );
 
     let request = make_edns_dns_request(
@@ -482,6 +486,7 @@ async fn handler_truncated_response_is_not_cached() {
         vec![capture.clone() as Arc<dyn Middleware>],
         Arc::new(chain),
         true,
+        AnswerRotation::new(false),
     );
 
     let request = make_edns_dns_request(
@@ -508,7 +513,7 @@ async fn handler_authority_nxdomain_maps_to_nxdomain() {
         "nacos".to_string(),
         Arc::new(LookupErrorZoneHandler::new(ExpectedLookupError::NxDomain)),
     )]);
-    let handler = DoggyDnsHandler::new(vec![], Arc::new(chain), false);
+    let handler = DoggyDnsHandler::new(vec![], Arc::new(chain), false, AnswerRotation::new(false));
 
     let request = make_dns_request("missing.DEFAULT_GROUP.public.nacos.local.", RecordType::A);
     let mock = MockResponseHandler::new();
@@ -525,7 +530,7 @@ async fn handler_authority_name_exists_returns_nodata() {
         "nacos".to_string(),
         Arc::new(LookupErrorZoneHandler::new(ExpectedLookupError::NameExists)),
     )]);
-    let handler = DoggyDnsHandler::new(vec![], Arc::new(chain), false);
+    let handler = DoggyDnsHandler::new(vec![], Arc::new(chain), false, AnswerRotation::new(false));
 
     let request = make_dns_request("my-svc.DEFAULT_GROUP.public.nacos.local.", RecordType::AAAA);
     let mock = MockResponseHandler::new();
@@ -547,6 +552,7 @@ async fn handler_authoritative_nxdomain_is_cached_for_xdp() {
         vec![capture.clone() as Arc<dyn Middleware>],
         Arc::new(chain),
         true,
+        AnswerRotation::new(false),
     );
 
     let request = make_dns_request("missing.DEFAULT_GROUP.public.nacos.local.", RecordType::A);
@@ -633,7 +639,7 @@ fn soa_records(message: &Message) -> Vec<&Record> {
 async fn handler_authoritative_answer_sets_aa_and_clears_ra() {
     let authority = make_nacos_authority_with_hit();
     let chain = AuthorityChain::new(vec![("nacos".to_string(), Arc::new(authority))]);
-    let handler = DoggyDnsHandler::new(vec![], Arc::new(chain), false);
+    let handler = DoggyDnsHandler::new(vec![], Arc::new(chain), false, AnswerRotation::new(false));
 
     let request = make_dns_request("my-svc.DEFAULT_GROUP.public.nacos.local.", RecordType::A);
     let mock = MockResponseHandler::new();
@@ -651,7 +657,7 @@ async fn handler_authoritative_answer_sets_aa_and_clears_ra() {
 async fn handler_authoritative_nxdomain_sets_aa_and_carries_soa() {
     let authority = make_nacos_authority_with_hit();
     let chain = AuthorityChain::new(vec![("nacos".to_string(), Arc::new(authority))]);
-    let handler = DoggyDnsHandler::new(vec![], Arc::new(chain), false);
+    let handler = DoggyDnsHandler::new(vec![], Arc::new(chain), false, AnswerRotation::new(false));
 
     let request = make_dns_request("missing.DEFAULT_GROUP.public.nacos.local.", RecordType::A);
     let mock = MockResponseHandler::new();
@@ -673,7 +679,7 @@ async fn handler_authoritative_nxdomain_sets_aa_and_carries_soa() {
 async fn handler_authoritative_nodata_sets_aa_and_carries_soa() {
     let authority = make_nacos_authority_with_ips(&["10.0.0.1"]);
     let chain = AuthorityChain::new(vec![("nacos".to_string(), Arc::new(authority))]);
-    let handler = DoggyDnsHandler::new(vec![], Arc::new(chain), false);
+    let handler = DoggyDnsHandler::new(vec![], Arc::new(chain), false, AnswerRotation::new(false));
 
     let request = make_dns_request("my-svc.DEFAULT_GROUP.public.nacos.local.", RecordType::AAAA);
     let mock = MockResponseHandler::new();
@@ -695,7 +701,7 @@ async fn handler_external_answer_sets_ra_and_clears_aa() {
         "external".to_string(),
         Arc::new(ExternalAnswerHandler),
     )]);
-    let handler = DoggyDnsHandler::new(vec![], Arc::new(chain), false);
+    let handler = DoggyDnsHandler::new(vec![], Arc::new(chain), false, AnswerRotation::new(false));
 
     let request = make_dns_request("www.example.com.", RecordType::A);
     let mock = MockResponseHandler::new();
@@ -713,7 +719,7 @@ async fn handler_external_answer_sets_ra_and_clears_aa() {
 async fn handler_apex_soa_query_returns_authoritative_soa_answer() {
     let authority = make_nacos_authority_with_hit();
     let chain = AuthorityChain::new(vec![("nacos".to_string(), Arc::new(authority))]);
-    let handler = DoggyDnsHandler::new(vec![], Arc::new(chain), false);
+    let handler = DoggyDnsHandler::new(vec![], Arc::new(chain), false, AnswerRotation::new(false));
 
     let request = make_dns_request("nacos.local.", RecordType::SOA);
     let mock = MockResponseHandler::new();
@@ -726,4 +732,61 @@ async fn handler_apex_soa_query_returns_authoritative_soa_answer() {
     assert!(message.metadata.authoritative);
     assert_eq!(message.answers.len(), 1);
     assert_eq!(message.answers[0].record_type(), RecordType::SOA);
+}
+
+// --- Answer rotation ---
+
+fn first_answer_ipv4(message: &Message) -> Ipv4Addr {
+    let record = message.answers.first().expect("response has no answers");
+    match &record.data {
+        RData::A(address) => address.0,
+        other => panic!("expected an A record, got {other:?}"),
+    }
+}
+
+/// Runs four queries against one handler and reports the first answer each got.
+///
+/// The handler must stay shared: the rotation cursor lives on it, so a fresh
+/// handler per query would restart the cycle and prove nothing.
+async fn first_answers(rotation: AnswerRotation) -> Vec<Ipv4Addr> {
+    let authority = make_nacos_authority_with_ips(&["10.0.0.1", "10.0.0.2", "10.0.0.3"]);
+    let chain = AuthorityChain::new(vec![("nacos".to_string(), Arc::new(authority))]);
+    let handler = DoggyDnsHandler::new(vec![], Arc::new(chain), false, rotation);
+
+    let mut firsts = Vec::new();
+    for _ in 0..4 {
+        let request = make_dns_request("my-svc.DEFAULT_GROUP.public.nacos.local.", RecordType::A);
+        let mock = MockResponseHandler::new();
+        handler
+            .handle_request::<_, TokioTime>(&request, mock.clone())
+            .await;
+        let message = mock.message().expect("response not captured");
+        assert_eq!(message.answers.len(), 3, "the service has three instances");
+        firsts.push(first_answer_ipv4(&message));
+    }
+    firsts
+}
+
+#[tokio::test]
+async fn rotate_answers_cycles_the_first_record() {
+    let firsts = first_answers(AnswerRotation::new(true)).await;
+    assert_eq!(
+        firsts,
+        [
+            Ipv4Addr::new(10, 0, 0, 1),
+            Ipv4Addr::new(10, 0, 0, 2),
+            Ipv4Addr::new(10, 0, 0, 3),
+            Ipv4Addr::new(10, 0, 0, 1),
+        ],
+        "the first answer must walk the instance list and wrap"
+    );
+}
+
+#[tokio::test]
+async fn disabled_rotate_answers_keeps_the_authority_order() {
+    let firsts = first_answers(AnswerRotation::new(false)).await;
+    assert!(
+        firsts.iter().all(|ip| *ip == Ipv4Addr::new(10, 0, 0, 1)),
+        "rotation off must repeat the authority's own order, got {firsts:?}"
+    );
 }

@@ -1081,3 +1081,28 @@ enabled = true
     let config: DoggyDnsConfig = toml::from_str(toml_str).expect("parse failed");
     validate_config(&config).expect("disabled plugin fields should not be validated");
 }
+
+#[test]
+fn rotate_answers_defaults_to_true() {
+    let toml_str = r#"
+[server]
+listen_addr = "0.0.0.0"
+port = 53
+"#;
+
+    let config: DoggyDnsConfig = toml::from_str(toml_str).expect("parse failed");
+    assert!(config.server.rotate_answers);
+}
+
+#[test]
+fn rotate_answers_parses_when_specified() {
+    let toml_str = r#"
+[server]
+listen_addr = "0.0.0.0"
+port = 53
+rotate_answers = false
+"#;
+
+    let config: DoggyDnsConfig = toml::from_str(toml_str).expect("parse failed");
+    assert!(!config.server.rotate_answers);
+}

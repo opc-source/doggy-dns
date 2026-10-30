@@ -10,7 +10,7 @@
 
 use async_trait::async_trait;
 use dashmap::DashMap;
-use doggy_dns_core::handler::DoggyDnsHandler;
+use doggy_dns_core::handler::{AnswerRotation, DoggyDnsHandler};
 use doggy_dns_nacos::authority::NacosAuthority;
 use doggy_dns_nacos::watcher::{CachedInstance, ServiceKey};
 use doggy_dns_plugin::authority_chain::AuthorityChain;
@@ -87,7 +87,7 @@ fn nacos_handler() -> (DoggyDnsHandler, ByteCapturingHandler) {
         Arc::new(authority),
     )]));
     (
-        DoggyDnsHandler::new(vec![], chain, false),
+        DoggyDnsHandler::new(vec![], chain, false, AnswerRotation::new(false)),
         ByteCapturingHandler::default(),
     )
 }

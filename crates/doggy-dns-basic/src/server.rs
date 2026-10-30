@@ -10,6 +10,10 @@ pub struct ServerConfig {
     pub shutdown_timeout: u64,
     #[serde(default = "default_worker_threads")]
     pub worker_threads: usize,
+    /// Rotate multi-record answers so DNS clients spread across instances.
+    /// Off means answers keep the order the authority produced them in.
+    #[serde(default = "default_rotate_answers")]
+    pub rotate_answers: bool,
     pub tls: Option<TlsConfig>,
     pub https: Option<HttpsConfig>,
 }
@@ -24,6 +28,10 @@ fn default_shutdown_timeout() -> u64 {
 
 fn default_worker_threads() -> usize {
     1
+}
+
+fn default_rotate_answers() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Deserialize)]

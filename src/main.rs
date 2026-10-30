@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use doggy_dns_control::live::LiveState;
 use doggy_dns_core::config::{DoggyDnsConfig, PluginKind, load_config};
-use doggy_dns_core::handler::DoggyDnsHandler;
+use doggy_dns_core::handler::{AnswerRotation, DoggyDnsHandler};
 use doggy_dns_core::middleware::logging::LoggingMiddleware;
 use doggy_dns_core::server::build_server;
 use doggy_dns_nacos::authority::NacosAuthority;
@@ -118,7 +118,23 @@ async fn async_main(
     let (watchers, authority_chain) = build_authority_chain(&config).await?;
 
     // Create handler
-    let handler = DoggyDnsHandler::new(middlewares, Arc::new(authority_chain), xdp.enabled());
+    let handler = DoggyDnsHandler::new(
+        middlewares,
+        Arc::new(authority_chain),
+        xdp.enabled(),
+        AnswerRotation::new(config.server.rotate_answers),
+    );
+
+    // The kernel answers a cache hit without asking userspace again, so the
+    // record order frozen into the cached reply is the one every hit replays
+    // until the entry expires. Say it once, at startup, rather than letting it
+    // look like rotation is broken.
+    if xdp.enabled() && config.server.rotate_answers {
+        tracing::warn!(
+            "answer rotation applies to userspace answers only: an XDP cache hit replays the \
+             order captured when the entry was written until its TTL expires"
+        );
+    }
 
     // Build and start server
     let mut server = build_server(&config, handler).await?;

@@ -1,13 +1,18 @@
 #![allow(clippy::disallowed_methods)]
 
 use doggy_dns_core::config::DoggyDnsConfig;
-use doggy_dns_core::handler::DoggyDnsHandler;
+use doggy_dns_core::handler::{AnswerRotation, DoggyDnsHandler};
 use doggy_dns_core::server::build_server;
 use doggy_dns_plugin::authority_chain::AuthorityChain;
 use std::sync::Arc;
 
 fn handler() -> DoggyDnsHandler {
-    DoggyDnsHandler::new(Vec::new(), Arc::new(AuthorityChain::new(Vec::new())), false)
+    DoggyDnsHandler::new(
+        Vec::new(),
+        Arc::new(AuthorityChain::new(Vec::new())),
+        false,
+        AnswerRotation::new(false),
+    )
 }
 
 #[tokio::test]

@@ -3,7 +3,7 @@
 use async_trait::async_trait;
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use dashmap::DashMap;
-use doggy_dns_core::handler::DoggyDnsHandler;
+use doggy_dns_core::handler::{AnswerRotation, DoggyDnsHandler};
 use doggy_dns_nacos::authority::NacosAuthority;
 use doggy_dns_nacos::watcher::{CachedInstance, ServiceKey};
 use doggy_dns_plugin::authority_chain::AuthorityChain;
@@ -70,7 +70,7 @@ fn bench_handler_pipeline_nacos_hit(c: &mut Criterion) {
         "nacos".to_string(),
         Arc::new(authority),
     )]));
-    let handler = DoggyDnsHandler::new(vec![], chain, false);
+    let handler = DoggyDnsHandler::new(vec![], chain, false, AnswerRotation::new(false));
     let request = make_request("my-svc.DEFAULT_GROUP.public.nacos.local.");
 
     let mut group = c.benchmark_group("handler_pipeline_nacos_hit");
@@ -116,7 +116,7 @@ fn bench_handler_pipeline_nacos_nxdomain(c: &mut Criterion) {
         "nacos".to_string(),
         Arc::new(authority),
     )]));
-    let handler = DoggyDnsHandler::new(vec![], chain, false);
+    let handler = DoggyDnsHandler::new(vec![], chain, false, AnswerRotation::new(false));
     let request = make_request("unknown-svc.DEFAULT_GROUP.public.nacos.local.");
 
     let mut group = c.benchmark_group("handler_pipeline_nacos_nxdomain");
@@ -141,7 +141,7 @@ fn bench_handler_pipeline_nacos_nxdomain(c: &mut Criterion) {
 
 fn bench_handler_pipeline_nxdomain(c: &mut Criterion) {
     let chain = Arc::new(AuthorityChain::new(vec![]));
-    let handler = DoggyDnsHandler::new(vec![], chain, false);
+    let handler = DoggyDnsHandler::new(vec![], chain, false, AnswerRotation::new(false));
     let request = make_request("unknown.example.com.");
 
     let mut group = c.benchmark_group("handler_pipeline_nxdomain");
