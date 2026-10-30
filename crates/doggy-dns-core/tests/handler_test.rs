@@ -736,57 +736,223 @@ async fn handler_apex_soa_query_returns_authoritative_soa_answer() {
 
 // --- Answer rotation ---
 
-fn first_answer_ipv4(message: &Message) -> Ipv4Addr {
-    let record = message.answers.first().expect("response has no answers");
-    match &record.data {
-        RData::A(address) => address.0,
-        other => panic!("expected an A record, got {other:?}"),
-    }
+fn instance(octet: u8) -> Ipv4Addr {
+    Ipv4Addr::new(10, 0, 0, octet)
 }
 
-/// Runs four queries against one handler and reports the first answer each got.
+/// The A-record answers of a message, in the order they went out.
+fn answer_ipv4s(message: &Message) -> Vec<Ipv4Addr> {
+    message
+        .answers
+        .iter()
+        .map(|record| match &record.data {
+            RData::A(address) => address.0,
+            other => panic!("expected an A record, got {other:?}"),
+        })
+        .collect()
+}
+
+/// One A query against `handler`; the handler is shared, not rebuilt per query.
+async fn ask(handler: &DoggyDnsHandler, domain: &str) -> Message {
+    let request = make_dns_request(domain, RecordType::A);
+    let mock = MockResponseHandler::new();
+    handler
+        .handle_request::<_, TokioTime>(&request, mock.clone())
+        .await;
+    mock.message().expect("response not captured")
+}
+
+/// A three-instance `nacos` service behind one handler, with the outcome
+/// capture that carries the XDP cache payload when `xdp_enabled` is set.
 ///
-/// The handler must stay shared: the rotation cursor lives on it, so a fresh
-/// handler per query would restart the cycle and prove nothing.
-async fn first_answers(rotation: AnswerRotation) -> Vec<Ipv4Addr> {
+/// The handler must stay shared across queries: the rotation cursor lives on
+/// it, so a fresh handler per query would restart the cycle and prove nothing.
+fn rotating_handler(
+    rotation: AnswerRotation,
+    xdp_enabled: bool,
+) -> (DoggyDnsHandler, Arc<OutcomeCaptureMiddleware>) {
     let authority = make_nacos_authority_with_ips(&["10.0.0.1", "10.0.0.2", "10.0.0.3"]);
     let chain = AuthorityChain::new(vec![("nacos".to_string(), Arc::new(authority))]);
-    let handler = DoggyDnsHandler::new(vec![], Arc::new(chain), false, rotation);
-
-    let mut firsts = Vec::new();
-    for _ in 0..4 {
-        let request = make_dns_request("my-svc.DEFAULT_GROUP.public.nacos.local.", RecordType::A);
-        let mock = MockResponseHandler::new();
-        handler
-            .handle_request::<_, TokioTime>(&request, mock.clone())
-            .await;
-        let message = mock.message().expect("response not captured");
-        assert_eq!(message.answers.len(), 3, "the service has three instances");
-        firsts.push(first_answer_ipv4(&message));
-    }
-    firsts
+    let capture = Arc::new(OutcomeCaptureMiddleware::new());
+    let handler = DoggyDnsHandler::new(
+        vec![capture.clone() as Arc<dyn Middleware>],
+        Arc::new(chain),
+        xdp_enabled,
+        rotation,
+    );
+    (handler, capture)
 }
 
+const THREE_INSTANCE_SERVICE: &str = "my-svc.DEFAULT_GROUP.public.nacos.local.";
+
 #[tokio::test]
-async fn rotate_answers_cycles_the_first_record() {
-    let firsts = first_answers(AnswerRotation::new(true)).await;
+async fn rotate_answers_cycles_the_answer_sequence() {
+    let (handler, _capture) = rotating_handler(AnswerRotation::new(true), false);
+
+    let mut sequences = Vec::new();
+    for _ in 0..4 {
+        let message = ask(&handler, THREE_INSTANCE_SERVICE).await;
+        assert_eq!(message.answers.len(), 3, "the service has three instances");
+        sequences.push(answer_ipv4s(&message));
+    }
+
     assert_eq!(
-        firsts,
+        sequences,
         [
-            Ipv4Addr::new(10, 0, 0, 1),
-            Ipv4Addr::new(10, 0, 0, 2),
-            Ipv4Addr::new(10, 0, 0, 3),
-            Ipv4Addr::new(10, 0, 0, 1),
+            vec![instance(1), instance(2), instance(3)],
+            vec![instance(2), instance(3), instance(1)],
+            vec![instance(3), instance(1), instance(2)],
+            vec![instance(1), instance(2), instance(3)],
         ],
-        "the first answer must walk the instance list and wrap"
+        "the whole sequence must walk the instance list and wrap, not just the first record"
     );
 }
 
 #[tokio::test]
 async fn disabled_rotate_answers_keeps_the_authority_order() {
-    let firsts = first_answers(AnswerRotation::new(false)).await;
-    assert!(
-        firsts.iter().all(|ip| *ip == Ipv4Addr::new(10, 0, 0, 1)),
-        "rotation off must repeat the authority's own order, got {firsts:?}"
+    let (handler, _capture) = rotating_handler(AnswerRotation::new(false), false);
+
+    for _ in 0..4 {
+        let message = ask(&handler, THREE_INSTANCE_SERVICE).await;
+        assert_eq!(
+            answer_ipv4s(&message),
+            [instance(1), instance(2), instance(3)],
+            "rotation off must repeat the authority's own order"
+        );
+    }
+}
+
+#[tokio::test]
+async fn rotated_answers_reach_the_xdp_cache_payload() {
+    // The payload is what the kernel replays on every hit, so it has to be
+    // serialised from the rotated records. If it were built from the authority's
+    // own order instead, each hit would freeze one arbitrary order and the
+    // response-only tests above would stay green.
+    let (handler, capture) = rotating_handler(AnswerRotation::new(true), true);
+
+    let mut sent = Vec::new();
+    let mut cached = Vec::new();
+    for _ in 0..2 {
+        let message = ask(&handler, THREE_INSTANCE_SERVICE).await;
+        let outcome = capture.outcome().expect("outcome not captured");
+        let bytes = outcome
+            .response_bytes
+            .expect("a three-record answer fits the XDP cache");
+        assert!(bytes.len() <= 512, "cached payload exceeds XDP capacity");
+        let decoded = Message::from_vec(&bytes).expect("cached bytes must be a valid DNS message");
+        assert_eq!(decoded.answers.len(), 3, "the cached reply lost records");
+        sent.push(answer_ipv4s(&message));
+        cached.push(answer_ipv4s(&decoded));
+    }
+
+    assert_eq!(sent, cached, "the cached payload must carry the order sent");
+    assert_eq!(
+        cached,
+        [
+            vec![instance(1), instance(2), instance(3)],
+            vec![instance(2), instance(3), instance(1)],
+        ],
+        "the cached payload must advance with the response, not repeat one frozen order"
+    );
+}
+
+/// An authority answering from records behind an `Arc` rather than an owned
+/// `Vec`: the `LookupRecords::Section` arm of `take_answer_records` does not
+/// match, so the records are collected by clone — the same arm
+/// `AuthLookup::Resolved`, which `native` and `forward` return, falls through to.
+struct SharedRecordHandler;
+
+#[async_trait]
+impl ZoneHandler for SharedRecordHandler {
+    fn zone_type(&self) -> hickory_server::zone_handler::ZoneType {
+        hickory_server::zone_handler::ZoneType::External
+    }
+
+    fn axfr_policy(&self) -> hickory_server::zone_handler::AxfrPolicy {
+        hickory_server::zone_handler::AxfrPolicy::Deny
+    }
+
+    fn origin(&self) -> &hickory_proto::rr::LowerName {
+        static ORIGIN: std::sync::LazyLock<hickory_proto::rr::LowerName> =
+            std::sync::LazyLock::new(|| hickory_proto::rr::LowerName::from(Name::root()));
+        &ORIGIN
+    }
+
+    async fn lookup(
+        &self,
+        name: &hickory_proto::rr::LowerName,
+        _rtype: RecordType,
+        _request_info: Option<&hickory_server::server::RequestInfo<'_>>,
+        _lookup_options: LookupOptions,
+    ) -> LookupControlFlow<AuthLookup> {
+        let answer_name = Name::from(name.clone());
+        let mut record_set =
+            hickory_proto::rr::RecordSet::new(answer_name.clone(), RecordType::A, 0);
+        record_set.set_records(vec![
+            Record::from_rdata(
+                answer_name.clone(),
+                60,
+                RData::A(A(Ipv4Addr::new(203, 0, 113, 1))),
+            ),
+            Record::from_rdata(answer_name, 60, RData::A(A(Ipv4Addr::new(203, 0, 113, 2)))),
+        ]);
+        LookupControlFlow::Continue(Ok(AuthLookup::answers(
+            hickory_server::zone_handler::LookupRecords::new(
+                LookupOptions::default(),
+                Arc::new(record_set),
+            ),
+            None,
+        )))
+    }
+
+    async fn search(
+        &self,
+        _request: &Request,
+        _lookup_options: LookupOptions,
+    ) -> (
+        LookupControlFlow<AuthLookup>,
+        Option<hickory_proto::rr::TSigResponseContext>,
+    ) {
+        (LookupControlFlow::Skip, None)
+    }
+
+    async fn nsec_records(
+        &self,
+        _name: &hickory_proto::rr::LowerName,
+        _lookup_options: LookupOptions,
+    ) -> LookupControlFlow<AuthLookup> {
+        LookupControlFlow::Skip
+    }
+}
+
+#[tokio::test]
+async fn rotate_answers_cycles_the_cloned_record_path() {
+    // Rotation lives at the one choke point every record path passes through, so
+    // the clone-collect path used by `native`/`forward` answers cycles too.
+    let chain = AuthorityChain::new(vec![(
+        "external".to_string(),
+        Arc::new(SharedRecordHandler),
+    )]);
+    let handler = DoggyDnsHandler::new(vec![], Arc::new(chain), false, AnswerRotation::new(true));
+
+    let mut sequences = Vec::new();
+    for _ in 0..3 {
+        let message = ask(&handler, "two-a.example.org.").await;
+        assert_eq!(
+            message.answers.len(),
+            2,
+            "the fake authority has two records"
+        );
+        sequences.push(answer_ipv4s(&message));
+    }
+
+    assert_eq!(
+        sequences,
+        [
+            vec![Ipv4Addr::new(203, 0, 113, 1), Ipv4Addr::new(203, 0, 113, 2)],
+            vec![Ipv4Addr::new(203, 0, 113, 2), Ipv4Addr::new(203, 0, 113, 1)],
+            vec![Ipv4Addr::new(203, 0, 113, 1), Ipv4Addr::new(203, 0, 113, 2)],
+        ],
+        "the clone-collect path must rotate like the move path"
     );
 }

@@ -122,14 +122,16 @@ If no `[[plugins]]` are configured, defaults to forwarding to `8.8.8.8` and
 ## Answer rotation
 
 `rotate_answers` (default `true`) cycles the answers of a response carrying
-more than one record: the *k*-th query starts at the *k*-th instance, so a
-client that follows the usual convention of using the first record spreads
-across the service instead of pinning to whatever the registry happened to
-report first. One cursor covers the whole process rather than one per name,
-which costs no memory and no eviction policy; concurrent traffic on other names
-only makes a name's step jump further ahead, which spreads no worse. Set it to
-`false` to get the authority's own order on every query — useful when a client
-or a test needs a stable answer set.
+more than one record: the *k*-th such query, counted across the whole process,
+starts at the *k*-th instance. A client that follows the usual convention of
+using the first record then spreads across the service instead of pinning to
+whatever the registry happened to report first. The cursor only advances on
+responses with more than one record, and it is shared by every name and query
+type. One cursor for the whole process, rather than one per name, costs no
+memory and no eviction policy; concurrent traffic on other names only makes a
+name's step jump further ahead, which spreads no worse. Set it to `false` to
+get the authority's own order on every query — useful when a client or a test
+needs a stable answer set.
 
 Rotation happens in the handler, so `nacos`, `native` and `forward` all get it,
 and it never touches a single-record answer, a `NODATA`, an `NXDOMAIN` or the

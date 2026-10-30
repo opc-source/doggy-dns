@@ -27,11 +27,11 @@ Part of [README](../README.md).
    in negative responses so downstream resolvers can cache them (RFC 2308).
    External handlers (forward/native) clear `AA` and set `RA`.
 5. **Answer rotation** (`[server] rotate_answers`, default on) cycles the answer
-   records of any response with more than one record, one step per query, so
-   clients that use the first record spread across instances. It runs in the
-   handler, after the authority chain and before both the response and the XDP
-   cache payload are built, so every authority gets it and single-record and
-   negative answers are untouched.
+   records of any response with more than one record, one step per rotated
+   response, so clients that use the first record spread across instances. It
+   runs in the handler, after the authority chain and before both the response
+   and the XDP cache payload are built, so every authority gets it and
+   single-record and negative answers are untouched.
 6. Middleware chain runs `after_request()` with elapsed time and the final outcome (response code, authority, answer count).
 
 ## Plugin axes
