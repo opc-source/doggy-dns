@@ -496,6 +496,18 @@ def container_logs(args, name, tail=150):
     return "\n".join(combined(result).splitlines()[-tail:])
 
 
+def expected_user(args):
+    """The user the image under test has to declare.
+
+    `--xdp` implies the root-running variant, but CI smokes the XDP image through
+    its userspace path (no `--xdp`, no bpffs) and still has to assert the right
+    user, so an explicit `--expect-user` wins over the variant.
+    """
+    if args.expect_user:
+        return args.expect_user
+    return "root" if args.xdp else "65532:65532"
+
+
 def check_image_user(args, expected):
     """The image has to declare the user it should run as.
 
@@ -582,7 +594,7 @@ def smoke(args):
         # host user owns has to be traversable by uid 65532 as well.
         os.chmod(root, 0o755)
         try:
-            check_image_user(args, "root" if args.xdp else "65532:65532")
+            check_image_user(args, expected_user(args))
             with FakeUpstream(args.upstream_port) as upstream:
                 name = start_container(
                     args, root, run_tag="first", upstream=f"{HOST}:{upstream.port}", xdp=args.xdp
@@ -641,6 +653,12 @@ def parse_args(argv):
     parser.add_argument("--upstream-port", type=int, default=15399, help="fake forward upstream")
     parser.add_argument("--dead-port", type=int, default=15398, help="port with nothing behind it")
     parser.add_argument("--name-to-query", default="example.com", help="name to ask for")
+    parser.add_argument(
+        "--expect-user",
+        default="",
+        help="user the image must declare (default: 65532:65532, or root with --xdp). "
+        "CI smokes the XDP image without --xdp, so it passes root here",
+    )
     parser.add_argument("--timeout", type=float, default=60.0, help="seconds to wait for readiness")
     parser.add_argument("--name", default="doggy-dns-smoke", help="container name prefix")
     args = parser.parse_args(argv)

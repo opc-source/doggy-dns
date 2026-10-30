@@ -186,6 +186,20 @@ class EnsurePortsFreeTests(unittest.TestCase):
             listener.close()
 
 
+class ExpectedUserTests(unittest.TestCase):
+    """CI smokes the XDP image without `--xdp`, so the user cannot be derived from it."""
+
+    def test_the_default_follows_the_variant(self):
+        plain = image_smoke.parse_args(["--image", "doggy-dns:test"])
+        self.assertEqual(image_smoke.expected_user(plain), "65532:65532")
+        xdp = image_smoke.parse_args(["--image", "doggy-dns:test", "--xdp"])
+        self.assertEqual(image_smoke.expected_user(xdp), "root")
+
+    def test_an_explicit_expectation_wins_over_the_variant(self):
+        args = image_smoke.parse_args(["--image", "doggy-dns:test", "--expect-user", "root"])
+        self.assertEqual(image_smoke.expected_user(args), "root")
+
+
 class ConfigTextTests(unittest.TestCase):
     """The `[xdp]` block the smoke writes decides whether reuse can be exercised."""
 

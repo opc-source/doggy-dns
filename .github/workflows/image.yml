@@ -47,21 +47,25 @@ jobs:
             runner: ubuntu-latest
             target: runtime
             features: ""
+            user: "65532:65532"
           - variant: userspace
             arch: arm64
             runner: ubuntu-24.04-arm
             target: runtime
             features: ""
+            user: "65532:65532"
           - variant: xdp
             arch: amd64
             runner: ubuntu-latest
             target: runtime-xdp
             features: xdp
+            user: root
           - variant: xdp
             arch: arm64
             runner: ubuntu-24.04-arm
             target: runtime-xdp
             features: xdp
+            user: root
 
     steps:
       - uses: actions/checkout@v4
@@ -105,10 +109,16 @@ jobs:
           set -euo pipefail
           python3 scripts/image_smoke.py \
             --image "${IMAGE}:tmp-${GITHUB_SHA}-${{ matrix.variant }}-${{ matrix.arch }}" \
-            --runtime docker
+            --runtime docker \
+            --expect-user "${{ matrix.user }}"
 
       # Only push what the smoke test accepted: a rolling `:main` is what every
       # node pulls next, so a broken image must never reach it.
+      #
+      # The `tmp-<sha>-<variant>-<arch>` tags stay in the package. Deleting them
+      # would need the packages API (a DELETE per version, not expressible with
+      # `docker push`), and they are harmless: a manifest list addresses them by
+      # digest once created, and a re-run of the same commit overwrites them.
       - name: Push per-arch image
         run: |
           set -euo pipefail
