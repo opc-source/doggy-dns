@@ -94,7 +94,15 @@ impl AuthorityChain {
                             Some(cached) => cached.clone(),
                             None => {
                                 let fetched = apex_soa(entry.handler.as_ref(), request_info).await;
-                                let _ = entry.apex_soa.set(fetched.clone());
+                                // Only a hit is cached. A `None` can be a
+                                // transient failure of the handler's own SOA
+                                // lookup, and pinning it would drop the SOA
+                                // from every later negative for the rest of
+                                // the process; a miss retries, as the
+                                // uncached code did.
+                                if fetched.is_some() {
+                                    let _ = entry.apex_soa.set(fetched.clone());
+                                }
                                 fetched
                             }
                         }
