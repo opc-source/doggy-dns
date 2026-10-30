@@ -17,9 +17,10 @@ use std::net::IpAddr;
 /// `evilnacos.local` is read as if it belonged to `nacos.local`.
 ///
 /// `None` means the name has fewer than three labels above the zone or carries a
-/// label that is not UTF-8 or contains the key separator. Both are names the old
-/// string parser could not have matched against a Nacos service either, so the
-/// authority's authoritative `NXDOMAIN` is the same answer.
+/// label that is not UTF-8, contains the key separator, or contains a dot (the
+/// escaped spelling of a dotted service). All are names the old string parser
+/// could not have matched against a Nacos service either, so the authority's
+/// authoritative `NXDOMAIN` is the same answer.
 pub fn service_key_from_name(name: &LowerName, zone: &Name) -> Option<ServiceKey> {
     let zone_len = zone.iter().count();
     let name_len = name.iter().count();
@@ -49,10 +50,12 @@ pub fn service_key_from_name(name: &LowerName, zone: &Name) -> Option<ServiceKey
 
 /// A DNS label as text.
 ///
-/// Rejects the composite-key separator byte so a label can never forge a
-/// field boundary, and rejects non-UTF-8 (RFC 1035 binary) labels.
+/// Rejects the composite-key separator byte so a label can never forge a field
+/// boundary, rejects a dot so the escaped single-label spelling of a dotted
+/// service cannot alias the canonical multi-label one, and rejects non-UTF-8
+/// (RFC 1035 binary) labels.
 fn label_text(label: &[u8]) -> Option<&str> {
-    if label.contains(&(KEY_SEPARATOR as u8)) {
+    if label.contains(&(KEY_SEPARATOR as u8)) || label.contains(&b'.') {
         return None;
     }
     std::str::from_utf8(label).ok()

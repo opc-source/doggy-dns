@@ -76,6 +76,22 @@ fn service_key_rejects_a_label_carrying_the_separator() {
     assert!(service_key_from_name(&LowerName::from(forged), &zone()).is_none());
 }
 
+#[test]
+fn service_key_rejects_a_dot_inside_one_label() {
+    // `com\.example\.api` is one label whose text contains dots, and it must
+    // not alias `com.example.api` (three labels), the canonical spelling of a
+    // dotted service. The old string parser split the presentation form at the
+    // dots and produced a key that could never match, so the authority answered
+    // NXDOMAIN; rejecting the label keeps that answer.
+    assert!(
+        service_key_from_name(
+            &lower("com\\.example\\.api.DEFAULT_GROUP.public.nacos.local."),
+            &zone()
+        )
+        .is_none()
+    );
+}
+
 fn instances(ips: &[&str]) -> Vec<CachedInstance> {
     ips.iter()
         .map(|ip| CachedInstance {
