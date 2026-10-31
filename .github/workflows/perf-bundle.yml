@@ -90,8 +90,11 @@ jobs:
         run: |
           cp scripts/perf_ab.py dist/bundle/
           # The runner's configs double as the reference ones in the tarball;
-          # perf_ab.py regenerates them from the same code for each run.
-          python3 scripts/perf_ab.py --bundle dist/bundle --emit-configs dist/bundle/config
+          # perf_ab.py regenerates them from the same code for each run. The
+          # thread count is pinned so the shipped files do not vary with the
+          # runner's CPU count.
+          python3 scripts/perf_ab.py --bundle dist/bundle \
+            --emit-configs dist/bundle/config --worker-threads 2
           {
             echo "commit: $(git rev-parse HEAD)"
             echo "ref: ${GITHUB_REF}"
