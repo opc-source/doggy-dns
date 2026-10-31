@@ -27,6 +27,9 @@ use types::{CacheKey, CacheValue, FLAG_NEGATIVE, XdpRuntimeConfig, XdpStats};
 const MAX_QNAME_LEN: usize = 255;
 const DNS_HDR_LEN: usize = 12;
 const MAX_DNS_LEN: usize = 512;
+// Largest UDP/L4 length the fast path will touch. Only queries that carry a
+// single question ever match the cache, so anything above this is passed on.
+const MAX_UDP_DNS_LEN: usize = 1500;
 // The shortest possible positive reply: header, a one-byte QNAME (the root)
 // and QTYPE/QCLASS. The 16-byte copy chunk relies on this, because it always
 // writes a whole chunk even when the reply length is not a multiple of it.
@@ -142,9 +145,11 @@ fn try_dns_xdp(ctx: &XdpContext) -> Result<(u32, Option<Outcome>), ()> {
     // Compose the length from the two wire bytes instead of `u16::from_be`:
     // this kernel's verifier does not carry the 16-bit bound across the byte
     // swap, and the containment check below adds the value to a packet
-    // pointer. Two zero-extended byte loads keep the range provably 0..=65535.
+    // pointer. Two zero-extended byte loads keep the range provably 0..=65535,
+    // and the explicit constant upper bound below pins that range to something
+    // the verifier accepts even if LLVM folds the loads back into `be16`.
     let udp_len = read_u16_be((data + udp_offset) as *const u8, 4) as usize;
-    if udp_len < UDP_HDR_LEN {
+    if !(UDP_HDR_LEN..=MAX_UDP_DNS_LEN).contains(&udp_len) {
         return Ok((xdp_action::XDP_PASS, None));
     }
     // Current DNS message length, taken from the UDP length field. The packet
