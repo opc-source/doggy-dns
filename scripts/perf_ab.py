@@ -58,6 +58,31 @@ def tail(path: Path, lines: int = 40) -> str:
         return f"<could not read {path}>"
 
 
+# A verbose log level under full load writes more than is worth counting, so the
+# tally stops here and the report says "at least".
+LOG_LINE_CAP = 5_000_000
+
+
+def log_line_count(path: Path) -> int:
+    count = 0
+    try:
+        with path.open(errors="replace") as handle:
+            for count, _ in enumerate(handle, start=1):
+                if count >= LOG_LINE_CAP:
+                    break
+    except OSError:
+        return 0
+    return count
+
+
+def format_log_lines(count: int | None) -> str:
+    if count is None:
+        return "—"
+    if count >= LOG_LINE_CAP:
+        return f"≥{LOG_LINE_CAP:,}"
+    return f"{count:,}"
+
+
 def port_free(port: int, tcp: bool = True) -> bool:
     sock_types = (socket.SOCK_DGRAM, socket.SOCK_STREAM) if tcp else (socket.SOCK_DGRAM,)
     for sock_type in sock_types:
@@ -384,7 +409,9 @@ def run_arm(
         clear_pinned_cache()
 
     env = os.environ.copy()
-    env["RUST_LOG"] = "warn"
+    env["RUST_LOG"] = args.rust_log
+    # `AYA_LOG_LEVEL` stays unset: the kernel program has only warn call sites,
+    # so its default is what every run exercises.
     server, server_log_file = start_process([str(binary), str(config)], server_log, env)
 
     row: dict = {
@@ -395,6 +422,7 @@ def run_arm(
         "server_log": str(server_log),
         "raw": str(measured_output),
         "xdp_attached": False,
+        "rust_log": args.rust_log,
     }
     try:
         wait_ready(server, args.port, server_log)
@@ -505,6 +533,7 @@ def run_arm(
         log(f"{tag}: FAILED: {row['error']}")
     finally:
         stop_process(server, server_log_file, f"{tag} server")
+        row["server_log_lines"] = log_line_count(server_log)
         if arm == "xdp":
             clear_pinned_cache()
 
@@ -538,7 +567,8 @@ def render_report(
         f"- Host: `{host}`",
         f"- Bundle: `{bundle}` (CI-built; no local Rust compilation)",
         f"- Load: `dnsperf -n 100000 -T {args.threads} -l {args.duration}` "
-        f"over {args.query_count} names, `RUST_LOG=warn`",
+        f"over {args.query_count} names, `RUST_LOG={args.rust_log}` "
+        "(kernel-side logging stays at its warn default)",
         f"- Upstream: local `perf-upstream` on `127.0.0.1:{args.upstream_port}` "
         "(fixed A record, TTL 300)",
         f"- XDP interface: `{args.interface}`; loopback attaches in generic mode",
@@ -552,8 +582,8 @@ def render_report(
         "",
         "## Per-run",
         "",
-        "| Round | Arm | QPS | Avg latency (ms) | Lost | Server CPU (s) | Upstream queries | XDP attached | XDP hits |",
-        "|------:|-----|----:|-----------------:|-----:|---------------:|-----------------:|:------------:|---------:|",
+        "| Round | Arm | QPS | Avg latency (ms) | Lost | Server CPU (s) | Upstream queries | XDP attached | XDP hits | Log lines |",
+        "|------:|-----|----:|-----------------:|-----:|---------------:|-----------------:|:------------:|---------:|----------:|",
     ]
 
     for row in rows:
@@ -563,12 +593,14 @@ def render_report(
                 f"| {row['round']} | {row['arm']} | {row['qps']:,.0f} | "
                 f"{row['latency_avg'] * 1000:.3f} | {row['lost']} | "
                 f"{row['cpu_seconds']:.2f} | {row['upstream_queries']} | "
-                f"{'yes' if row['xdp_attached'] else 'no'} | {hits} |"
+                f"{'yes' if row['xdp_attached'] else 'no'} | {hits} | "
+                f"{format_log_lines(row.get('server_log_lines'))} |"
             )
         else:
             lines.append(
                 f"| {row['round']} | {row['arm']} | FAIL | — | — | — | — | "
-                f"{'yes' if row['xdp_attached'] else 'no'} | — |"
+                f"{'yes' if row['xdp_attached'] else 'no'} | — | "
+                f"{format_log_lines(row.get('server_log_lines'))} |"
             )
 
     failed = [row for row in rows if not row["ok"]]
@@ -620,6 +652,10 @@ def render_report(
         "count, and a server process that was nearly idle.",
         "- Both arms share this host with `dnsperf` and the upstream process. Absolute QPS "
         "is therefore a loopback/generic-XDP number, not NIC-native XDP throughput.",
+        "- `Log lines` counts what the server wrote to its log during the run at the "
+        "`RUST_LOG` recorded above, up to a cap of "
+        f"{LOG_LINE_CAP:,} (a `≥` value is a truncated tally). Per-query logging costs "
+        "throughput directly, so a level with no query-path record should show 0.",
         "",
         f"Raw dnsperf output, server logs, XDP stats and `ip -d link show` captures: `{args.out}`",
         "",
@@ -639,6 +675,13 @@ def main() -> int:
     parser.add_argument("--upstream-port", type=int, default=15354)
     parser.add_argument("--interface", default="lo")
     parser.add_argument("--dnsperf", default="dnsperf")
+    parser.add_argument(
+        "--rust-log",
+        default="warn",
+        metavar="LEVEL",
+        help="RUST_LOG for the server process (default warn); the kernel-side "
+        "level is not adjustable here, the program only has warn call sites",
+    )
     parser.add_argument(
         "--only",
         choices=("both", "userspace", "xdp"),
