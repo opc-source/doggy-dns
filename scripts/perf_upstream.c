@@ -156,7 +156,10 @@ int main(int argc, char **argv) {
     fflush(stdout);
 
     unsigned char query[4096];
-    unsigned char response[sizeof query];
+    /* The question can occupy the whole query, and the A record appended to
+     * it is 16 bytes: pointer(2) + type(2) + class(2) + ttl(4) + rdlen(2) +
+     * address(4). */
+    unsigned char response[sizeof query + 16];
     for (;;) {
         struct sockaddr_storage peer;
         socklen_t peer_len = sizeof peer;
