@@ -646,6 +646,12 @@ def main() -> int:
         help="run only one arm (useful for smoke tests)",
     )
     parser.add_argument("--out", type=Path, help="output directory (default: perf-results/<timestamp>)")
+    parser.add_argument(
+        "--emit-configs",
+        type=Path,
+        metavar="DIR",
+        help="write the reference userspace.toml/xdp.toml for these settings to DIR and exit",
+    )
     args = parser.parse_args()
 
     args.rounds = max(1, args.rounds)
@@ -653,6 +659,21 @@ def main() -> int:
     args.threads = max(1, args.threads)
     args.worker_threads = max(1, args.worker_threads)
     args.query_count = max(10, args.queries)
+
+    if args.emit_configs is not None:
+        args.emit_configs.mkdir(parents=True, exist_ok=True)
+        for arm in ("userspace", "xdp"):
+            write_config(
+                args.emit_configs / f"{arm}.toml",
+                args.port,
+                args.upstream_port,
+                args.interface,
+                args.worker_threads,
+                xdp=arm == "xdp",
+            )
+        print(f"configs written to {args.emit_configs}")
+        return 0
+
     if args.out is None:
         stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
         args.out = Path("perf-results") / stamp

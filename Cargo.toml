@@ -69,8 +69,11 @@ prost = "0.14"
 base64 = "0.23"
 
 # XDP / eBPF
-aya = "0.14"
-aya-log = "0.3"
+# The published aya-log 0.3.0 still pins aya ^0.14, so both crates come from
+# the tag that ships them together; aya-ebpf is upgraded separately in the
+# xdp workspace.
+aya = { git = "https://github.com/aya-rs/aya", tag = "aya-v0.16.0" }
+aya-log = { git = "https://github.com/aya-rs/aya", tag = "aya-v0.16.0" }
 log = "0.4"
 
 # MCP server

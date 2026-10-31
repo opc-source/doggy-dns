@@ -89,6 +89,9 @@ jobs:
       - name: Assemble bundle
         run: |
           cp scripts/perf_ab.py dist/bundle/
+          # The runner's configs double as the reference ones in the tarball;
+          # perf_ab.py regenerates them from the same code for each run.
+          python3 scripts/perf_ab.py --bundle dist/bundle --emit-configs dist/bundle/config
           {
             echo "commit: $(git rev-parse HEAD)"
             echo "ref: ${GITHUB_REF}"
@@ -100,7 +103,7 @@ jobs:
           } >> dist/bundle/MANIFEST.txt
           (
             cd dist/bundle
-            sha256sum bin/* perf_ab.py MANIFEST.txt > SHA256SUMS
+            sha256sum bin/* config/*.toml perf_ab.py MANIFEST.txt > SHA256SUMS
           )
           chmod +x dist/bundle/bin/*
 
