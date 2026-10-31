@@ -245,11 +245,11 @@ async fn serves_prometheus_text_on_the_metrics_route_without_auth() {
     // Like healthz/readyz, /metrics is not guarded by the MCP token.
     let resp = get_path(handle.addr, "/metrics").await;
     assert_eq!(resp.status(), 200);
-    assert!(
+    assert_eq!(
         resp.headers()
             .get("content-type")
-            .and_then(|value| value.to_str().ok())
-            .is_some_and(|value| value.starts_with("text/plain")),
+            .and_then(|value| value.to_str().ok()),
+        Some("text/plain; version=0.0.4"),
         "content-type must be the Prometheus text format"
     );
     let body = resp.text().await.unwrap();
@@ -268,7 +268,10 @@ async fn endpoints_subset_hides_unselected_routes() {
         endpoints: vec!["healthz".into()],
         ..Default::default()
     };
-    let handle = transport::start(state, test_live(), None, cfg)
+    // Supply a registry so the 404 below proves endpoint selection, not a
+    // missing dependency: an unselected endpoint stays hidden even when it
+    // could be rendered.
+    let handle = transport::start(state, test_live(), Some(test_metrics()), cfg)
         .await
         .unwrap();
 
@@ -282,6 +285,27 @@ async fn endpoints_subset_hides_unselected_routes() {
     assert_eq!(resp.status(), 404);
 
     let resp = post_mcp(handle.addr, None, &initialize_request()).await;
+    assert_eq!(resp.status(), 404);
+
+    handle.cancel.cancel();
+}
+
+#[tokio::test]
+async fn selected_metrics_without_a_registry_stays_unserved() {
+    let cfg = ControlConfig {
+        port: 0,
+        token: None,
+        endpoints: vec!["metrics".into()],
+        ..Default::default()
+    };
+    // Selecting the endpoint without wiring a registry leaves nothing to
+    // render; the router warns and omits the route rather than panicking or
+    // answering an empty scrape.
+    let handle = transport::start(test_state(), test_live(), None, cfg)
+        .await
+        .unwrap();
+
+    let resp = get_path(handle.addr, "/metrics").await;
     assert_eq!(resp.status(), 404);
 
     handle.cancel.cancel();
