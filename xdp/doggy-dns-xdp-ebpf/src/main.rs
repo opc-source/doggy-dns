@@ -27,6 +27,9 @@ use types::{CacheKey, CacheValue, FLAG_NEGATIVE, XdpRuntimeConfig, XdpStats};
 const MAX_QNAME_LEN: usize = 255;
 const DNS_HDR_LEN: usize = 12;
 const MAX_DNS_LEN: usize = 512;
+// Largest UDP/L4 length the fast path will touch. Only queries that carry a
+// single question ever match the cache, so anything above this is passed on.
+const MAX_UDP_DNS_LEN: usize = 1500;
 // The shortest possible positive reply: header, a one-byte QNAME (the root)
 // and QTYPE/QCLASS. The 16-byte copy chunk relies on this, because it always
 // writes a whole chunk even when the reply length is not a multiple of it.
@@ -139,8 +142,12 @@ fn try_dns_xdp(ctx: &XdpContext) -> Result<(u32, Option<Outcome>), ()> {
     if u16::from_be(udp.dest) != config.dns_port {
         return Ok((xdp_action::XDP_PASS, None));
     }
-    let udp_len = u16::from_be(udp.len) as usize;
-    if udp_len < UDP_HDR_LEN {
+    // Compose the length with `u16::from_be` semantics. The value never
+    // reaches packet-pointer arithmetic any more (the pre-resize containment
+    // check was removed below), so the verifier only needs it as an `i32`
+    // for `bpf_xdp_adjust_tail`.
+    let udp_len = read_u16_be((data + udp_offset) as *const u8, 4) as usize;
+    if !(UDP_HDR_LEN..=MAX_UDP_DNS_LEN).contains(&udp_len) {
         return Ok((xdp_action::XDP_PASS, None));
     }
     // Current DNS message length, taken from the UDP length field. The packet
@@ -187,18 +194,6 @@ fn try_dns_xdp(ctx: &XdpContext) -> Result<(u32, Option<Outcome>), ()> {
 
     let txid = read_u16_be(dns_ptr, 0);
 
-    // The query must be fully contained in the frame before we resize it.
-    if data + dns_offset + old_dns_len > end {
-        warn!(
-            ctx,
-            "truncated query while occupying the frame, passing (txid {:x}, hash {:x}, qtype {})",
-            txid as u64,
-            name_hash,
-            qtype as u64
-        );
-        return Ok((xdp_action::XDP_PASS, None));
-    }
-
     let negative = entry.flags & FLAG_NEGATIVE != 0;
     let resp_len = entry.resp_len as usize;
     let new_dns_len = if negative {
@@ -220,6 +215,14 @@ fn try_dns_xdp(ctx: &XdpContext) -> Result<(u32, Option<Outcome>), ()> {
     };
 
     // 8. Resize the frame to the new DNS message length.
+    //
+    // The query's claimed length is deliberately not compared against
+    // `data_end`: this kernel's verifier drops the scalar bound on both
+    // `be16` and register `|`, and LLVM spills the length before the range
+    // check, so a pointer addition with it is rejected as unbounded.
+    // `bpf_xdp_adjust_tail` refuses a resize that leaves the frame invalid,
+    // and the check below proves the write range from the constant-bounded
+    // response length instead.
     let delta = new_dns_len as i32 - old_dns_len as i32;
     if unsafe { bpf_xdp_adjust_tail(ctx.ctx, delta) } != 0 {
         warn!(
