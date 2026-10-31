@@ -86,6 +86,10 @@ jobs:
             echo "perf-upstream: dynamic" >> dist/bundle/MANIFEST.txt
           fi
 
+      # Must come before the manifest is written, which records the version.
+      - name: Install dnsperf
+        run: sudo apt-get update && sudo apt-get install -y dnsperf
+
       - name: Assemble bundle
         run: |
           cp scripts/perf_ab.py dist/bundle/
@@ -109,9 +113,6 @@ jobs:
             sha256sum bin/* config/*.toml perf_ab.py MANIFEST.txt > SHA256SUMS
           )
           chmod +x dist/bundle/bin/*
-
-      - name: Install dnsperf
-        run: sudo apt-get update && sudo apt-get install -y dnsperf
 
       # The XDP arm needs a privileged kernel and is verified on the host that
       # downloads the bundle. This smoke only proves the packaged userspace arm
