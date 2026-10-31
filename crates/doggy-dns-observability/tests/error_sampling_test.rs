@@ -65,8 +65,8 @@ async fn tracing_error_events_are_force_sampled_at_zero_ratio() {
     config.traces.max_export_batch_size = 64;
     config.profiles.enabled = false;
 
-    let mut telemetry =
-        Observability::init(&config, None).expect("observability should initialize");
+    let mut telemetry = Observability::init(&common::full_config(config), None)
+        .expect("observability should initialize");
 
     // Ratio 0 drops the root span, but the error child must still be sampled and
     // must keep the root's trace ID.

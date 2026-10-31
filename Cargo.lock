@@ -778,6 +778,7 @@ dependencies = [
  "doggy-dns-plugin",
  "hickory-proto",
  "hickory-server",
+ "libc",
  "opentelemetry",
  "opentelemetry-appender-tracing",
  "opentelemetry-otlp",

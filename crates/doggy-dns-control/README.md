@@ -21,6 +21,7 @@ Kubernetes probe target.
 - **Non-fatal** — if the control plane port is already in use, the DNS server continues running.
 - **Config redaction** — `get_config` recursively replaces sensitive values (`password`, `token`, `secret`, `authorization`, `api_key`, `apikey`, `passwd`) with `"***"`.
 - **Optional Bearer auth** — set `[control].token` to require `Authorization: Bearer <token>` on `/mcp`; health endpoints never require it.
+- **Discovery** — the node publishes `doggy_dns.ip_addr` and `doggy_dns.control.port` OTel resource attributes so doggy-dns-console can join `http://{ip_addr}:{control_port}/mcp` and discover instances without static configuration.
 
 ## Configuration
 

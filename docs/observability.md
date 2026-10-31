@@ -148,6 +148,15 @@ Resource attributes merge from `OTEL_RESOURCE_ATTRIBUTES`, then
 `resource_attributes` (config wins). `service.name` is resolved from
 `service_name` → `OTEL_SERVICE_NAME` → resource attributes → `doggy-dns`.
 
+`host.name` defaults to `HOSTNAME`/`COMPUTERNAME`, then the OS hostname, and
+`service.instance.id` is `<host.name>-<pid>`; an explicitly configured
+`host.name` drives both. Alongside it, doggy-dns publishes
+`doggy_dns.ip_addr` (the reachable node address) and its listener ports
+(`doggy_dns.dns.port`, `doggy_dns.control.port` whenever the control plane is
+enabled, and TLS/HTTPS ports when enabled) so centralized consoles can discover
+and join instances from telemetry alone. See
+[configuration.md](configuration.md#control-plane).
+
 ## OTel Collector
 
 Point doggy-dns at the Collector's OTLP/HTTP receiver:

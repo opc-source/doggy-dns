@@ -183,3 +183,13 @@ freshness, XDP attach state); both are plain GET, never require auth and
 always answer 200 — `readyz` is a report, not a verdict, so deciding what
 counts as "not ready" stays with the operator or doggy-dns-console. Full
 contract: [crates/doggy-dns-control/README.md](../crates/doggy-dns-control/README.md).
+
+When observability is enabled, the node publishes `doggy_dns.ip_addr` — a
+concrete bind address as-is, loopback for a loopback bind, or the egress
+interface IP for a wildcard bind — plus `doggy_dns.dns.port` and
+`doggy_dns.control.port` whenever the control plane is enabled, regardless of
+which endpoints it serves (TLS/HTTPS ports are included when those listeners
+are enabled). doggy-dns-console joins
+`http://{ip_addr}:{control_port}/mcp`, so no static endpoint list is needed.
+If the console reaches nodes through a different address (NAT, reverse proxy),
+configure `MCP_ENDPOINTS` there.
