@@ -106,7 +106,9 @@ jobs:
             echo "runner: ${ImageOS:-unknown} $(uname -srm)"
             echo "rustc: $(rustc -V)"
             echo "cargo: $(cargo -V)"
-            echo "dnsperf: $(dnsperf -v 2>&1 | tr '\n' ' ')"
+            # `dnsperf -v` prints the version, then keeps running and logs
+            # status/error lines; drop those rather than the whole output.
+            echo "dnsperf: $(dnsperf -v 2>&1 | grep -vE '^(\[Status\]|Error:)' | tr '\n' ' ' | sed 's/ *$//')"
           } >> dist/bundle/MANIFEST.txt
           (
             cd dist/bundle
