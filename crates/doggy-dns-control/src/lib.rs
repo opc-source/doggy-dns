@@ -1,14 +1,16 @@
 //! Node-side service control plane: one HTTP listener whose endpoints are
 //! selected by configuration — the read-only MCP introspection protocol at
-//! `/mcp`, plus unauthenticated `healthz`/`readyz` probes backed by live
-//! runtime signals.
+//! `/mcp`, unauthenticated `healthz`/`readyz` probes backed by live runtime
+//! signals, and an optional Prometheus `/metrics` endpoint.
 
 pub mod live;
+pub mod metrics;
 pub mod redact;
 pub mod server;
 pub mod state;
 pub mod transport;
 
+pub use metrics::MetricsRegistry;
 pub use transport::{ControlPlaneHandle, start};
 
 use serde::{Deserialize, Serialize};

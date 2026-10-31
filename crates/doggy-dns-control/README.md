@@ -1,8 +1,9 @@
 # doggy-dns-control
 
 Node-side service control plane for doggy-dns: one HTTP listener exposing the
-read-only MCP (Model Context Protocol) introspection endpoint plus plain
-health probes backed by live runtime signals.
+read-only MCP (Model Context Protocol) introspection endpoint, plain health
+probes backed by live runtime signals, and an opt-in Prometheus metrics
+endpoint.
 
 ## Overview
 
@@ -16,7 +17,9 @@ Kubernetes probe target.
 
 - **Disabled by default** — set `[control].enabled = true` to activate.
 - **Endpoint selection** — `control.endpoints` decides which routes exist
-  (`mcp`, `healthz`, `readyz`); everything else 404s.
+  (`mcp`, `healthz`, `readyz`, `metrics`); everything else 404s.
+- **Prometheus pull** — `/metrics` serves the DNS request metrics as text,
+  independent of OTLP push; see [Metrics](#metrics).
 - **Read-only** — all four tools carry `readOnlyHint = true`, `destructiveHint = false`.
 - **Non-fatal** — if the control plane port is already in use, the DNS server continues running.
 - **Config redaction** — `get_config` recursively replaces sensitive values (`password`, `token`, `secret`, `authorization`, `api_key`, `apikey`, `passwd`) with `"***"`.
@@ -32,7 +35,7 @@ listen_addr = "127.0.0.1"
 port = 19090
 token = "change-me"                    # omit for no auth; guards /mcp only
 allowed_hosts = ["dns-node-1", "10.0.0.5:19090"]
-endpoints = ["mcp", "healthz", "readyz"]
+endpoints = ["mcp", "healthz", "readyz", "metrics"]
 ```
 
 | Field | Default | Description |
@@ -42,7 +45,7 @@ endpoints = ["mcp", "healthz", "readyz"]
 | `port` | `19090` | Bind port |
 | `token` | `None` | Bearer token for `/mcp` |
 | `allowed_hosts` | `[]` | Allowed `Host` header values for DNS rebinding protection (`/mcp` only) |
-| `endpoints` | `["mcp", "healthz", "readyz"]` | Which routes the listener serves |
+| `endpoints` | `["mcp", "healthz", "readyz"]` | Which routes the listener serves; `metrics` is opt-in |
 
 ## Endpoints
 
@@ -51,9 +54,32 @@ endpoints = ["mcp", "healthz", "readyz"]
 | `/mcp` | POST (JSON-RPC 2.0, optional SSE) | Bearer token when set | MCP tools |
 | `/healthz` | GET | none | Liveness; `{"status":"ok"}`, 200 while the process is up |
 | `/readyz` | GET | none | Live runtime signals report; always 200 — a report, not a verdict |
+| `/metrics` | GET | none | Prometheus text exposition of the DNS request metrics |
 
 The MCP server listens on `http://<listen_addr>:<port>/mcp` using the
 **Streamable HTTP** transport.
+
+## Metrics
+
+`/metrics` is opt-in (`endpoints` must contain `metrics`) and serves
+`text/plain; version=0.0.4`. Selecting it collects DNS metrics even when
+`[observability] enabled = false`; when OTLP metrics are also enabled, both
+readers share one set of instruments. `listen_addr` defaults to loopback, so
+set it to an address Prometheus can dial when scraping from another host.
+
+| Metric | Type | Labels |
+|--------|------|--------|
+| `dns_queries_total` | counter | `dns_question_type`, `network_protocol_name`, `dns_response_code`, `dns_authority` |
+| `dns_query_duration_bucket` / `_sum` / `_count` | histogram, values in **ms** | same as above |
+| `dns_queries_in_flight` | gauge | — |
+| `dns_xdp_queries_total` | counter | `dns_xdp_result` |
+| `target_info` | gauge | `service_name`, `service_version`, `service_instance_id`, `host_name`, `doggy_dns_ip_addr`, listener ports, ... |
+
+Units are not folded into the names (OTel unit `1` would otherwise add a
+misleading `_ratio` suffix), and the instrumentation-scope labels are omitted.
+Runtime JSON signals stay on `/readyz`. See
+[docs/observability.md](../../docs/observability.md#prometheus-pull-control-plane)
+for a scrape config and the XDP polling caveat.
 
 ## Tools
 
@@ -186,7 +212,8 @@ Authorization: Bearer <token>
 ```
 
 `/mcp` requests without a valid token receive `401 Unauthorized`.
-`/healthz` and `/readyz` never require auth — kubelets must not hold secrets.
+`/healthz`, `/readyz` and `/metrics` never require auth — probes and scrapers
+must not need secrets.
 
 ## Contract Stability
 
@@ -197,6 +224,7 @@ The following JSON field names are part of the stable contract and must not be r
 - `get_config` → `format`, `content`, `redactedKeys`
 - `get_runtime_status` / `GET /readyz` → `signals`
 - `GET /healthz` → `status`
+- `GET /metrics` → Prometheus metric names and labels listed in [Metrics](#metrics)
 
 ## Smoke Test
 
@@ -207,6 +235,9 @@ cargo run -- config/doggy-dns.toml
 # Liveness and readiness probes (no auth, always 200)
 curl -s http://127.0.0.1:19090/healthz
 curl -s http://127.0.0.1:19090/readyz
+
+# Prometheus metrics (requires "metrics" in [control].endpoints)
+curl -s http://127.0.0.1:19090/metrics
 
 # Initialize MCP session
 curl -s http://127.0.0.1:19090/mcp \

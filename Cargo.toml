@@ -62,7 +62,10 @@ opentelemetry_sdk = { version = "0.33", default-features = false, features = ["t
 opentelemetry-otlp = { version = "0.33", default-features = false, features = ["http-proto", "reqwest-blocking-client", "trace", "metrics", "logs", "internal-logs"] }
 opentelemetry-proto = { version = "0.33", default-features = false, features = ["gen-tonic-messages", "profiles", "trace", "logs", "metrics"] }
 opentelemetry-appender-tracing = "0.33"
+opentelemetry-prometheus = { version = "0.33", default-features = false, features = ["internal-logs"] }
 tracing-opentelemetry = "0.34"
+# Prometheus pull: the control plane's `/metrics` renders this registry.
+prometheus = { version = "0.14", default-features = false }
 pprof = "0.15"
 reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
 prost = "0.14"

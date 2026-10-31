@@ -95,10 +95,65 @@ impl XdpMetrics {
     }
 }
 
+/// The meter provider plus the instruments it owns and, when the control
+/// plane serves `/metrics`, the Prometheus registry backing that endpoint.
+pub(crate) struct MetricsPipeline {
+    pub(crate) provider: SdkMeterProvider,
+    pub(crate) metrics: DnsMetrics,
+    pub(crate) xdp: XdpMetrics,
+    pub(crate) prometheus: Option<prometheus::Registry>,
+}
+
+/// Build one meter provider feeding the requested readers. OTLP push and
+/// Prometheus pull share the same instruments, so enabling both never records
+/// twice on the query path.
 pub(crate) fn build_meter_provider(
     config: &ObservabilityConfig,
     resource: Resource,
-) -> Result<(SdkMeterProvider, DnsMetrics, XdpMetrics)> {
+    export_otlp: bool,
+    expose_prometheus: bool,
+) -> Result<MetricsPipeline> {
+    debug_assert!(
+        export_otlp || expose_prometheus,
+        "a meter provider needs at least one reader"
+    );
+
+    let mut builder = SdkMeterProvider::builder().with_resource(resource);
+
+    if export_otlp {
+        builder = builder.with_reader(build_otlp_reader(config)?);
+    }
+
+    let mut prometheus_registry = None;
+    if expose_prometheus {
+        let registry = prometheus::Registry::new();
+        let exporter = opentelemetry_prometheus::exporter()
+            .with_registry(registry.clone())
+            // Keep the OTel names (`dns_queries_total`) instead of deriving
+            // suffixes from units: unit `1` otherwise becomes `_ratio`.
+            .without_units()
+            // The instrumentation scope is constant here; its labels would
+            // only add noise to every series.
+            .scope_info_enabled(false)
+            .build()
+            .context("failed to build Prometheus metric exporter")?;
+        builder = builder.with_reader(exporter);
+        prometheus_registry = Some(registry);
+    }
+
+    let provider = builder.build();
+    let meter = provider.meter(doggy_dns_plugin::APP_NAME);
+    let metrics = DnsMetrics::new(&meter);
+    let xdp = XdpMetrics::new(&meter);
+    Ok(MetricsPipeline {
+        provider,
+        metrics,
+        xdp,
+        prometheus: prometheus_registry,
+    })
+}
+
+fn build_otlp_reader(config: &ObservabilityConfig) -> Result<PeriodicReader<MetricExporter>> {
     let endpoint = endpoint::resolve_signal_endpoint(config, Signal::Metrics)?;
     let headers = auth::resolve_headers(config)?;
     let temporality = match config.metrics.temporality {
@@ -116,19 +171,9 @@ pub(crate) fn build_meter_provider(
         .build()
         .context("failed to build OTLP metric exporter")?;
 
-    let reader = PeriodicReader::builder(exporter)
+    Ok(PeriodicReader::builder(exporter)
         .with_interval(Duration::from_secs(config.metrics.interval_secs))
-        .build();
-
-    let provider = SdkMeterProvider::builder()
-        .with_reader(reader)
-        .with_resource(resource)
-        .build();
-
-    let meter = provider.meter(doggy_dns_plugin::APP_NAME);
-    let metrics = DnsMetrics::new(&meter);
-    let xdp_metrics = XdpMetrics::new(&meter);
-    Ok((provider, metrics, xdp_metrics))
+        .build())
 }
 
 struct DnsMetricsMiddleware {

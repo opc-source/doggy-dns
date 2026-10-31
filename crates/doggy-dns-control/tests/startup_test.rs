@@ -28,6 +28,7 @@ async fn occupied_port_returns_error_without_panicking() {
     let err = transport::start(
         test_state(),
         Arc::new(LiveState::new()),
+        None,
         ControlConfig {
             listen_addr: "127.0.0.1".into(),
             port: addr.port(),
@@ -52,6 +53,7 @@ async fn start_binds_ipv6_loopback() {
     let handle = transport::start(
         test_state(),
         Arc::new(LiveState::new()),
+        None,
         ControlConfig {
             listen_addr: "::1".into(),
             port,
@@ -72,6 +74,7 @@ async fn start_with_port_zero_assigns_random_port() {
     let handle = transport::start(
         test_state(),
         Arc::new(LiveState::new()),
+        None,
         ControlConfig {
             port: 0,
             ..Default::default()

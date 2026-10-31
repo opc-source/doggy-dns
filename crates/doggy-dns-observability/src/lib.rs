@@ -38,6 +38,7 @@ pub struct Observability {
     tracer_provider: Option<SdkTracerProvider>,
     metrics: Option<Arc<DnsMetrics>>,
     xdp: Option<Arc<XdpMetrics>>,
+    prometheus_registry: Option<prometheus::Registry>,
     profile_exporter: Option<profiles::ProfileExporter>,
     profile_task: Option<JoinHandle<()>>,
     profile_stopper: Option<Arc<profiles::ProfileStopper>>,
@@ -49,7 +50,17 @@ impl Observability {
     /// (`json` or anything else for plain text).
     pub fn init(config: &DoggyDnsConfig, log_format: Option<&str>) -> Result<Self> {
         let exposure = exposure::node_attributes(&config.server, &config.control);
+        // Prometheus pull is independent of OTLP push: selecting the control
+        // plane's `metrics` endpoint collects DNS metrics even when
+        // `[observability]` is disabled, so the endpoint is useful on its own.
+        let pull_metrics = config.control.enabled
+            && config
+                .control
+                .endpoints
+                .iter()
+                .any(|endpoint| endpoint == "metrics");
         let config = &config.observability;
+        let export_metrics = config.enabled && config.metrics.enabled;
         let mut observability = Self {
             config: config.clone(),
             logger_provider: None,
@@ -57,28 +68,24 @@ impl Observability {
             tracer_provider: None,
             metrics: None,
             xdp: None,
+            prometheus_registry: None,
             profile_exporter: None,
             profile_task: None,
             profile_stopper: None,
         };
 
-        let mut resource = None;
+        let resource = if config.enabled || pull_metrics {
+            Some(resource::build_resource(config, &exposure))
+        } else {
+            None
+        };
 
-        if config.enabled {
-            let built_resource = resource::build_resource(config, &exposure);
-            resource = Some(built_resource.clone());
-
+        if config.enabled
+            && let Some(built_resource) = resource.clone()
+        {
             if config.logs.enabled {
                 let provider = logs::build_logger_provider(config, built_resource.clone())?;
                 observability.logger_provider = Some(provider);
-            }
-
-            if config.metrics.enabled {
-                let (provider, metrics, xdp_metrics) =
-                    metrics::build_meter_provider(config, built_resource.clone())?;
-                observability.metrics = Some(Arc::new(metrics));
-                observability.xdp = Some(Arc::new(xdp_metrics));
-                observability.meter_provider = Some(provider);
             }
 
             if config.traces.enabled {
@@ -92,6 +99,21 @@ impl Observability {
             }
         }
 
+        if (export_metrics || pull_metrics)
+            && let Some(built_resource) = resource.clone()
+        {
+            let pipeline = metrics::build_meter_provider(
+                config,
+                built_resource,
+                export_metrics,
+                pull_metrics,
+            )?;
+            observability.metrics = Some(Arc::new(pipeline.metrics));
+            observability.xdp = Some(Arc::new(pipeline.xdp));
+            observability.meter_provider = Some(pipeline.provider);
+            observability.prometheus_registry = pipeline.prometheus;
+        }
+
         install_subscriber(
             config,
             log_format,
@@ -102,18 +124,32 @@ impl Observability {
         if config.enabled {
             log_startup(config, resource.as_ref());
         }
+        if pull_metrics {
+            tracing::info!(
+                endpoint = "/metrics",
+                "Prometheus metrics enabled on the control plane"
+            );
+        }
 
         Ok(observability)
     }
 
-    /// Middleware that records DNS query metrics. `None` when OTLP metrics are disabled.
+    /// Middleware that records DNS query metrics. `None` when neither OTLP
+    /// metrics nor the control plane's `/metrics` endpoint is enabled.
     pub fn metrics_middleware(&self) -> Option<Arc<dyn Middleware>> {
         self.metrics.clone().map(|metrics| metrics.middleware())
     }
 
-    /// Recorder for kernel-side XDP counters. `None` when OTLP metrics are disabled.
+    /// Recorder for kernel-side XDP counters. `None` when metrics are not
+    /// collected at all.
     pub fn xdp_metrics(&self) -> Option<Arc<XdpMetrics>> {
         self.xdp.clone()
+    }
+
+    /// Registry rendered by the control plane's `/metrics` endpoint. `None`
+    /// unless `control.endpoints` includes `metrics`.
+    pub fn metrics_registry(&self) -> Option<prometheus::Registry> {
+        self.prometheus_registry.clone()
     }
 
     /// Start the background CPU profiler. Must be called from within a Tokio runtime.

@@ -93,13 +93,14 @@ data_id = "doggy-dns.toml"
 
 # Optional: node-side service control plane (one HTTP listener).
 # `endpoints` selects what is exposed: "mcp" (read-only JSON-RPC tools at
-# /mcp), "healthz" (liveness probe), "readyz" (live runtime signals report).
+# /mcp), "healthz" (liveness probe), "readyz" (live runtime signals report),
+# "metrics" (Prometheus text metrics at /metrics, opt-in).
 [control]
 enabled = true
 listen_addr = "127.0.0.1"
 port = 19090
 token = "change-me"                    # optional Bearer auth; guards /mcp only
-endpoints = ["mcp", "healthz", "readyz"]
+endpoints = ["mcp", "healthz", "readyz", "metrics"]
 
 # Optional: XDP kernel fast path (Linux, requires `--features xdp` build).
 # Usage, semantics and limits: docs/xdp.md
@@ -167,8 +168,8 @@ and forward `upstream` entries parse as IP or IP:port; observability signal
 ranges, profile duration/frequency, log level and endpoint format;
 `xdp.cache_size > 0`, `xdp.negative_ttl > 0` and `xdp.attach_mode` is `auto` or
 `manual` when the fast path is enabled; `control.listen_addr` is a valid IP
-literal, `control.endpoints` is non-empty and contains only `mcp`, `healthz`
-and `readyz` (no duplicates) when the control plane is enabled.
+literal, `control.endpoints` is non-empty and contains only `mcp`, `healthz`,
+`readyz` and `metrics` (no duplicates) when the control plane is enabled.
 
 ## Control plane
 
@@ -181,7 +182,10 @@ guards this endpoint only. `healthz` is a trivial liveness probe and `readyz`
 reports live runtime signals (per-zone Nacos cache occupancy and push
 freshness, XDP attach state); both are plain GET, never require auth and
 always answer 200 — `readyz` is a report, not a verdict, so deciding what
-counts as "not ready" stays with the operator or doggy-dns-console. Full
+counts as "not ready" stays with the operator or doggy-dns-console. The
+opt-in `metrics` endpoint serves the DNS request metrics in Prometheus text
+format for scraping; it is independent of OTLP export and is documented in
+[observability.md](observability.md#prometheus-pull-control-plane). Full
 contract: [crates/doggy-dns-control/README.md](../crates/doggy-dns-control/README.md).
 
 When observability is enabled, the node publishes `doggy_dns.ip_addr` — a

@@ -844,12 +844,27 @@ endpoints = {endpoints}
 
 #[test]
 fn validate_rejects_unknown_control_endpoint() {
-    let err = control_endpoints_err(r#"["mcp", "metrics"]"#);
+    let err = control_endpoints_err(r#"["mcp", "debug"]"#);
     assert!(err.contains("control.endpoints"), "unexpected error: {err}");
     assert!(
-        err.contains("metrics"),
+        err.contains("debug"),
         "error should name the bad value: {err}"
     );
+}
+
+#[test]
+fn validate_accepts_metrics_control_endpoint() {
+    let toml_str = r#"
+[server]
+listen_addr = "127.0.0.1"
+port = 15353
+
+[control]
+enabled = true
+endpoints = ["healthz", "readyz", "metrics"]
+"#;
+    let config: DoggyDnsConfig = toml::from_str(toml_str).expect("parse failed");
+    validate_config(&config).expect("metrics is a known control endpoint");
 }
 
 #[test]

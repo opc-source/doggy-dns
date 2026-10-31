@@ -255,6 +255,49 @@ failure records are logs, not metrics: they arrive under the
 `doggy_dns_xdp::kernel` target at `warn`/`error` level. See
 [xdp.md](xdp.md) for the kernel side.
 
+## Prometheus pull (control plane)
+
+The control plane can serve the same DNS metrics as Prometheus text at
+`GET /metrics`, with no OTLP backend involved:
+
+```toml
+[control]
+enabled = true
+listen_addr = "0.0.0.0"          # Prometheus must be able to dial the address
+port = 19090
+endpoints = ["healthz", "readyz", "metrics"]
+```
+
+Selecting `metrics` installs the DNS metrics middleware and starts the XDP
+counter poller even when `[observability] enabled = false`. When OTLP metrics
+are also enabled, both readers share one set of instruments, so nothing is
+recorded twice on the query path. The endpoint is unauthenticated like the
+health probes; `/mcp` keeps its Bearer token.
+
+```yaml
+scrape_configs:
+  - job_name: doggy-dns
+    static_configs:
+      - targets: ["dns-node-1:19090"]
+```
+
+| Metric | Type | Labels |
+|--------|------|--------|
+| `dns_queries_total` | counter | `dns_question_type`, `network_protocol_name`, `dns_response_code`, `dns_authority` |
+| `dns_query_duration_bucket` / `_sum` / `_count` | histogram, values in **ms** | same as `dns_queries_total` |
+| `dns_queries_in_flight` | gauge | — |
+| `dns_xdp_queries_total` | counter | `dns_xdp_result` (`hit`, `negative_hit`, `miss`, `expired`, `drop`) |
+| `target_info` | gauge | resource attributes: `service_name`, `service_version`, `service_instance_id`, `host_name`, `doggy_dns_ip_addr`, listener ports, ... |
+
+Prometheus-specific naming: units are not folded into the name (OTel unit
+`1` would otherwise produce a misleading `_ratio` suffix), so the histogram
+stays `dns_query_duration_*` with milliseconds as its value, and the OTel
+instrumentation-scope labels are omitted. `dns.xdp.queries` is still polled
+once per `[observability.metrics].interval_secs`, so kernel counters lag by up
+to one poll plus one scrape interval. Runtime JSON signals (Nacos cache
+occupancy, push freshness, XDP attach state) remain on `/readyz`, not
+`/metrics`.
+
 ## Traces
 
 | Span | Attributes |

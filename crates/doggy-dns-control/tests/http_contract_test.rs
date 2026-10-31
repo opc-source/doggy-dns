@@ -4,7 +4,7 @@ use chrono::Utc;
 use doggy_dns_control::live::LiveState;
 use doggy_dns_control::state::McpState;
 use doggy_dns_control::transport;
-use doggy_dns_control::{ControlConfig, PluginSnapshot};
+use doggy_dns_control::{ControlConfig, MetricsRegistry, PluginSnapshot};
 use std::sync::Arc;
 
 fn test_state() -> Arc<McpState> {
@@ -32,6 +32,18 @@ fn test_live() -> Arc<LiveState> {
         || serde_json::json!({"cachedServices": 3}),
     );
     Arc::new(live)
+}
+
+fn test_metrics() -> MetricsRegistry {
+    let registry = prometheus::Registry::new();
+    let counter = prometheus::IntCounter::with_opts(prometheus::Opts::new(
+        "test_queries_total",
+        "test counter",
+    ))
+    .unwrap();
+    counter.inc_by(7);
+    registry.register(Box::new(counter)).unwrap();
+    MetricsRegistry::new(registry)
 }
 
 fn initialize_request() -> serde_json::Value {
@@ -109,7 +121,9 @@ async fn lists_four_read_only_tools_and_calls_status() {
         token: None,
         ..Default::default()
     };
-    let handle = transport::start(state, test_live(), cfg).await.unwrap();
+    let handle = transport::start(state, test_live(), None, cfg)
+        .await
+        .unwrap();
 
     let resp = post_mcp(handle.addr, None, &initialize_request()).await;
     assert_eq!(resp.status(), 200);
@@ -153,7 +167,9 @@ async fn rejects_missing_or_wrong_token() {
         token: Some("s3cret".into()),
         ..Default::default()
     };
-    let handle = transport::start(state, test_live(), cfg).await.unwrap();
+    let handle = transport::start(state, test_live(), None, cfg)
+        .await
+        .unwrap();
 
     let resp = post_mcp(handle.addr, None, &initialize_request()).await;
     assert_eq!(resp.status(), 401);
@@ -175,7 +191,9 @@ async fn initialize_returns_doggy_dns_control_server_info() {
         token: None,
         ..Default::default()
     };
-    let handle = transport::start(state, test_live(), cfg).await.unwrap();
+    let handle = transport::start(state, test_live(), None, cfg)
+        .await
+        .unwrap();
 
     let resp = post_mcp(handle.addr, None, &initialize_request()).await;
     let body = resp.text().await.unwrap();
@@ -194,7 +212,9 @@ async fn health_endpoints_bypass_the_mcp_token() {
         token: Some("s3cret".into()),
         ..Default::default()
     };
-    let handle = transport::start(state, test_live(), cfg).await.unwrap();
+    let handle = transport::start(state, test_live(), None, cfg)
+        .await
+        .unwrap();
 
     let resp = get_path(handle.addr, "/healthz").await;
     assert_eq!(resp.status(), 200);
@@ -211,6 +231,35 @@ async fn health_endpoints_bypass_the_mcp_token() {
 }
 
 #[tokio::test]
+async fn serves_prometheus_text_on_the_metrics_route_without_auth() {
+    let cfg = ControlConfig {
+        port: 0,
+        token: Some("s3cret".into()),
+        endpoints: vec!["metrics".into()],
+        ..Default::default()
+    };
+    let handle = transport::start(test_state(), test_live(), Some(test_metrics()), cfg)
+        .await
+        .unwrap();
+
+    // Like healthz/readyz, /metrics is not guarded by the MCP token.
+    let resp = get_path(handle.addr, "/metrics").await;
+    assert_eq!(resp.status(), 200);
+    assert!(
+        resp.headers()
+            .get("content-type")
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|value| value.starts_with("text/plain")),
+        "content-type must be the Prometheus text format"
+    );
+    let body = resp.text().await.unwrap();
+    assert!(body.contains("# TYPE test_queries_total counter"), "{body}");
+    assert!(body.contains("test_queries_total 7"), "{body}");
+
+    handle.cancel.cancel();
+}
+
+#[tokio::test]
 async fn endpoints_subset_hides_unselected_routes() {
     let state = test_state();
     let cfg = ControlConfig {
@@ -219,12 +268,17 @@ async fn endpoints_subset_hides_unselected_routes() {
         endpoints: vec!["healthz".into()],
         ..Default::default()
     };
-    let handle = transport::start(state, test_live(), cfg).await.unwrap();
+    let handle = transport::start(state, test_live(), None, cfg)
+        .await
+        .unwrap();
 
     let resp = get_path(handle.addr, "/healthz").await;
     assert_eq!(resp.status(), 200);
 
     let resp = get_path(handle.addr, "/readyz").await;
+    assert_eq!(resp.status(), 404);
+
+    let resp = get_path(handle.addr, "/metrics").await;
     assert_eq!(resp.status(), 404);
 
     let resp = post_mcp(handle.addr, None, &initialize_request()).await;

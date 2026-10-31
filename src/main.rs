@@ -142,7 +142,10 @@ async fn async_main(
     // attach flag is fixed after startup — the manager lives as long as this
     // function and dropping it detaches the program.
     let live = build_live_state(&watchers, xdp.enabled());
-    let mcp_handle = start_control_plane(&config, config_content, live).await;
+    let metrics = telemetry
+        .metrics_registry()
+        .map(doggy_dns_control::MetricsRegistry::new);
+    let control_handle = start_control_plane(&config, config_content, live, metrics).await;
 
     // Run server until shutdown signal
     let shutdown_timeout = Duration::from_secs(config.server.shutdown_timeout);
@@ -182,9 +185,9 @@ async fn async_main(
     }
 
     // Shut down the control plane listener
-    if let Some(handle) = mcp_handle {
+    if let Some(handle) = control_handle {
         handle.cancel.cancel();
-        await_shutdown("mcp server", handle.wait()).await;
+        await_shutdown("control plane", handle.wait()).await;
     }
 
     Ok(())
@@ -307,6 +310,7 @@ async fn start_control_plane(
     config: &DoggyDnsConfig,
     config_content: &str,
     live: Arc<LiveState>,
+    metrics: Option<doggy_dns_control::MetricsRegistry>,
 ) -> Option<doggy_dns_control::ControlPlaneHandle> {
     if !config.control.enabled {
         return None;
@@ -329,7 +333,7 @@ async fn start_control_plane(
 
     // start() only binds the listener and spawns the serve task; a failure
     // here must stay non-fatal so DNS service continues alone.
-    match doggy_dns_control::start(state, live, control_config).await {
+    match doggy_dns_control::start(state, live, metrics, control_config).await {
         Ok(handle) => {
             tracing::info!(addr = %handle.addr, "control plane listening");
             Some(handle)

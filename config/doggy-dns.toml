@@ -106,10 +106,11 @@ data_id = "doggy-dns.toml"
 #   "mcp"     JSON-RPC over Streamable HTTP at /mcp (Bearer token guarded)
 #   "healthz" liveness probe, always 200, no auth
 #   "readyz"  readiness + live runtime signals report, always 200, no auth
-# [control]
-# enabled = false
-# listen_addr = "127.0.0.1"
-# port = 19090
-# token = "change-me"          # Bearer token; guards /mcp only; omit for no auth
+#   "metrics" Prometheus text metrics at /metrics, no auth (opt-in)
+[control]
+enabled = true
+listen_addr = "127.0.0.1"
+port = 19090
+token = "change-me"          # Bearer token; guards /mcp only; omit for no auth
 # allowed_hosts = ["dns-node-1", "10.0.0.5:19090"]
-# endpoints = ["mcp", "healthz", "readyz"]
+endpoints = ["mcp", "healthz", "readyz", "metrics"]

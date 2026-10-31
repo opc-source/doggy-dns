@@ -32,6 +32,6 @@ max_ttl = 600
 enabled = true
 listen_addr = "0.0.0.0"
 port = 19090
-# healthz/readyz only: the baked default exposes no MCP endpoint, because /mcp
-# without a `token` is an unauthenticated control surface.
-endpoints = ["healthz", "readyz"]
+# No MCP endpoint: /mcp without a `token` is an unauthenticated control surface.
+# /metrics is scrape-only and, like the probes, needs no auth.
+endpoints = ["healthz", "readyz", "metrics"]

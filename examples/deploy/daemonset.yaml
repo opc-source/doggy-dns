@@ -24,6 +24,12 @@ spec:
     metadata:
       labels:
         app: doggy-dns
+      # Annotation-based scraping. Prometheus Operator users should use a
+      # PodMonitor/ServiceMonitor for control port 19090 instead.
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "19090"
+        prometheus.io/path: "/metrics"
     spec:
       hostNetwork: true
       # The pod shares the node's network namespace, so without this it would

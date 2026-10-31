@@ -53,13 +53,14 @@ data:
     min_ttl = 10
     max_ttl = 300
 
-    # Liveness and readiness for the probes in the DaemonSets below. 0.0.0.0
-    # because the pod shares the node's network namespace.
+    # Liveness/readiness probes plus Prometheus scraping for the DaemonSets
+    # below. 0.0.0.0 because the pod shares the node's network namespace; the
+    # manifests carry prometheus.io annotations pointing at /metrics.
     [control]
     enabled = true
     listen_addr = "0.0.0.0"
     port = 19090
-    endpoints = ["healthz", "readyz"]
+    endpoints = ["healthz", "readyz", "metrics"]
     # `endpoints = ["mcp", ...]` additionally exposes the MCP tool surface at
     # /mcp. Set `token` (or DOGGY_CONTROL_TOKEN below) if you do; without one the
     # endpoint is unauthenticated.
@@ -103,7 +104,7 @@ data:
     enabled = true
     listen_addr = "0.0.0.0"
     port = 19090
-    endpoints = ["healthz", "readyz"]
+    endpoints = ["healthz", "readyz", "metrics"]
 
     # Kernel fast path. `interface` empty means: config → XDP_INTERFACE → the
     # default-route interface read from /proc/net/route, which under hostNetwork

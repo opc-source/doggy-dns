@@ -3,9 +3,9 @@ use std::sync::Arc;
 
 use axum::{
     Router,
-    http::{HeaderMap, StatusCode},
+    http::{HeaderMap, StatusCode, header},
     middleware,
-    response::{IntoResponse, Json},
+    response::{IntoResponse, Json, Response},
     routing::get,
 };
 use rmcp::transport::streamable_http_server::{
@@ -17,6 +17,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::ControlConfig;
 use crate::live::LiveState;
+use crate::metrics::MetricsRegistry;
 use crate::server::DoggyMcpServer;
 use crate::state::McpState;
 
@@ -39,12 +40,14 @@ impl ControlPlaneHandle {
 ///
 /// Which routes exist is decided by `cfg.endpoints`: `mcp` nests the MCP
 /// JSON-RPC service at `/mcp` (guarded by the Bearer token when set),
-/// while `healthz` and `readyz` are plain GET probes that never require
+/// `healthz` and `readyz` are plain GET probes, and `metrics` serves the
+/// Prometheus text format from the supplied registry. None of these require
 /// auth. Returns a handle that can be used to shut the listener down.
 /// If the port is already in use, returns an error.
 pub async fn start(
     state: Arc<McpState>,
     live: Arc<LiveState>,
+    metrics: Option<MetricsRegistry>,
     cfg: ControlConfig,
 ) -> anyhow::Result<ControlPlaneHandle> {
     let cancel = CancellationToken::new();
@@ -52,7 +55,7 @@ pub async fn start(
     let listener = TcpListener::bind(addr).await?;
     let addr = listener.local_addr()?;
 
-    let router = build_router(state, &live, &cfg, cancel.clone());
+    let router = build_router(state, &live, metrics, &cfg, cancel.clone());
 
     let cancel_for_shutdown = cancel.clone();
     let join = tokio::spawn(async move {
@@ -72,6 +75,7 @@ pub async fn start(
 pub fn build_router(
     state: Arc<McpState>,
     live: &Arc<LiveState>,
+    metrics: Option<MetricsRegistry>,
     cfg: &ControlConfig,
     cancel: CancellationToken,
 ) -> Router {
@@ -124,6 +128,17 @@ pub fn build_router(
         let live_for_readyz = live.clone();
         router = router.route("/readyz", get(move || readyz(live_for_readyz.clone())));
     }
+    if has_endpoint(cfg, "metrics") {
+        match metrics {
+            Some(metrics) => {
+                router = router.route("/metrics", get(move || metrics_endpoint(metrics.clone())));
+            }
+            None => tracing::warn!(
+                endpoint = "/metrics",
+                "control endpoint is enabled but no metrics registry was supplied; route stays unregistered"
+            ),
+        }
+    }
 
     router
 }
@@ -144,4 +159,20 @@ async fn healthz() -> Json<Value> {
 /// doggy-dns-console's) call, not this server's.
 async fn readyz(live: Arc<LiveState>) -> Json<Value> {
     Json(live.snapshot())
+}
+
+/// Prometheus text exposition. The registry belongs to the observability
+/// layer; gathering and encoding happen per scrape.
+async fn metrics_endpoint(metrics: MetricsRegistry) -> Response {
+    match metrics.render() {
+        Ok(body) => ([(header::CONTENT_TYPE, prometheus::TEXT_FORMAT)], body).into_response(),
+        Err(error) => {
+            tracing::warn!(%error, "failed to encode prometheus metrics");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "failed to encode prometheus metrics",
+            )
+                .into_response()
+        }
+    }
 }

@@ -19,13 +19,15 @@ pub struct ControlConfig {
     #[serde(default)]
     pub allowed_hosts: Vec<String>,
     /// Which endpoints the listener serves. Allowed values: `mcp`,
-    /// `healthz`, `readyz`. Validated only when the plane is enabled.
+    /// `healthz`, `readyz`, `metrics`. Validated only when the plane is
+    /// enabled.
     #[serde(default = "default_control_endpoints")]
     pub endpoints: Vec<String>,
 }
 
-/// The endpoint names a control plane listener may expose.
-pub const CONTROL_ENDPOINTS: [&str; 3] = ["mcp", "healthz", "readyz"];
+/// The endpoint names a control plane listener may expose. `metrics` is
+/// opt-in: the default endpoint set stays `mcp`, `healthz`, `readyz`.
+pub const CONTROL_ENDPOINTS: [&str; 4] = ["mcp", "healthz", "readyz", "metrics"];
 
 impl Default for ControlConfig {
     fn default() -> Self {
@@ -49,5 +51,10 @@ fn default_control_port() -> u16 {
 }
 
 fn default_control_endpoints() -> Vec<String> {
-    CONTROL_ENDPOINTS.iter().map(|s| s.to_string()).collect()
+    // `metrics` is deliberately absent: it exposes node and request telemetry,
+    // so an operator opts in by listing it.
+    ["mcp", "healthz", "readyz"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect()
 }
