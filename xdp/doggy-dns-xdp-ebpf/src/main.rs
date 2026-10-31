@@ -139,7 +139,11 @@ fn try_dns_xdp(ctx: &XdpContext) -> Result<(u32, Option<Outcome>), ()> {
     if u16::from_be(udp.dest) != config.dns_port {
         return Ok((xdp_action::XDP_PASS, None));
     }
-    let udp_len = u16::from_be(udp.len) as usize;
+    // Compose the length from the two wire bytes instead of `u16::from_be`:
+    // this kernel's verifier does not carry the 16-bit bound across the byte
+    // swap, and the containment check below adds the value to a packet
+    // pointer. Two zero-extended byte loads keep the range provably 0..=65535.
+    let udp_len = read_u16_be((data + udp_offset) as *const u8, 4) as usize;
     if udp_len < UDP_HDR_LEN {
         return Ok((xdp_action::XDP_PASS, None));
     }
