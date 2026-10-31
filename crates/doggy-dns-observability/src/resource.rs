@@ -7,12 +7,21 @@ use std::collections::BTreeMap;
 ///
 /// Precedence for `service.name`: config `service_name` → `OTEL_SERVICE_NAME` →
 /// `service.name` in `OTEL_RESOURCE_ATTRIBUTES` → [`APP_NAME`].
-pub(crate) fn build_resource(config: &ObservabilityConfig) -> Resource {
-    build_with_env(config, |name| std::env::var(name).ok())
+pub(crate) fn build_resource(
+    config: &ObservabilityConfig,
+    exposure: &BTreeMap<String, String>,
+) -> Resource {
+    build_with_env(config, exposure, |name| std::env::var(name).ok())
 }
 
-fn build_with_env(config: &ObservabilityConfig, env: impl Fn(&str) -> Option<String>) -> Resource {
-    let mut attributes = BTreeMap::<String, String>::new();
+fn build_with_env(
+    config: &ObservabilityConfig,
+    exposure: &BTreeMap<String, String>,
+    env: impl Fn(&str) -> Option<String>,
+) -> Resource {
+    // Derived node attributes are the defaults; environment and configured
+    // attributes override them.
+    let mut attributes = exposure.clone();
 
     if let Some(raw) = env("OTEL_RESOURCE_ATTRIBUTES").filter(|value| !value.trim().is_empty()) {
         for pair in raw.split(',') {
@@ -55,11 +64,14 @@ fn build_with_env(config: &ObservabilityConfig, env: impl Fn(&str) -> Option<Str
         })
         .unwrap_or_else(|| doggy_dns_plugin::APP_NAME.to_string());
 
-    let hostname = env("HOSTNAME")
-        .or_else(|| env("COMPUTERNAME"))
+    // An injected `host.name` (config or OTEL_RESOURCE_ATTRIBUTES) also feeds
+    // `service.instance.id`, so both stay consistent when the environment has
+    // no HOSTNAME.
+    let hostname = attributes
+        .get("host.name")
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| "unknown".to_string());
+        .unwrap_or_else(|| crate::exposure::detect_hostname_with(&env));
 
     attributes.insert("service.name".to_string(), service_name);
     attributes
@@ -119,7 +131,11 @@ mod tests {
     #[test]
     fn defaults_to_doggy_dns() {
         let config = ObservabilityConfig::default();
-        let resource = build_with_env(&config, env_map(&[("HOSTNAME", "test-host")]));
+        let resource = build_with_env(
+            &config,
+            &BTreeMap::new(),
+            env_map(&[("HOSTNAME", "test-host")]),
+        );
 
         assert_eq!(
             attr(&resource, "service.name").as_deref(),
@@ -133,7 +149,11 @@ mod tests {
     #[test]
     fn otel_service_name_is_used() {
         let config = ObservabilityConfig::default();
-        let resource = build_with_env(&config, env_map(&[("OTEL_SERVICE_NAME", "dns-edge")]));
+        let resource = build_with_env(
+            &config,
+            &BTreeMap::new(),
+            env_map(&[("OTEL_SERVICE_NAME", "dns-edge")]),
+        );
         assert_eq!(attr(&resource, "service.name").as_deref(), Some("dns-edge"));
     }
 
@@ -143,7 +163,11 @@ mod tests {
             service_name: Some("dns-prod".to_string()),
             ..ObservabilityConfig::default()
         };
-        let resource = build_with_env(&config, env_map(&[("OTEL_SERVICE_NAME", "dns-edge")]));
+        let resource = build_with_env(
+            &config,
+            &BTreeMap::new(),
+            env_map(&[("OTEL_SERVICE_NAME", "dns-edge")]),
+        );
         assert_eq!(attr(&resource, "service.name").as_deref(), Some("dns-prod"));
     }
 
@@ -159,6 +183,7 @@ mod tests {
 
         let resource = build_with_env(
             &config,
+            &BTreeMap::new(),
             env_map(&[
                 ("OTEL_RESOURCE_ATTRIBUTES", "deployment.tier=env,team=dns"),
                 ("HOSTNAME", "host-a"),
@@ -173,12 +198,63 @@ mod tests {
     }
 
     #[test]
+    fn configured_host_name_drives_instance_id() {
+        let mut config = ObservabilityConfig::default();
+        config
+            .resource_attributes
+            .insert("host.name".to_string(), "node-a".to_string());
+        config
+            .resource_attributes
+            .insert("doggy_dns.ip_addr".to_string(), "10.0.0.5".to_string());
+        config
+            .resource_attributes
+            .insert("doggy_dns.control.port".to_string(), "19090".to_string());
+        let resource = build_with_env(&config, &BTreeMap::new(), env_map(&[]));
+
+        assert_eq!(attr(&resource, "host.name").as_deref(), Some("node-a"));
+        assert_eq!(
+            attr(&resource, "service.instance.id").as_deref(),
+            Some(format!("node-a-{}", std::process::id()).as_str())
+        );
+        assert_eq!(
+            attr(&resource, "doggy_dns.ip_addr").as_deref(),
+            Some("10.0.0.5")
+        );
+        assert_eq!(
+            attr(&resource, "doggy_dns.control.port").as_deref(),
+            Some("19090")
+        );
+    }
+
+    #[test]
+    fn exposure_attributes_are_defaults_overridden_by_config() {
+        let mut exposure = BTreeMap::new();
+        exposure.insert("doggy_dns.ip_addr".to_string(), "10.0.0.5".to_string());
+        exposure.insert("doggy_dns.dns.port".to_string(), "5353".to_string());
+        let mut config = ObservabilityConfig::default();
+        config
+            .resource_attributes
+            .insert("doggy_dns.ip_addr".to_string(), "192.0.2.9".to_string());
+
+        let resource = build_with_env(&config, &exposure, env_map(&[]));
+
+        assert_eq!(
+            attr(&resource, "doggy_dns.ip_addr").as_deref(),
+            Some("192.0.2.9")
+        );
+        assert_eq!(
+            attr(&resource, "doggy_dns.dns.port").as_deref(),
+            Some("5353")
+        );
+    }
+
+    #[test]
     fn environment_maps_to_semconv_attribute() {
         let config = ObservabilityConfig {
             environment: Some("production".to_string()),
             ..ObservabilityConfig::default()
         };
-        let resource = build_with_env(&config, env_map(&[]));
+        let resource = build_with_env(&config, &BTreeMap::new(), env_map(&[]));
         assert_eq!(
             attr(&resource, "deployment.environment.name").as_deref(),
             Some("production")
@@ -190,6 +266,7 @@ mod tests {
         let config = ObservabilityConfig::default();
         let resource = build_with_env(
             &config,
+            &BTreeMap::new(),
             env_map(&[("OTEL_RESOURCE_ATTRIBUTES", "team=dns%20core,zone=eu%2Dwest")]),
         );
 
@@ -202,6 +279,7 @@ mod tests {
         let config = ObservabilityConfig::default();
         let resource = build_with_env(
             &config,
+            &BTreeMap::new(),
             env_map(&[("OTEL_RESOURCE_ATTRIBUTES", "good=1,broken,=empty")]),
         );
         assert_eq!(attr(&resource, "good").as_deref(), Some("1"));

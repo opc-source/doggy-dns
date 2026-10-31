@@ -19,13 +19,6 @@ pub struct McpState {
 }
 
 impl McpState {
-    /// Hostname from the environment, falling back to "unknown".
-    pub fn detect_hostname() -> String {
-        std::env::var("HOSTNAME")
-            .or_else(|_| std::env::var("COMPUTERNAME"))
-            .unwrap_or_else(|_| "unknown".to_string())
-    }
-
     /// Protocols the server exposes for this config (udp/tcp are always on).
     pub fn enabled_protocols(config: &DoggyDnsConfig) -> Vec<String> {
         let mut protos = vec!["udp".to_string(), "tcp".to_string()];

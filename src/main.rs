@@ -35,11 +35,8 @@ fn main() -> Result<()> {
     let (config, config_content) =
         load_config(&config_path).context(format!("failed to load config from {}", config_path))?;
 
-    let mut telemetry = Observability::init(
-        &config.observability,
-        config.middleware.log_format.as_deref(),
-    )
-    .context("failed to initialize observability")?;
+    let mut telemetry = Observability::init(&config, config.middleware.log_format.as_deref())
+        .context("failed to initialize observability")?;
 
     tracing::info!("doggy-dns starting...");
 
@@ -316,7 +313,9 @@ async fn start_control_plane(
     }
 
     let state = Arc::new(doggy_dns_control::build_state(
-        doggy_dns_control::state::McpState::detect_hostname(),
+        // The control plane reports this hostname as its identity; the OTel
+        // resource derives the same value for `host.name`.
+        doggy_dns_observability::detect_hostname(),
         env!("CARGO_PKG_VERSION").to_string(),
         doggy_dns_core::config::net::socket_addr(&config.server.listen_addr, config.server.port)
             .map(|addr| addr.to_string())

@@ -28,6 +28,9 @@ base64 = { workspace = true }
 [target.'cfg(any(target_os = "linux", target_os = "macos"))'.dependencies]
 pprof = { workspace = true }
 
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [dev-dependencies]
 tokio = { workspace = true }
 # `testing` exposes `InMemoryMetricExporter`, used by the metrics unit tests.

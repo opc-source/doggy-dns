@@ -32,8 +32,8 @@ async fn exports_logs_metrics_and_traces_with_openobserve_headers() {
         .insert("stream-name".to_string(), "doggy-dns-test".to_string());
     config.profiles.enabled = false;
 
-    let mut telemetry =
-        Observability::init(&config, None).expect("observability should initialize");
+    let mut telemetry = Observability::init(&common::full_config(config), None)
+        .expect("observability should initialize");
     tracing::warn!("otlp integration log message");
     tokio::time::sleep(Duration::from_millis(200)).await;
     let span = tracing::info_span!("dns.request", "dns.question.name" = "example.com.");

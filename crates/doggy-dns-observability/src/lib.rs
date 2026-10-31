@@ -1,6 +1,7 @@
 mod auth;
 mod endpoint;
 mod error_events;
+mod exposure;
 mod logs;
 mod metrics;
 mod profiles;
@@ -9,7 +10,7 @@ mod sampler;
 mod traces;
 
 use anyhow::{Context, Result};
-use doggy_dns_basic::{ObservabilityBackend, ObservabilityConfig};
+use doggy_dns_basic::{DoggyDnsConfig, ObservabilityBackend, ObservabilityConfig};
 use doggy_dns_plugin::Middleware;
 use opentelemetry::trace::TracerProvider as _;
 use opentelemetry_appender_tracing::layer::OpenTelemetryTracingBridge;
@@ -25,6 +26,7 @@ use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::{Layer, Registry, fmt};
 
+pub use exposure::detect_hostname;
 pub use metrics::{DnsMetrics, XdpMetrics};
 
 /// Holds the OTel providers and the profile task. Drop (or call
@@ -45,7 +47,9 @@ impl Observability {
     /// Build OTLP providers, install the tracing subscriber and return the
     /// telemetry guard. `log_format` comes from `middleware.log_format`
     /// (`json` or anything else for plain text).
-    pub fn init(config: &ObservabilityConfig, log_format: Option<&str>) -> Result<Self> {
+    pub fn init(config: &DoggyDnsConfig, log_format: Option<&str>) -> Result<Self> {
+        let exposure = exposure::node_attributes(&config.server, &config.control);
+        let config = &config.observability;
         let mut observability = Self {
             config: config.clone(),
             logger_provider: None,
@@ -61,7 +65,7 @@ impl Observability {
         let mut resource = None;
 
         if config.enabled {
-            let built_resource = resource::build_resource(config);
+            let built_resource = resource::build_resource(config, &exposure);
             resource = Some(built_resource.clone());
 
             if config.logs.enabled {

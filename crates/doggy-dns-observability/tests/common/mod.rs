@@ -12,6 +12,32 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
 
+use doggy_dns_basic::{
+    ControlConfig, DoggyDnsConfig, MiddlewareConfig, ObservabilityConfig, RemoteConfig,
+    ServerConfig, XdpConfig,
+};
+
+pub fn full_config(observability: ObservabilityConfig) -> DoggyDnsConfig {
+    DoggyDnsConfig {
+        server: ServerConfig {
+            listen_addr: "127.0.0.1".to_string(),
+            port: 53,
+            tcp_timeout: 10,
+            shutdown_timeout: 5,
+            worker_threads: 1,
+            rotate_answers: true,
+            tls: None,
+            https: None,
+        },
+        middleware: MiddlewareConfig::default(),
+        plugins: Vec::new(),
+        remote_config: RemoteConfig::default(),
+        observability,
+        xdp: XdpConfig::default(),
+        control: ControlConfig::default(),
+    }
+}
+
 pub struct CapturedRequest {
     pub path: String,
     pub headers: HashMap<String, String>,
