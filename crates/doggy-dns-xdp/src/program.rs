@@ -9,6 +9,7 @@ use aya::EbpfLoader;
 use aya::maps::{Array, MapData};
 use aya::programs::{Xdp, XdpMode};
 use aya_log::EbpfLogger;
+use std::ffi::CString;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -122,7 +123,7 @@ impl XdpManager {
         )
         .context("XDP_CONFIG has an unexpected value type")?;
         config_map
-            .set(0, XdpRuntimeConfig { dns_port }, 0)
+            .set(0, &XdpRuntimeConfig { dns_port }, 0)
             .context("failed to write XDP runtime configuration")?;
 
         // Load the program; attach only in auto mode (manual mode leaves it
@@ -130,9 +131,12 @@ impl XdpManager {
         let program = load_dns_program(&mut ebpf)?;
         program.load().context("failed to load XDP program")?;
         let link_id = if config.attach_mode == "auto" {
+            // `attach` takes a `NetworkInterface`, which borrows a C string.
+            let iface_c =
+                CString::new(iface.as_str()).context("interface name contains a NUL byte")?;
             Some(
                 program
-                    .attach(&iface, XdpMode::Default)
+                    .attach(iface_c.as_c_str(), XdpMode::Default)
                     .context(format!("failed to attach XDP to interface {iface}"))?,
             )
         } else {
