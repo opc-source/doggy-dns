@@ -20,3 +20,7 @@ lcov.info
 
 # Python bytecode (scripts/test_xdp_stress_report.py runs in CI)
 __pycache__/
+
+# Local A/B benchmark output (scripts/perf_ab.py)
+/perf-results/
+/dist/
