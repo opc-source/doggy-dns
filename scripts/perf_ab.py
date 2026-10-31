@@ -208,9 +208,11 @@ def xdp_stats_snapshot(raw_path: Path) -> dict | None:
 
 
 def clear_pinned_cache() -> None:
+    # The userspace-only smoke runs without root, and /sys/fs/bpf is root-only:
+    # there, even probing for our file can raise EACCES instead of ENOENT.
     try:
         PIN_FILE.unlink()
-    except FileNotFoundError:
+    except (FileNotFoundError, PermissionError):
         pass
     try:
         PIN_DIR.rmdir()
@@ -736,7 +738,8 @@ def main() -> int:
                 )
     finally:
         stop_process(upstream, upstream_log_file, "perf-upstream")
-        clear_pinned_cache()
+        if args.only in ("both", "xdp"):
+            clear_pinned_cache()
 
     medians = {
         arm: {
