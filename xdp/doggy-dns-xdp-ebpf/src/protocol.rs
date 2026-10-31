@@ -109,6 +109,20 @@ pub(crate) fn read_u16_be(ptr: *const u8, offset: usize) -> u16 {
     }
 }
 
+/// Same value as `read_u16_be`, but the two byte loads are volatile so LLVM
+/// cannot fold them into `be16`. The 6.6 verifier treats the result of
+/// `be16` as an unbounded scalar, and values built from `u8` loads keep the
+/// 0..=65535 range it needs when the length is later added to a packet
+/// pointer. Reserved for values that reach pointer arithmetic.
+#[inline]
+pub(crate) fn read_u16_be_volatile(ptr: *const u8, offset: usize) -> u16 {
+    unsafe {
+        let hi = core::ptr::read_volatile(ptr.add(offset)) as u16;
+        let lo = core::ptr::read_volatile(ptr.add(offset + 1)) as u16;
+        (hi << 8) | lo
+    }
+}
+
 #[inline]
 pub(crate) fn write_u16_be(ptr: *mut u8, offset: usize, val: u16) {
     unsafe {

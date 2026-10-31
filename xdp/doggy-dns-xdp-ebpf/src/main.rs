@@ -15,7 +15,7 @@ mod types;
 
 use protocol::{
     COPY_CHUNK, ETH_HDR_LEN, ETH_P_IP, EthHdr, IPPROTO_UDP, IpHdr, UDP_HDR_LEN, UdpHdr, copy_chunk,
-    read_u16_be, swap_u16, swap_u32, write_u16_be,
+    read_u16_be, read_u16_be_volatile, swap_u16, swap_u32, write_u16_be,
 };
 use types::{CacheKey, CacheValue, FLAG_NEGATIVE, XdpRuntimeConfig, XdpStats};
 
@@ -142,13 +142,11 @@ fn try_dns_xdp(ctx: &XdpContext) -> Result<(u32, Option<Outcome>), ()> {
     if u16::from_be(udp.dest) != config.dns_port {
         return Ok((xdp_action::XDP_PASS, None));
     }
-    // Compose the length from the two wire bytes instead of `u16::from_be`:
-    // this kernel's verifier does not carry the 16-bit bound across the byte
-    // swap, and the containment check below adds the value to a packet
-    // pointer. Two zero-extended byte loads keep the range provably 0..=65535,
-    // and the explicit constant upper bound below pins that range to something
-    // the verifier accepts even if LLVM folds the loads back into `be16`.
-    let udp_len = read_u16_be((data + udp_offset) as *const u8, 4) as usize;
+    // Volatile byte loads stop LLVM from folding this into `be16`, whose
+    // result the 6.6 verifier treats as an unbounded scalar; the length is
+    // later added to a packet pointer, so it must keep its 16-bit range even
+    // after the compiler spills it.
+    let udp_len = read_u16_be_volatile((data + udp_offset) as *const u8, 4) as usize;
     if !(UDP_HDR_LEN..=MAX_UDP_DNS_LEN).contains(&udp_len) {
         return Ok((xdp_action::XDP_PASS, None));
     }
