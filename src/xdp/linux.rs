@@ -60,7 +60,7 @@ pub fn init(config: &DoggyDnsConfig, middlewares: &mut Vec<Arc<dyn Middleware>>)
     }
 }
 
-/// Start the XDP counter poller when the fast path and OTLP metrics are both on.
+/// Start the XDP counter poller when the fast path and metric collection are both on.
 ///
 /// Returns the stop sender and the task handle. The closure keeps the
 /// observability crate independent of the XDP crate: only this module knows
@@ -76,7 +76,7 @@ pub fn start_stats(
     let reader = manager.take_stats();
     let Some(metrics) = metrics else {
         tracing::warn!(
-            "XDP fast path is enabled but OTLP metrics are disabled; \
+            "XDP fast path is enabled but metrics are disabled; \
              kernel-side counters will not be exported"
         );
         return None;

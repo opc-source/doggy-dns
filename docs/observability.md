@@ -272,7 +272,9 @@ Selecting `metrics` installs the DNS metrics middleware and starts the XDP
 counter poller even when `[observability] enabled = false`. When OTLP metrics
 are also enabled, both readers share one set of instruments, so nothing is
 recorded twice on the query path. The endpoint is unauthenticated like the
-health probes; `/mcp` keeps its Bearer token.
+health probes and its `target_info` carries node identity, so bind it to
+loopback or restrict the control port with a NetworkPolicy/firewall when the
+node network is not trusted; `/mcp` keeps its Bearer token.
 
 ```yaml
 scrape_configs:

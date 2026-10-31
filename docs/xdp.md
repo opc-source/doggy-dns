@@ -174,8 +174,9 @@ diagram leaves out:
   `observability.metrics.interval_secs`, converts snapshots to deltas
   (reload-safe: counters that went backwards are treated as a fresh map), and
   exports them as the OTLP metric `dns.xdp.queries`, labelled by result. If
-  OTLP metrics are disabled the counters are collected but not exported (a
-  warning says so at startup).
+  metrics are disabled — neither OTLP export nor the control plane's `/metrics`
+  endpoint — the counters are collected but not exported (a warning says so at
+  startup).
 - **Kernel logs**: `XdpManager` bakes `AYA_LOG_LEVEL` into the program before
   loading and takes the `AYA_LOGS` ring buffer into an `EbpfLogger`. The logger
   must outlive `program.load()` — dropping it closes the map FD and the load
