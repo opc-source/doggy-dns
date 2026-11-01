@@ -31,6 +31,7 @@ quotes each number with the command that produced it.
 | Toolchain | rustc 1.99.1 (58cf8f9c3 2026-10-13), cargo 1.99.1 (5f94df478 2026-08-27), stable-aarch64-apple-darwin (pinned by `rust-toolchain.toml`, `channel = "stable"`, not the shell's default host) |
 | C build | Apple clang 21.0.0 (clang-2100.3.34.2), target `arm64-apple-darwin25.6.0` |
 | dnsperf | 2.16.0, Homebrew bottle `dnsperf 2.16.0_1` (deps: ldns 1.9.2_1, openssl@4 4.1.0, concurrencykit 0.7.2, libnghttp2 1.70.0) |
+| Profiling | `/usr/bin/sample` — the sampler the ceiling section uses. There is no `perf` and no `bpftrace` on this host; `/usr/sbin/dtrace` exists and was not used |
 | `/tmp` | not used by any benchmark path; runs write under `perf-results/` on the APFS data volume (218 GiB free at the last `df`) |
 | Limits | `ulimit -n` 1048575 |
 | Loopback | `lo0` mtu 16384 |
@@ -356,6 +357,9 @@ Readings:
   the matrix is only comparable within itself.
 - **Not an XDP statement**: these rows are the userspace arm only, and the answer
   rotation/cache behaviour is identical across them.
+- **What turns the curve is measured, not guessed**: the "Where the ceiling sits" section
+  attributes per-thread CPU and a call-graph profile of this same binary, and finds the
+  serial part is one socket loop task that `worker_threads` can migrate but not split.
 
 ## Sender width (dnsperf `-c`) at `worker_threads = 4`
 
@@ -387,6 +391,284 @@ Readings:
   userspace ceiling by forgetting `-c`; what it misstates is the load *shape*: a
   "-T 4" run is one client at a time, which no real client population is. Checking
   2.9.0's default on the CI image is a one-command follow-up.
+
+## Where the ceiling sits: one loop task and the syscall pair it owns
+
+The worker-thread matrix gives the shape — +25.4% at 2 workers, then −8.2% and a further
+−3.6% step by step — without explaining it. This section attributes the time instead of
+inferring it, with three measurements of the same process under the same load:
+
+- **per-thread CPU**: `ps -M -p <pid>` twice, 8 s apart inside one 20 s load window; each
+  thread's STIME+UTIME delta ÷ 8 s = cores. On Darwin the per-thread rows carry no
+  USER/PID column, so the fields shift; the row that does carry the command path is the
+  process's main thread, and it never inflates a worker. Fourteen of the sixteen snapshots
+  read `0:00.00 / 0:00.00`; the other two are the `worker_threads = 8` pair, which both read
+  `0:00.00 / 0:00.01` — the same value in both, so its delta over every 8 s window is 0.00
+  CPU-s and skipping that row costs nothing.
+- **an open-loop control**: the same sweep with dnsperf `-q 2000` (2.16.0 documents `-q` as
+  "maximum number of queries outstanding", default 100), to separate "the senders stopped
+  pushing" from "the server stopped pulling".
+- **a call-graph profile**: `/usr/bin/sample <pid> 8` under load, which samples every thread
+  of the process — parked ones included — and prints both a per-thread call tree and a
+  top-of-stack histogram.
+
+All three use the `--features xdp` release binary the matrices measured (sha256
+`bc02f451…`), the same `queries.txt`, `RUST_LOG=warn`, a 2-query warm-up before each
+window, and a fresh `perf-upstream` per sweep on a separate port so nothing collides:
+15573/15574 for the closed sweep (`-l 20`), 15575/15576 for the `-q 2000` sweep (`-l 20`),
+15577/15578 for the profile (`-l 25`, sampled for 8 s inside it). Every table and the
+diagram below are the output of `perf-results/macos-sample/analyze_probe.py` over the
+captures in that directory.
+
+### Per-thread CPU, closed loop (dnsperf default `-q 100`)
+
+| worker_threads | QPS | Avg latency (ms) | In flight (QPS × latency) | Lost | Process cores | Busiest thread | Per-thread cores | CPU µs/query |
+|---------------:|----:|-----------------:|--------------------------:|-----:|--------------:|---------------:|:-----------------|-------------:|
+| 1 | 94,196 | 1.048 | 98.7 | 0 | 0.95 | 0.95 | 0.95 | 10.1 |
+| 2 | 118,412 | 0.815 | 96.5 | 0 | 1.53 | 0.77 | 0.77, 0.76 | 12.9 |
+| 4 | 105,156 | 0.923 | 97.1 | 0 | 2.13 | 0.53 | 0.53, 0.53, 0.53, 0.53 | 20.2 |
+| 8 | 104,102 | 0.936 | 97.4 | 0 | 2.33 | 0.30 | 0.30, 0.29, 0.29, 0.29, 0.29, 0.29, 0.29, 0.29 | 22.3 |
+
+Readings:
+
+- **The matrix reproduces.** Against its medians (93,079 / 116,748 / 107,137 / 103,267)
+  these rows differ by +1.2%, +1.4%, −1.8%, +0.8%, and process cores here match the
+  matrix's CPU-s per 10 s (9.48 / 15.23 / 22.27 / 23.50 ÷ 10) by 0.2–4.4%. The plateau
+  past 2 is not an artefact of the shorter window.
+- **`worker_threads = 1` really is one thread**: `ps -M` has exactly one thread row, it
+  holds 0.95 of a core, and the main thread burned 0.00 CPU-s. That one thread answers
+  94,196 QPS.
+- **Nothing is saturated from 2 workers on.** At 8 workers the busiest of the nine threads
+  uses 0.30 of a core and the process as a whole uses 2.33 of the 8 available — yet QPS is
+  12.1% below the 2-worker row. Idle capacity cannot be the ceiling.
+- **Per-query CPU doubles while QPS goes backwards** (last column, derived: process cores
+  ÷ QPS): 10.1 → 12.9 → 20.2 → 22.3 µs. Rows 4 and 8 burn 2.2× and 2.5× row 1's CPU to
+  return 11.2% and 12.1% less than row 2. That is the whole question: where does the extra
+  CPU go?
+
+### Control: the senders were never the limiter
+
+The same four rows, `-q 2000` added, one 20 s window per row on port 15575 ("in flight" is
+derived as QPS × latency, not read from a client-side counter):
+
+| worker_threads | QPS (`-q 2000`) | Avg latency (ms) | In flight | Lost | Process cores | CPU µs/query |
+|---------------:|----------------:|-----------------:|----------:|-----:|--------------:|-------------:|
+| 1 | 92,632 | 21.520 | 1,993.4 | 0 | 0.95 | 10.3 |
+| 2 | 117,995 | 16.900 | 1,994.1 | 0 | 1.55 | 13.1 |
+| 4 | 105,251 | 18.957 | 1,995.2 | 0 | 2.16 | 20.5 |
+| 8 | 104,409 | 19.103 | 1,994.5 | 0 | 2.35 | 22.6 |
+
+Readings:
+
+- **20× the offered concurrency, same throughput**: in flight goes 97 → 1,995 at `worker_threads = 8`
+  and QPS moves +0.3% (104,102 → 104,409), with 0 lost in both. The four closed-loop rows
+  are not latency-starved, and raising the client side does not lift the ceiling.
+- **Latency 0.936 → 19.103 ms at the same QPS** is the signature of a rate-limited server:
+  Little's law says the extra ~1,897 in-flight queries have to be held somewhere while the
+  server works through them at the same rate. Which buffer holds them is not observed here —
+  nothing read socket or `netstat` statistics, so "the kernel receive queue" is an inference,
+  and it is disclaimed in Limits. What the control does establish is the server-side half:
+  20× the client concurrency, +0.3% QPS, 0 lost, so the senders were never the limit.
+
+### What the time is spent on (`sample`, 8 s under load)
+
+| worker_threads | QPS while profiling | thread samples | threads | main-thread samples | runtime-thread samples | runtime parked | runtime on-CPU | `sendto`+`recvfrom`, % of on-CPU |
+|---------------:|--------------------:|---------------:|:--------|--------------------:|-----------------------:|---------------:|---------------:|---------------------------------:|
+| 1 | 91,080 | 12,038 | 1 main + 1 runtime | 6,114 | 5,924 | 0.1% (7) | 99.9% (5,917) | 56.3% |
+| 8 | 97,303 | 46,555 | 1 main + 8 runtime | 5,189 | 41,366 | 72.1% (29,824) | 27.9% (11,542) | 36.9% |
+
+`sample` records parked threads too, so the main thread — which sits in `runtime.block_on`'s
+park for the whole run (`src/main.rs:68-71` builds the multi-thread runtime named
+`doggy-dns-runtime`, the label on every other row, and `:79` blocks on it) — accounts for
+one thread's worth of samples at every setting; at `worker_threads = 1` it is 6,114 of the
+6,121 parked ticks, at 8 it is 5,189 of 35,013, and its entire call tree is that park (all
+6,114 wt=1 ticks run `tokio::runtime::park::Inner::park` → `parking_lot::Condvar`). The
+profiling run is its own measurement: its QPS (91,080 / 97,303) sits a little under the
+closed-loop rows above because the profiler attaches to the process it samples, so the two
+rows are compared with each other, not with those tables.
+
+Two columns are derived rather than read. `sample` prints one Call-graph header per thread,
+and every runtime thread's header carries the same count as the main thread's — 6,114 at
+wt=1, 5,189 at wt=8 — while the top-of-stack histogram drops ticks below its "when >= 5"
+cut, so `thread samples` is the histogram sum (12,038 / 46,555) and `runtime-thread samples`
+is that sum less the main thread's header count: 5,924 against a header of 6,114 for the one
+wt=1 worker, and 41,366 against 8 × 5,189 = 41,512 at wt=8. The percentages are taken over
+the derived set; nothing in this section divides by the sample interval (see Limits).
+
+Partitioning the on-CPU runtime-thread samples by leaf symbol:
+
+| category | wt=1 samples | wt=1 % of 5,917 | wt=8 samples | wt=8 % of 11,542 |
+|---|---:|---:|---:|---:|
+| syscall: `__sendto` | 2,875 | 48.6% | 3,404 | 29.5% |
+| syscall: `__recvfrom` | 455 | 7.7% | 860 | 7.5% |
+| alloc / free / memmove / memset | 929 | 15.7% | 2,559 | 22.2% |
+| kernel clock (`mach_absolute_time`) | 249 | 4.2% | 594 | 5.1% |
+| server code (everything else) | 1,409 | 23.8% | 4,125 | 35.7% |
+
+The five rows partition the set exactly (2,875+929+455+249+1,409 = 5,917 and
+3,404+2,559+860+594+4,125 = 11,542). Largest individual leaves besides the syscall pair:
+`mach_absolute_time` 238 and `_platform_memmove` 237 at wt=1; `_xzm_xzone_malloc_tiny` 714,
+`_platform_memmove` 614, `_xzm_free` 582, `mach_absolute_time` 563 at wt=8, and among the
+named server frames `ServerContext<DoggyDnsHandler>::handle_raw_request` 164,
+`Resolver<TokioRuntimeProvider>::lookup::<Name>` 156 and `CachingClient<…>::clone` 149
+(those three labels are shorthand for the mangled symbols quoted in `analysis.txt`).
+
+Readings:
+
+- **At one thread, 72.0% of its CPU is mechanics, not DNS logic** (48.6% `sendto` + 7.7%
+  `recvfrom` + 15.7% allocator/copy); the "server code" residual is 23.8%.
+- **The syscall pair is not what grows.** Its tick count rises 1.28× (3,330 → 4,264)
+  while everything else rises 2.81× (2,587 → 7,278), which is why its share falls
+  56.3% → 36.9% even though `sendto` itself goes 2,875 → 3,404 ticks. The extra CPU that
+  8 workers buy shows up in allocation, copying, timers and hickory/tokio frames instead of
+  in socket work. This section locates that growth; it does not price it, so "handoff and
+  coordination overhead" would be a reading of the shape, not a measurement.
+- **The "server code" row is a residual, not a measurement of DNS logic.** `sample` prints
+  raw symbols; the classifier recognises libc leaves and buckets every unrecognised
+  rustc-mangled frame (hickory/proto/resolver/tokio) into it. The three named frames above
+  are inside that bucket, so 35.7% is an upper bound on "answer construction", not a
+  breakdown of it.
+
+### Which task owns the socket
+
+The profile's frame ancestry answers the structural question directly: how many syscall
+samples were taken while polling the socket loop (a `handle_udp` frame on the stack)
+rather than a per-request future.
+
+| worker_threads | runtime threads carrying syscall samples | `sendto` | `recvfrom` | of those, under a `handle_udp` frame | per-thread `sendto` range |
+|---------------:|-----------------------------------------:|---------:|-----------:|-------------------------------------:|:--------------------------|
+| 1 | 1 of 1 | 2,875 | 456 | 3,331 = 100% | 2,875 |
+| 8 | 8 of 8 | 3,404 | 860 | 4,264 = 100% | 404–487 |
+
+(`recvfrom` reads 456 here and 455 in the table above: `sample` prints a top-of-stack
+entry only "when >= 5", so the single tick at `__recvfrom + 28` is in the full-depth call
+tree and not in the histogram.)
+
+Readings:
+
+- **Every socket syscall in both runs belongs to the loop task** — 3,331/3,331 and
+  4,264/4,264. There is no second receive path, and no send outside the loop: a resolver
+  forward (a cache miss) `sendto`s on the upstream socket from the per-request future, i.e.
+  outside any `handle_udp` frame, and none of the 4,264 ticks is there. The whole sampled
+  interval is cache-warm by construction: `sample` starts 6 s into a 25 s window, and the
+  misses the 2-query warm-up leaves behind are ~1,000 names (the query file's count), i.e.
+  a hundredth of a second at this rate. This pass did not prove it — `thread_probe.sh` and
+  its siblings pass `--count-file` but never send `perf-upstream` the SIGUSR1 that appends a
+  dump, so the three `upstream*.count` files here hold only the startup seed `0` and the
+  warmth claim rests on that structure. The guard is borrowed from the matrix, whose headline
+  rounds are 30 s each and report `Upstream delta` 0 in all three, so a 20 s or 25 s window on
+  the same 1,000-name file cannot be less warm. Read that way, the 10.1 µs/query at
+  `worker_threads = 1` is the cost of answering from the cache, not of fetching.
+- **The loop did not parallelise, it migrated.** At `worker_threads = 8` the same single
+  future is polled wherever tokio puts it, and its `sendto` ticks land on all 8 workers
+  (404–487 each). One task, now crossing cores — and the measured growth is in the
+  non-syscall categories (2.81×), not in the socket pair (1.28×).
+
+### The shape, annotated
+
+The left column is the path one query takes; the right column is this section's
+measurements against that path. Generated with the tables above:
+
+```text
+  one doggy-dns process, loopback (lo0), warm resolver cache
+
+  dnsperf  x 8 senders                                          What the rows say about this shape
+  -------------------                                           ----------------------------------
+      sendto(query)                                             worker_threads = 1: 94,196 QPS on 0.95 cores, and `ps -M`
+            |                                                     has 1 thread row to attribute them to; `sample` agrees:
+            v                                                     the worker is on-CPU for 99.9% of its 5,924 samples, and
+  kernel: lo0 socket                                              6,114 of the 6,121 parked ones are the main thread.
+  receive queue                                                   One thread is the whole server, and its loop
+            |                                                     task owns the socket.
+        recvfrom()                                              worker_threads = 8: 104,102 QPS on 2.33 cores, busiest thread
+      1 datagram/poll                                             0.30 cores, and 72.1% of the runtime-thread samples park.
+            |                                                     Nothing is saturated, yet QPS stayed below the 118,412 that two
+            v                                                     threads reached.
+   [handle_udp task]                                            The loop does not parallelise, it migrates: 100% of the
+     ONE per socket                                               sendto+recvfrom samples sit under a `handle_udp` frame, and
+            |                                                     those 2,875 sendto at wt=1 become 3,404 spread over
+       spawn task                                                 all 8 workers at wt=8 (404-487 each) --
+            |                                                     one task still, now crossing cores.
+            v                                                   Per-query CPU 10.1 us -> 22.3 us: the extra threads bought
+  [per-request task]                                              allocators, not throughput.
+    x QPS, on any                                               On-CPU at wt=8: sendto 29.5% and recvfrom 7.5%
+       worker                                                     = 36.9% of running samples in the syscall pair this loop owns;
+            |                                                     alloc/free/copy is another 22.2%.
+    AuthorityChain                                              Concurrency is not the lever either: at wt=8 -q 100 holds 97
+     -> forward                                                   in flight and -q 2000 holds 1995 for 104,409 vs 104,102 QPS,
+     -> moka hit                                                  0 lost -- the senders were never the limit.
+     -> clone Msg
+            |
+            v
+   reply pushed to
+   the ONE mpsc
+            |
+            v
+   drained by the
+   handle_udp task
+     BEFORE recv
+            |
+       sendto(reply)
+            |
+            v
+    back to dnsperf
+```
+
+### Why `worker_threads` cannot reach this
+
+Three properties of the receive path, all in code we do not own, set what the matrices
+could possibly show:
+
+- **One UDP socket → one loop task.** `crates/doggy-dns-core/src/server.rs:20-23` binds a
+  single `UdpSocket` and hands it to `Server::register_socket`, whose body is
+  `join_set.spawn(handle_udp(socket, …))` (`hickory-server-0.26.3/src/server/mod.rs:102-104`),
+  the receive loop at `:449-457`. Raising `worker_threads` adds threads that poll *other*
+  tasks; it never adds a receive path.
+- **One datagram per poll, and sends first.** `UdpStream::poll_next`
+  (`hickory-net-0.26.3/src/udp/udp_stream.rs:154-190`) drains the outbound queue before
+  receiving, with the design intent in its own comments: "this will not accept incoming
+  data while there is data to send / makes this self throttling" (`:159-160`), "sending
+  will be preferred over receiving" (`:166`), "For QoS, this will only accept one message"
+  (`:181`). So the reply that the spawned per-request task pushed into the socket's
+  `BufDnsStreamHandle` channel (created at `:126-127`) is `sendto`'d by the *loop* task on
+  its next poll, immediately before the next `recvfrom` — which is what the 100%-under-`handle_udp`
+  attribution above measures.
+- **One task per request, and per-request allocation.** The loop spawns
+  `handle_raw_request` per datagram (`mod.rs:484`, reaped at `:664`), so the answer
+  construction can run on any worker while the syscall pair cannot. Each request also
+  allocates on arrival: `poll_next` copies the datagram
+  out of a 4 KiB stack buffer (`MAX_RECEIVE_BUFFER_SIZE`, `hickory-net-0.26.3/src/udp/mod.rs:30`)
+  into a fresh `Vec` (`udp_stream.rs:185-188`), and `forward`/`native` answers still walk
+  `lookup.iter().cloned().collect()` (`crates/doggy-dns-core/src/handler.rs:514-520` — the
+  owned-`Vec` fast path covers the `nacos` authority's `LookupRecords::Section`, not the
+  two resolver-backed authorities). Together those are the `alloc / free / memmove / memset`
+  row, 15.7% of one thread's CPU and 22.2% of the 8-worker pool.
+
+Put together: the ceiling on this host is ~94k QPS at `worker_threads = 1` because one
+thread is on-CPU for 99.9% of its samples and 72.0% of them sit in the recv/send pair plus
+the allocator — 10.1 µs of CPU per query, on a machine with 8 cores. What 1 → 2 buys is a
+second thread for the spawned per-request tasks to run on: the process stops being
+thread-bound (0.95 → 1.53 cores) and QPS rises 25.4%. No worker becomes a dedicated receive
+thread — both land at 0.77 cores — so the gain is "the handlers left the loop's thread",
+not "the loop got its own". Past 2 the only new capacity is threads to migrate that one loop
+across, per-query CPU doubles, 72.1% of worker samples park, and throughput lands below the
+2-worker row.
+The knob that would move it is fewer syscalls and fewer allocations per reply — batching
+on the socket (`recvmmsg`/`sendmmsg`, UDP GSO) or a path that answers in the kernel, which
+is what the XDP arm is for and why this section stops at attribution: this SDK's
+`libsystem_kernel.tbd` exports `_sendto`/`_recvfrom`/`_recvmsg` and no `_recvmmsg` or
+`_sendmmsg`, and AF_XDP is Linux-only, so the fix cannot be measured here. The structural
+variant that does add receive paths, per-worker `SO_REUSEPORT` listeners, is a documented
+Non-Goal of the perf round rather than something measured here:
+`docs/superpowers/specs/2026-10-29-userspace-perf-design.md:52-57` names this same
+one-task-per-socket loop, calls fan-out "the only change plausibly worth an order of
+magnitude", and defers it pending the end-to-end baseline; `:58-60` defers replacing
+hickory's UDP path (own receive loop, no `SerialMessage` copy, no per-response channel hop,
+`recvmmsg`) as a subsystem restructure. A throwaway multi-listener build was tried on the
+Linux host during that round and discarded without landing, so no artifact in this repo
+reproduces its numbers and this report makes no claim about them. Operationally the
+conclusion is the one the matrix already gave: `worker_threads = 2` on this machine, and the
+default of 1 leaves ~25% on the table.
 
 ## Functional smoke on macOS
 
@@ -514,7 +796,31 @@ python3 perf-results/macos-driver/driver.py --tag confirm-plain \
   --port 15553 --upstream-port 15554 --out-root perf-results/macos-confirm \
   --rounds 1 --duration 30 --threads 2 --clients 2 --worker-threads 2 \
   --queries 1000 --rust-log warn
+
+# 7. the ceiling section: per-thread CPU, the -q 2000 control, then a `sample`
+#    profile. Three one-off bash loops over the same binary, the same queries.txt
+#    and a config rewritten from headline/userspace.toml (worker_threads, port,
+#    upstream port). They are gitignored with the rest of perf-results/, so the
+#    four lines that matter are here:
+#      server:   RUST_LOG=warn <doggy-dns-xdp-feature> wt$wt.toml
+#      load:     dnsperf -s 127.0.0.1 -p $PORT -d queries.txt -n 100000 -l 20 -T 8 -c 8
+#                (add `-q 2000` for the control; the profile pass uses -l 25)
+#      CPU:      ps -M -p $server_pid at t+6 and t+14      -> wt$wt.t1 / wt$wt.t2
+#      profile:  /usr/bin/sample $server_pid 8             -> prof-wt$wt.sample.txt
+#    All three wait for a `dig` on the ready name before loading and snapshot at
+#    t+6 (then t+14); the CPU and open-loop passes also check both ports with
+#    `lsof -nP -iUDP:$PORT -iUDP:$UPORT` first.
+for s in thread_probe open_loop_probe profile_probe; do
+  bash perf-results/macos-sample/$s.sh
+done
+python3 perf-results/macos-sample/analyze_probe.py \
+    > perf-results/macos-sample/analysis.txt   # every table and the diagram
 ```
+
+Step 7 is a read-only attribution pass: it starts nothing new on the reported ports
+(15573–15578) and leaves its captures in `perf-results/macos-sample/`. `analyze_probe.py`
+parses only those files — it is the single source for the numbers in "Where the ceiling
+sits", so that section can be re-derived without re-measuring.
 
 Steps 1–5 were run against `target/release/doggy-dns` while that path held the
 `--features xdp` build; `perf-results/macos-driver/bin/doggy-dns-xdp-feature` is a
@@ -566,8 +872,48 @@ runner in the repo would be a maintenance cost the project already declined once
   against, and the reason the readings only claim differences larger than it.
 - `cargo tarpaulin` was not run: it is a Linux-first tool here and CI's coverage job
   already owns that number.
+- The ceiling section is **one window per row, not two**, and its QPS values therefore
+  carry no inside-row spread. They are used only for the shape: the four closed rows sit
+  within 1.8% of the 2-round matrix medians, so the attribution describes a curve this
+  report already measured twice over, and none of its QPS figures is a new headline.
+- **Tick counts are never converted to time.** `sample` heads its own output "Sampling
+  process … for 8 seconds with 1 millisecond of run time between samples", but the totals do
+  not reconcile to either reading: 5,917 on-CPU ticks on a single thread over an 8 s window is
+  0.74 cores, while `ps -M` measures that thread at 0.95 cores in the same configuration
+  (profiler overhead is the obvious candidate, and it is not separated here). So this section
+  quotes shares and counts, and never says "a `sendto` costs *n* µs". Top-of-stack entries
+  also only appear "when >= 5" ticks — which is why `__recvfrom` is 455 in the histogram and
+  456 in the full-depth tree — and the symbols are raw, so the "server code" row is a residual
+  over un-demangled frames rather than a function-level breakdown.
+- **No kernel-side attribution**: no `ktrace`, no dtrace probes, so a `sendto` tick is the
+  whole syscall (socket lock, copy, and whatever the loopback driver does) as one opaque
+  leaf. The 100%-under-`handle_udp` result is a statement about which *future* ran the
+  syscall, not about what the kernel did inside it.
+- The `-q 2000` control **does not measure a queue**. Nothing read `sysctl`/`netstat` socket
+  statistics, so "the in-flight queries are held in the kernel receive queue" is an inference
+  from constant QPS and 20× latency, not an observed depth; the control's own claim is only
+  that 20× client concurrency leaves throughput where it was.
 
 ## Observations for follow-up (not acted on in this PR)
+
+- The ceiling section localises the cost to code this project does not own
+  (`hickory-net`'s one-datagram `UdpStream::poll_next` and its per-datagram `Vec` copy), so
+  the two follow-ups it argues for are upstream or kernel-side rather than in `doggy-dns`:
+  batching the syscall pair on Linux (`recvmmsg`/`sendmmsg`, UDP GSO) and trimming the
+  per-request copies (`udp_stream.rs:185-188`; `handler.rs:514-520` for the `forward`/`native`
+  clone path, which alloc + copy makes 15.7% of a single worker's CPU here). Neither is
+  measurable on macOS, which is why this report stops at attribution.
+- The same four probes would be cheap to run on the Linux CI runner (`/proc/<pid>/task/*`
+  instead of `ps -M`, `perf record` instead of `sample`) to test whether the loop's `sendto`
+  share is the 48.6% this host sees or something else. The perf round's Non-Goals already say
+  fan-out is the change worth testing there (`docs/superpowers/specs/2026-10-29-userspace-perf-design.md:52-57`),
+  and a profile of the same shape would say whether the loop is that host's binding constraint
+  too.
+- `worker_threads` still defaults to 1 while this host's optimum is a measured 2, and the
+  ceiling section gives the reason the default is defensible for a single-core container
+  but not for a multi-core one: at 1 worker the process is one thread at 0.95 cores, so the
+  default is a per-core choice, not a neutral one. Changing a shipped default is the
+  maintainers' call, not this report's.
 
 - `scripts/perf_ab.py` never passes `dnsperf -c`. On 2.16.0 — this host — that leaves
   `-T` clamped to a single client; the CI image's 2.9.0 was not checked here. Either
