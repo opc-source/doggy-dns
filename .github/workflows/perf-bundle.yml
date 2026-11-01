@@ -1,0 +1,166 @@
+name: Perf Bundle
+
+# Builds the two release binaries (userspace-only and XDP-enabled), the eBPF
+# object embedded in the latter, and a fixed-answer upstream, then publishes
+# them as one verified tarball. The point is to keep heavy LTO builds off the
+# machine that runs the A/B benchmark: fetch the artifact, run
+# scripts/perf_ab.py there. See docs/xdp.md for the fast path itself.
+#
+# workflow_dispatch is the on-demand path once this file is on the default
+# branch. The perf/** push trigger exists so a branch can produce a bundle
+# before that; drop it later if it is noise. Pushes to main deliberately do
+# not trigger a bundle.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: ['perf/**']
+    paths:
+      - 'src/**'
+      - 'crates/**'
+      - 'xdp/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'rust-toolchain.toml'
+      - 'scripts/perf_ab.py'
+      - 'scripts/perf_upstream.c'
+      - '.github/workflows/perf-bundle.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: perf-bundle-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  bundle:
+    name: Build perf bundle
+    # 22.04 keeps the glibc floor at 2.35, so the binaries also run on hosts
+    # older than the ubuntu-latest image.
+    runs-on: ubuntu-22.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            . -> target
+            xdp -> xdp/target
+
+      - name: Install bpf-linker
+        run: |
+          curl -sSL https://github.com/aya-rs/bpf-linker/releases/download/v0.12.0/bpf-linker-x86_64-unknown-linux-musl.tar.zst | tar -xI zstd -C ~/.cargo/bin/
+
+      # build.rs embeds the object at compile time, so it must exist before the
+      # XDP binary is built. It rebuilds through the pinned nightly toolchain in
+      # xdp/rust-toolchain.toml.
+      - name: Build eBPF program
+        run: cd xdp && cargo build -Z build-std=core,alloc --release --target bpfel-unknown-none
+
+      - name: Build userspace binary
+        run: |
+          cargo build --release --locked
+          mkdir -p dist/bundle/bin
+          cp target/release/doggy-dns dist/bundle/bin/doggy-dns
+
+      - name: Build XDP binary
+        run: |
+          cargo build --release --locked --features xdp
+          cp target/release/doggy-dns dist/bundle/bin/doggy-dns-xdp
+
+      - name: Build perf upstream
+        run: |
+          # Prefer a static binary so the bundle does not inherit the runner's
+          # glibc version; fall back to dynamic when static libc is absent.
+          if cc -O2 -Wall -Wextra -Werror -static \
+              -o dist/bundle/bin/perf-upstream scripts/perf_upstream.c; then
+            echo "perf-upstream: static" >> dist/bundle/MANIFEST.txt
+          else
+            cc -O2 -Wall -Wextra -Werror \
+              -o dist/bundle/bin/perf-upstream scripts/perf_upstream.c
+            echo "perf-upstream: dynamic" >> dist/bundle/MANIFEST.txt
+          fi
+
+      # Must come before the manifest is written, which records the version.
+      - name: Install dnsperf
+        run: sudo apt-get update && sudo apt-get install -y dnsperf
+
+      - name: Assemble bundle
+        run: |
+          cp scripts/perf_ab.py dist/bundle/
+          # The runner's configs double as the reference ones in the tarball;
+          # perf_ab.py regenerates them from the same code for each run. The
+          # thread count is pinned so the shipped files do not vary with the
+          # runner's CPU count.
+          python3 scripts/perf_ab.py --bundle dist/bundle \
+            --emit-configs dist/bundle/config --worker-threads 2
+          {
+            echo "commit: $(git rev-parse HEAD)"
+            echo "ref: ${GITHUB_REF}"
+            echo "built_at: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            echo "runner: ${ImageOS:-unknown} $(uname -srm)"
+            echo "rustc: $(rustc -V)"
+            echo "cargo: $(cargo -V)"
+            # `dnsperf -v` prints the version, then keeps running and logs
+            # status/error lines; drop those rather than the whole output.
+            echo "dnsperf: $(dnsperf -v 2>&1 | grep -vE '^(\[Status\]|Error:)' | tr '\n' ' ' | sed 's/ *$//')"
+          } >> dist/bundle/MANIFEST.txt
+          (
+            cd dist/bundle
+            sha256sum bin/* config/*.toml perf_ab.py MANIFEST.txt > SHA256SUMS
+          )
+          chmod +x dist/bundle/bin/*
+
+      # The XDP arm needs a privileged kernel and is verified on the host that
+      # downloads the bundle. This smoke only proves the packaged userspace arm
+      # and the bundled upstream work together.
+      - name: Smoke test userspace arm
+        run: |
+          python3 scripts/perf_ab.py \
+            --bundle dist/bundle \
+            --rounds 1 \
+            --duration 3 \
+            --queries 200 \
+            --threads 2 \
+            --worker-threads 2 \
+            --only userspace \
+            --out dist/smoke
+
+      - name: Package
+        run: |
+          tar -C dist -czf "dist/doggy-dns-perf-${GITHUB_SHA::12}.tar.gz" bundle
+          sha256sum dist/doggy-dns-perf-*.tar.gz | tee /tmp/tarball.sha256
+
+      - name: Write job summary
+        if: always()
+        run: |
+          {
+            echo "## Perf Bundle"
+            if [ -f dist/bundle/MANIFEST.txt ]; then
+              echo '```'
+              cat dist/bundle/MANIFEST.txt
+              echo '```'
+            fi
+            if [ -f dist/smoke/report.md ]; then
+              echo '### Smoke: userspace arm'
+              cat dist/smoke/report.md
+            fi
+            if [ -f /tmp/tarball.sha256 ]; then
+              echo '### Artifact'
+              echo '```'
+              cat /tmp/tarball.sha256
+              echo '```'
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: doggy-dns-perf-bundle
+          path: dist/doggy-dns-perf-*.tar.gz
+          retention-days: 14
+          if-no-files-found: error

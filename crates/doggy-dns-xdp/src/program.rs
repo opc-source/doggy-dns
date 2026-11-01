@@ -6,9 +6,10 @@
 
 use anyhow::{Context as _, Result};
 use aya::EbpfLoader;
-use aya::maps::{Array, MapData};
+use aya::maps::{Array, MapData, MapInfo};
 use aya::programs::{Xdp, XdpMode};
 use aya_log::EbpfLogger;
+use std::ffi::CString;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -66,12 +67,30 @@ impl XdpManager {
             fs::create_dir_all(parent).ok();
         }
 
+        // The capacity to declare for DNS_CACHE. The eBPF program only declares
+        // the default size, so a new map takes the configured value. A pinned
+        // map keeps the capacity it was created with, and the loader refuses to
+        // reuse one whose capacity differs from the declaration, so a restart
+        // has to declare the pinned capacity to come up at all; a difference
+        // from the configuration is reported by `log_cache_provenance`.
+        let declared_cache_size = if reused_pinned_map {
+            match MapInfo::from_pin(&pin_path) {
+                Ok(info) => info.max_entries(),
+                Err(error) => {
+                    tracing::warn!(
+                        %error,
+                        %pin_path,
+                        "cannot read the pinned DNS_CACHE map, falling back to the configured capacity"
+                    );
+                    config.cache_size
+                }
+            }
+        } else {
+            config.cache_size
+        };
+
         let mut ebpf = EbpfLoader::new()
-            // Apply the configured cache capacity at map-creation time; the
-            // eBPF program only declares the default size. A reused map keeps
-            // the capacity it was created with, which `log_cache_provenance`
-            // reports.
-            .map_max_entries("DNS_CACHE", config.cache_size)
+            .map_max_entries("DNS_CACHE", declared_cache_size)
             // The loader stores an owned `Cow<Path>`; `&str` and `String` are not
             // convertible, so this passes a `PathBuf` and leaves `pin_path`
             // available for the provenance log below.
@@ -122,7 +141,7 @@ impl XdpManager {
         )
         .context("XDP_CONFIG has an unexpected value type")?;
         config_map
-            .set(0, XdpRuntimeConfig { dns_port }, 0)
+            .set(0, &XdpRuntimeConfig { dns_port }, 0)
             .context("failed to write XDP runtime configuration")?;
 
         // Load the program; attach only in auto mode (manual mode leaves it
@@ -130,9 +149,12 @@ impl XdpManager {
         let program = load_dns_program(&mut ebpf)?;
         program.load().context("failed to load XDP program")?;
         let link_id = if config.attach_mode == "auto" {
+            // `attach` takes a `NetworkInterface`, which borrows a C string.
+            let iface_c =
+                CString::new(iface.as_str()).context("interface name contains a NUL byte")?;
             Some(
                 program
-                    .attach(&iface, XdpMode::Default)
+                    .attach(iface_c.as_c_str(), XdpMode::Default)
                     .context(format!("failed to attach XDP to interface {iface}"))?,
             )
         } else {

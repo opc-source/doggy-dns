@@ -208,9 +208,8 @@ dependencies = [
 
 [[package]]
 name = "aya"
-version = "0.14.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "66e644424fada9fff4fdc63848db1732fb69b626e8328202ef55c03df1f4d939"
+version = "0.16.0"
+source = "git+https://github.com/aya-rs/aya?tag=aya-v0.16.0#7192299e5e4680742b0ae87bf8fa1305a8b23d45"
 dependencies = [
  "assert_matches",
  "aya-obj",
@@ -218,7 +217,7 @@ dependencies = [
  "hashbrown 0.17.1",
  "libc",
  "log",
- "object 0.39.1",
+ "object 0.40.0",
  "once_cell",
  "scopeguard",
  "thiserror",
@@ -227,8 +226,7 @@ dependencies = [
 [[package]]
 name = "aya-log"
 version = "0.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "476912cd6322ecf481a48f9db82207406a472563875eef014e927800522aac5c"
+source = "git+https://github.com/aya-rs/aya?tag=aya-v0.16.0#7192299e5e4680742b0ae87bf8fa1305a8b23d45"
 dependencies = [
  "aya",
  "aya-log-common",
@@ -238,22 +236,20 @@ dependencies = [
 
 [[package]]
 name = "aya-log-common"
-version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d14c56374a63b20cb1d76108bf9ff2a75e137d47f57f32f2841ef74153b2186a"
+version = "0.3.0"
+source = "git+https://github.com/aya-rs/aya?tag=aya-v0.16.0#7192299e5e4680742b0ae87bf8fa1305a8b23d45"
 dependencies = [
  "num_enum",
 ]
 
 [[package]]
 name = "aya-obj"
-version = "0.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8c76b9c75d9cdc155ff8f6a06d61e873f67bf47be8cfa92a3b5aaea43f4b4077"
+version = "0.6.0"
+source = "git+https://github.com/aya-rs/aya?tag=aya-v0.16.0#7192299e5e4680742b0ae87bf8fa1305a8b23d45"
 dependencies = [
  "bytes",
  "log",
- "object 0.39.1",
+ "object 0.40.0",
  "thiserror",
 ]
 
@@ -1847,9 +1843,9 @@ dependencies = [
 
 [[package]]
 name = "object"
-version = "0.39.1"
+version = "0.40.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2e5a6c098c7a3b6547378093f5cc30bc54fd361ce711e05293a5cc589562739b"
+checksum = "dd229a0361b9d0d4396176e02d65897f487eebeab7caa6d443855ee152ca0b9c"
 dependencies = [
  "crc32fast",
  "hashbrown 0.17.1",
