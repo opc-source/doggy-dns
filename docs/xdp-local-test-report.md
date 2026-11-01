@@ -168,7 +168,10 @@ Things that only come out of a warn-level run:
 
 Medians: userspace **61,954 QPS / 1.449 ms / 30.83 CPU-s**, XDP **215,732 QPS /
 0.017 ms / 0.00 CPU-s** → **3.48×** throughput with the userspace process idle
-while the kernel answered. Raw output: `perf-results/release-904508c-warn/`,
+while the kernel answered. Both arms were driven by dnsperf's default **single
+client**, so read this against "The load generator shares this host, on one
+client" before treating it as two saturated servers.
+Raw output: `perf-results/release-904508c-warn/`,
 log-level runs in `perf-results/loglevel-*/`, functional matrix in
 `perf-results/e2e-warn/` (including `matrix.out`, `run.sh`, `e2e_upstream.py`).
 
@@ -202,21 +205,87 @@ Readings:
   run at 2 workers burned 30.60 and 31.06 s, so the 10 s numbers are consistent
   rather than an artifact.
 - **Why there is no gain**: `crates/doggy-dns-core/src/server.rs:20` binds a
-  single UDP socket, so the receive→answer loop is one tokio task that only one
-  worker can run at a time. Extra workers buy cross-thread wakeups and task
-  stealing, not
-  parallelism on the hot path. `worker_threads` is worth raising when the chain
+  single UDP socket and hickory polls it in one future — `UdpStream::poll_next`
+  (`hickory-net-0.26.3/src/udp/udp_stream.rs:154`) drains the reply channel with
+  `poll_send_to` before it `poll_recv_from`s, so receive and reply share one task
+  and a queued reply delays the next read. The per-request work in between
+  (parse, plugin chain, cache lookup, serialize) does spread across workers, which
+  is why the step is worth +25.4% on an 8-core host and +2.0% here. On the mac
+  host the profile pins the same shape: see
+  [docs/macos-local-test-report.md](macos-local-test-report.md),
+  "Which task owns the socket". `worker_threads` is worth raising when the chain
   blocks on real work — a nacos lookup, TLS/DoH, a plugin doing I/O — not for
   raw UDP reply rate.
 - **The XDP arm is independent of the setting**, as expected: server CPU stayed
   0.00 s in both rows while the kernel counters moved by the full completed
   count.
-- Scope limit: on a 2 vCPU host that also runs dnsperf's 2 sender threads and the
-  upstream, 2 workers is already the host ceiling, so this matrix can only say
-  "no gain up to `nproc`". A many-core host with a native-XDP NIC may move the
-  userspace ceiling; that is not measured here.
+- Scope limit: on a 2 vCPU host that also runs `dnsperf` and the upstream, 2
+  workers is already the host ceiling, so this matrix can only say "no gain up to
+  `nproc`". A many-core host with a native-XDP NIC may move the userspace
+  ceiling; the 8-core run in the macOS report shows exactly that (+25.4% for the
+  same step).
 
 Raw output for each value: `perf-results/worker-1/`, `perf-results/worker-2/`.
+
+## The load generator shares this host, on one client
+
+Every run above drives `dnsperf` **on the machine it is loading**, and
+`run_dnsperf()` passes only `-s -p -d -n -T -l`: neither `-c` nor `-q`, so
+dnsperf keeps its defaults of **one client** and `-q 100` outstanding queries for
+that client. Verified on this host — with `-T 2` set, `ss -u -a -n -p` shows
+exactly one `dnsperf` socket, because clients, not threads, own the pipeline.
+So the measured window holds **at most 100 queries in flight**, and the `-T 2`
+second thread adds no offered concurrency. That client, the server process and
+`perf-upstream` then compete for 2 logical CPUs — one core, two SMT siblings —
+plus the loopback softirq work, which generic XDP adds to the delivering CPU.
+
+Little's Law turns the recorded QPS/latency pairs into an in-flight count, and
+that is where the constraint shows:
+
+| Run | QPS | Avg latency (ms) | In flight = QPS × latency | Of the 100 window | Server CPU |
+|---|---:|---:|---:|---:|---|
+| userspace, wt=1, 10 s | 62,309 | 1.536 | 95.7 | 96% | 0.82 of one core |
+| userspace, wt=2, 10 s | 63,529 | 1.417 | 90.0 | 90% | 1.03 of one core |
+| userspace, wt=2, 30 s headline | 61,954 | 1.449 | 89.8 | 90% | 1.03 |
+| XDP, wt=1, 10 s | 200,534 | 0.036 | 7.2 | 7% | 0.00 |
+| XDP, wt=2, 30 s headline | 215,732 | 0.017 | 3.7 | 4% | 0.00 |
+
+What that says about every number in this report:
+
+- **The userspace arm was measured closed-loop at ~90–96% of the client window.**
+  With 100 queries allowed in flight and ~1.5 ms latency, QPS is pinned near
+  100 / 1.5 ms ≈ 66k by the harness itself. 62,309 is therefore not the ceiling of
+  `doggy-dns` on this CPU; the server's 0.82 of one core — ~18% of the window not
+  runnable — is what a server that is *offered* that rate looks like.
+- **The XDP arm was limited by something else entirely**: 3.7–7.2 in flight out of
+  100, i.e. 4–7% of its own window. That is a single dnsperf client thread that
+  cannot turn over packets fast enough — and on `lo` with generic XDP the fast path
+  executes in that thread's delivery context, so the tool is paying for the answer
+  it is timing.
+- **The two arms are thus capped by different things**, which is the reason the
+  3.48× headline must not be read as "the kernel answers 3.48× faster at
+  saturation". It compares a window-capped userspace arm with a sender-CPU-capped
+  kernel arm. Both absolute QPS figures are lower bounds, and these runs do not
+  determine which way co-location biases the ratio.
+- **The flat worker-thread curve has the same root.** 1 → 2 moved 26% more CPU
+  through the server for +2.0% QPS: per-core output fell 7,636 → 6,162 QPS per
+  CPU-second (−19%). With the window already ~90% full, extra workers cannot buy
+  throughput; they only compete with the sender for the two SMT siblings.
+- **What would settle it**: widen the client window and move the load generator
+  off the measured host. The first half was done on the 8-core host in
+  [docs/macos-local-test-report.md](macos-local-test-report.md) — `-T 8 -c 8`, and
+  there raising `-q` from 100 (97 in flight) to 2000 (1,995 in flight) changed QPS
+  by 0.3%, 104,102 → 104,409 — so once clients are wide the window stops binding
+  and the server's own serial loop becomes the ceiling. No run in this report
+  widened it.
+- **`Server CPU 0.00` is a statement about the process, not about the machine.**
+  The fast path moves reply cost out of the `doggy-dns` process; it does not remove
+  it from a host that is also running the benchmark tool.
+
+Not measured, deliberately left as an inference: `dnsperf`'s own CPU and the
+whole-host utilisation. `scripts/perf_ab.py` records the server process and the
+kernel counters only, so the client side above comes from its reported QPS, its
+latency and its flag defaults rather than from a sample.
 
 ## Reproduce
 
@@ -256,7 +325,15 @@ cannot produce the NXDOMAIN or short-TTL cases.
 ## Limits and not covered
 
 - `lo` attaches in **generic** mode; these numbers say nothing about native NIC
-  XDP throughput, and dnsperf, the upstream and the server share 2 vCPU.
+  XDP throughput. `dnsperf` also runs on this host, driven by its default
+  **one client / `-q 100`** window, so every QPS below is a lower bound and the
+  userspace arm is partly a harness number — see "The load generator shares this
+  host, on one client".
+- No client-side or whole-host CPU was sampled; the runner records the server
+  process and the kernel counters only.
+- The runner exposes no `--clients`/`--outstanding` knob; widening the client
+  window needs a `dnsperf` flag change (`run_dnsperf()`), which is the first
+  thing to add before these numbers are compared against the macOS run.
 - Both arms are warm-cache. Cold-cache behaviour, miss-path latency under
   pressure and LRU eviction are not measured here.
 - No IPv6, no fragment reassembly, no EDNS `DO`/large-payload handling, no

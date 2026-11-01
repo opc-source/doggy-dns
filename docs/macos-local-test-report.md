@@ -547,7 +547,11 @@ tree and not in the histogram.)
 Readings:
 
 - **Every socket syscall in both runs belongs to the loop task** — 3,331/3,331 and
-  4,264/4,264. There is no second receive path, and no send outside the loop: a resolver
+  4,264/4,264. There is no second receive path, and no send outside the loop, and the
+  dependency says why: `hickory_server::Server::register_socket` polls one `UdpStream`
+  (`hickory-net-0.26.3/src/udp/udp_stream.rs:154`), and that one `poll_next` drains the reply
+  channel with `poll_send_to` **before** it calls `poll_recv_from` — sends and receives share
+  the single future, and a pending reply blocks the next read. A resolver
   forward (a cache miss) `sendto`s on the upstream socket from the per-request future, i.e.
   outside any `handle_udp` frame, and none of the 4,264 ticks is there. The whole sampled
   interval is cache-warm by construction: `sample` starts 6 s into a 25 s window, and the
@@ -560,7 +564,8 @@ Readings:
   the same 1,000-name file cannot be less warm. Read that way, the 10.1 µs/query at
   `worker_threads = 1` is the cost of answering from the cache, not of fetching.
 - **The loop did not parallelise, it migrated.** At `worker_threads = 8` the same single
-  future is polled wherever tokio puts it, and its `sendto` ticks land on all 8 workers
+  future is polled wherever tokio puts it — one future is polled by one worker at a time, so
+  the spread is over time, not concurrent — and its `sendto` ticks land on all 8 workers
   (404–487 each). One task, now crossing cores — and the measured growth is in the
   non-syscall categories (2.81×), not in the socket pair (1.28×).
 
