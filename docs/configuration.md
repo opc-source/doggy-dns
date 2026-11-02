@@ -13,6 +13,9 @@ port = 15353
 tcp_timeout = 10          # seconds, default 10
 shutdown_timeout = 5      # seconds, default 5
 worker_threads = 1        # default 1 (suitable for DaemonSet, one per node)
+#reuseport_listen_num = 1 # SO_REUSEPORT UDP sockets; default 1 (single socket).
+                          # Linux only; recommended: physical core count.
+#cpu_affinity = [0, 2, 4, 6] # one core per worker thread; see "CPU affinity".
 rotate_answers = true     # default true: cycle multi-record answers per response
 
 # Optional: DNS over TLS
@@ -121,6 +124,42 @@ interfaces. TLS and HTTPS reuse `[server].listen_addr` with their own port.
 If no `[[plugins]]` are configured, defaults to forwarding to `8.8.8.8` and
 `1.1.1.1`.
 
+## CPU affinity
+
+`cpu_affinity` gives each tokio worker thread its own core, so a worker keeps that
+core's caches for the process lifetime instead of being re-placed wherever the
+scheduler finds room. The list must be as long as `worker_threads` with unique core
+ids; threads claim entries in start order, so the core *set* is fixed while which
+worker lands on which core is not.
+
+```text
+  cpu_affinity = [0, 2, 4, 6], worker_threads = 4
+
+  kernel scheduler                userspace: doggy-dns process
+  ------------------              ------------------------------------
+  core 0  ─────────────────────▶  worker #0  (first thread to start)
+  core 1   (no worker here)       free for the load generator / OS
+  core 2  ─────────────────────▶  worker #1
+  core 3   (no worker here)       free for the load generator / OS
+  core 4  ─────────────────────▶  worker #2
+  core 5   (no worker here)       free for the load generator / OS
+  core 6  ─────────────────────▶  worker #3
+  core 7   (no worker here)       free for the load generator / OS
+```
+
+On a 4-core / 8-vCPU Linux node with the load generator pinned to the *other*
+cores, that is +3.8% ~ +4.6% QPS at `worker_threads = 4`; sharing a core with a
+competitor costs 21% ~ 30% — far more than the gain, which is why
+[cpu-affinity-report-2026-11-02.md](cpu-affinity-report-2026-11-02.md) insists on
+pinning the client too.
+
+Two caveats: a core id is a hard mask on Linux/Android, Windows and the BSDs but
+only an L2-placement *hint* on Apple platforms (the Apple Silicon host checked here
+rejected the call outright, kern 46), and nothing in the log says whether a pin
+landed — confirm on the target with `taskset -p`/`ps -o psr`. Blocking threads,
+such as CPU profile collection, draw from the same list round-robin and can share a
+worker's core.
+
 ## Answer rotation
 
 `rotate_answers` (default `true`) cycles the answers of a response carrying
@@ -158,8 +197,11 @@ tool returns the file as written, so expanded secrets never leave the process.
 
 ## Validation
 
-Startup validation (`validate_config()`) checks: `worker_threads > 0`; TLS and
-HTTPS cert files exist when enabled; `remote_config` fields non-empty when
+Startup validation (`validate_config()`) checks: `worker_threads > 0`;
+`reuseport_listen_num >= 1`, and only above 1 on Linux; `cpu_affinity` non-empty
+when given, its length equal to `worker_threads`, its core ids unique (one outside
+the available set aborts startup when the runtime is built); TLS and HTTPS cert
+files exist when enabled; `remote_config` fields non-empty when
 enabled; plugin rules — at least one enabled plugin when `[[plugins]]` is
 present, Nacos `server_addr`/`namespace`/`group`/`dns_zone` present with a
 syntactically valid and unique zone, `min_ttl <= max_ttl` for native/forward,
