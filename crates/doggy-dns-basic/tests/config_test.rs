@@ -1130,6 +1130,51 @@ rotate_answers = false
     assert!(!config.server.rotate_answers);
 }
 
+#[test]
+fn reuseport_listen_num_defaults_to_one() {
+    let toml_str = r#"
+[server]
+listen_addr = "0.0.0.0"
+port = 53
+"#;
+
+    let config: DoggyDnsConfig = toml::from_str(toml_str).expect("parse failed");
+    assert_eq!(config.server.reuseport_listen_num, 1);
+}
+
+#[test]
+fn reuseport_listen_num_parses_when_specified() {
+    let toml_str = r#"
+[server]
+listen_addr = "0.0.0.0"
+port = 53
+reuseport_listen_num = 8
+"#;
+
+    let config: DoggyDnsConfig = toml::from_str(toml_str).expect("parse failed");
+    assert_eq!(config.server.reuseport_listen_num, 8);
+}
+
+#[test]
+fn reuseport_listen_num_zero_fails_validation() {
+    let toml_str = r#"
+[server]
+listen_addr = "0.0.0.0"
+port = 53
+reuseport_listen_num = 0
+"#;
+
+    let config: DoggyDnsConfig = toml::from_str(toml_str).unwrap();
+    let result = validate_config(&config);
+    assert!(result.is_err());
+    assert!(
+        result
+            .unwrap_err()
+            .to_string()
+            .contains("reuseport_listen_num must be >= 1")
+    );
+}
+
 /// The container image runs `doggy-dns` with no arguments, so it loads
 /// `/app/config/doggy-dns.toml` — the baked copy of this file — before anything
 /// else happens. It is the one config in the repository that has to work as
