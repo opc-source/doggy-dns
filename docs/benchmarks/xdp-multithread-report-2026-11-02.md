@@ -1,10 +1,27 @@
 # XDP 多线程性能测试报告（实测数据）
 
 **测试日期**: 2026-11-02  
-**测试环境**: Linux 6.6.102 (x86_64)  
-**CPU 核心数**: 8  
 **测试工具**: dnsperf v2.14.0  
 **数据来源**: 全部实测，每组配置运行 30 秒  
+
+## Machine specification
+
+| Item | Value |
+|---|---|
+| Vendor / product | Alibaba Cloud (`Alibaba Cloud ECS`), KVM guest (`systemd-detect-virt`: `kvm`) |
+| CPU | Intel(R) Xeon(R) Platinum, 8 vCPU = 1 socket × 4 cores × 2 threads |
+| Relevant CPU features | `avx512f avx512dq avx512bw avx512vl avx2 avx bmi1 bmi2 aes fma sse4_2` |
+| Caches | L1d 32 KiB × 4, L1i 32 KiB × 4, L2 1 MiB × 4, L3 33 MiB (shared) |
+| Memory | `MemTotal` 15,555,520 kB (14.83 GiB); **no swap** |
+| Root disk | `/dev/vda3` 40 GiB virtio (20 GiB used, 20 GiB free during these runs) |
+| OS | Alibaba Cloud Linux 4.0.6 (`ID=alinux`, OpenAnolis Edition) |
+| Kernel | `Linux 6.6.102-8.alnx4.x86_64 #1 SMP PREEMPT_DYNAMIC x86_64` |
+| glibc | 2.38 |
+| Python | 3.11.6 |
+| dnsperf | 2.14.0 |
+| BPF settings | `net.core.bpf_jit_enable = 1`, BTF present at `/sys/kernel/btf/vmlinux` |
+| Limits | `ulimit -n` 65535, transparent hugepages `[always]`, no cgroup `cpu.max`/`memory.max` cap |
+| XDP-capable interface | `lo` only; generic XDP mode (`xdpgeneric`) |
 
 ## 测试配置
 
@@ -151,9 +168,12 @@ XDP 的天花板由以下因素决定：
 | 场景 | 推荐配置 |
 |------|---------|
 | 高缓存命中 + XDP | `worker_threads = 1-2` 即可（XDP 处理绝大部分流量） |
-| 低缓存命中 / 大量 miss | `worker_threads = 4`（userspace 扩展峰值） |
-| 混合场景 | `worker_threads = 4`（平衡 XDP 和 userspace） |
+| 低缓存命中 / 大量 miss | `worker_threads = 物理核数`（如 4），`reuseport_listen_num = worker_threads` |
+| 混合场景 | `worker_threads = 物理核数`（如 4），`reuseport_listen_num = worker_threads` |
 | 资源受限 | `worker_threads = 1` + XDP（单核可达 52万 QPS） |
+
+**注意**: `worker_threads` 和 `reuseport_listen_num` 推荐设为**物理核数**（非 vCPU 数）。
+实测显示超过物理核数后收益递减（超线程共享执行单元，无法提供真正并行能力）。
 
 ---
 *报告生成时间: 2026-11-02 15:30 CST*  

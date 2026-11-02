@@ -1,9 +1,26 @@
 # SO_REUSEPORT 性能测试报告
 
-**测试日期**: 2026-11-02
-**测试环境**: Linux 6.6.102-8.alnx4.x86_64 (x86_64), 8 cores
-**测试工具**: dnsperf v2.14.0
-**上游 DNS**: 223.5.5.5 (阿里云公共 DNS)
+**测试日期**: 2026-11-02  
+**测试工具**: dnsperf v2.14.0  
+**上游 DNS**: 223.5.5.5 (阿里云公共 DNS)  
+
+## Machine specification
+
+| Item | Value |
+|---|---|
+| Vendor / product | Alibaba Cloud (`Alibaba Cloud ECS`), KVM guest (`systemd-detect-virt`: `kvm`) |
+| CPU | Intel(R) Xeon(R) Platinum, 8 vCPU = 1 socket × 4 cores × 2 threads |
+| Relevant CPU features | `avx512f avx512dq avx512bw avx512vl avx2 avx bmi1 bmi2 aes fma sse4_2` |
+| Caches | L1d 32 KiB × 4, L1i 32 KiB × 4, L2 1 MiB × 4, L3 33 MiB (shared) |
+| Memory | `MemTotal` 15,555,520 kB (14.83 GiB); **no swap** |
+| Root disk | `/dev/vda3` 40 GiB virtio (20 GiB used, 20 GiB free during these runs) |
+| OS | Alibaba Cloud Linux 4.0.6 (`ID=alinux`, OpenAnolis Edition) |
+| Kernel | `Linux 6.6.102-8.alnx4.x86_64 #1 SMP PREEMPT_DYNAMIC x86_64` |
+| glibc | 2.38 |
+| Python | 3.11.6 |
+| dnsperf | 2.14.0 |
+| BPF settings | `net.core.bpf_jit_enable = 1`, BTF present at `/sys/kernel/btf/vmlinux` |
+| Limits | `ulimit -n` 65535, transparent hugepages `[always]`, no cgroup `cpu.max`/`memory.max` cap |
 
 ## 测试目的
 
@@ -144,15 +161,17 @@ worker 增加了调度开销，但收包仍由单 socket 串行处理，额外�
 | 最大延迟降低 | **62.4%**（8 线程，32 客户端） |
 | 丢包率 | 0%（所有配置） |
 | 单线程影响 | 无（0.99x，符合预期） |
-| 推荐配置 | `worker_threads = 8, reuseport_listen_num = 8` |
+| 推荐配置 | `worker_threads = reuseport_listen_num = 物理核数`（如 4 物理核则都设为 4） |
 
 `SO_REUSEPORT` 解决了 hickory-server 单 socket 串行收包的多核扩展瓶颈。在多核环
 境下，设置 `reuseport_listen_num > 1` 可将 UDP 吞吐量提升 **1.7x ~ 2.2x**，
 同时降低延迟 **45% ~ 62%**。
 
-**重要**: 为获得最佳性能，`worker_threads` 应与 `reuseport_listen_num` 匹配（如
-都设为 8），这样每个 socket 拥有独立的 receive task 和专用 CPU core，避免多 socket
-竞争少量线程导致的调度开销。
+**重要**: 为获得最佳性能，`worker_threads` 和 `reuseport_listen_num` 应匹配**物理
+核数**（非 vCPU 数）。例如 4 物理核 × 2 超线程 = 8 vCPU 的机器，推荐都设为 4。
+实测数据显示 t=4 后继续增加线程收益递减（t=7 仅比 t=4 提升 ~15%，t=8 反而略降），
+因为超线程共享执行单元，无法提供真正的并行能力。每个 socket 拥有独立的 receive 
+task 和专用物理 core，才能最大化并行处理效率。
 
 ---
 *报告生成时间: 2026-11-02 15:30 CST (reviewed)*  
