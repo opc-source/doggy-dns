@@ -1,5 +1,6 @@
 use crate::config::net::socket_addr;
 use crate::config::{DoggyDnsConfig, HttpsConfig, TlsConfig};
+use crate::reuseport;
 use anyhow::{Context, Result};
 use hickory_server::Server;
 use hickory_server::server::RequestHandler;
@@ -14,16 +15,32 @@ pub async fn build_server<H: RequestHandler>(
 ) -> Result<Server<H>> {
     let mut server = Server::new(handler);
 
-    // UDP
     let addr = socket_addr(&config.server.listen_addr, config.server.port)
-        .context("invalid server address")?;
-    let udp_socket = UdpSocket::bind(addr)
-        .await
-        .context("failed to bind UDP socket")?;
-    server.register_socket(udp_socket);
-    tracing::info!("listening on UDP {}", addr);
+        .context("invalid server listen address")?;
 
-    // TCP
+    let udp_count = config.server.reuseport_listen_num as usize;
+
+    // UDP — `reuseport_listen_num` sockets; when > 1 the kernel fans out
+    // incoming datagrams across them via SO_REUSEPORT (Linux only).
+    for _ in 0..udp_count {
+        let udp_socket = if udp_count > 1 {
+            reuseport::bind_reuseport_udp(addr)
+                .context("failed to bind UDP socket with SO_REUSEPORT")?
+        } else {
+            UdpSocket::bind(addr)
+                .await
+                .context("failed to bind UDP socket")?
+        };
+        server.register_socket(udp_socket);
+    }
+    tracing::info!(
+        count = udp_count,
+        reuseport = udp_count > 1,
+        "listening on UDP {}",
+        addr
+    );
+
+    // TCP — always a single listener.
     let tcp_listener = TcpListener::bind(addr)
         .await
         .context("failed to bind TCP listener")?;

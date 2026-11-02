@@ -11,6 +11,16 @@ pub fn validate_config(config: &DoggyDnsConfig) -> anyhow::Result<()> {
         config.server.worker_threads > 0,
         "server.worker_threads must be greater than 0"
     );
+    anyhow::ensure!(
+        config.server.reuseport_listen_num >= 1,
+        "server.reuseport_listen_num must be >= 1"
+    );
+    if config.server.reuseport_listen_num > 1 {
+        anyhow::ensure!(
+            cfg!(target_os = "linux"),
+            "server.reuseport_listen_num > 1 is only supported on Linux (SO_REUSEPORT)"
+        );
+    }
     if let Some(tls) = &config.server.tls
         && tls.enabled
     {

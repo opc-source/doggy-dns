@@ -14,6 +14,11 @@ pub struct ServerConfig {
     /// Off means answers keep the order the authority produced them in.
     #[serde(default = "default_rotate_answers")]
     pub rotate_answers: bool,
+    /// Number of UDP sockets to bind with `SO_REUSEPORT` so the kernel
+    /// load-balances incoming datagrams across them. Defaults to 1 (single
+    /// socket, no reuseport). Only effective on Linux.
+    #[serde(default = "default_reuseport_listen_num")]
+    pub reuseport_listen_num: u16,
     pub tls: Option<TlsConfig>,
     pub https: Option<HttpsConfig>,
 }
@@ -32,6 +37,10 @@ fn default_worker_threads() -> usize {
 
 fn default_rotate_answers() -> bool {
     true
+}
+
+fn default_reuseport_listen_num() -> u16 {
+    1
 }
 
 #[derive(Debug, Clone, Deserialize)]
