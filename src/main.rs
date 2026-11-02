@@ -44,6 +44,8 @@ fn main() -> Result<()> {
         listen_addr = %config.server.listen_addr,
         port = config.server.port,
         worker_threads = config.server.worker_threads,
+        reuseport_listen_num = config.server.reuseport_listen_num,
+        cpu_affinity = ?config.server.cpu_affinity,
         tcp_timeout = config.server.tcp_timeout,
         shutdown_timeout = config.server.shutdown_timeout,
         tls_enabled = config.server.tls.as_ref().is_some_and(|t| t.enabled),
@@ -65,11 +67,17 @@ fn main() -> Result<()> {
     }
 
     // Build runtime with configured worker threads
-    let runtime = tokio::runtime::Builder::new_multi_thread()
+    let mut builder = tokio::runtime::Builder::new_multi_thread();
+    builder
         .enable_all()
         .thread_name("doggy-dns-runtime")
-        .worker_threads(config.server.worker_threads)
-        .build()?;
+        .worker_threads(config.server.worker_threads);
+
+    if let Some(affinity) = &config.server.cpu_affinity {
+        configure_cpu_affinity(&mut builder, affinity)?;
+    }
+
+    let runtime = builder.build()?;
 
     tracing::info!(
         worker_threads = config.server.worker_threads,
@@ -186,6 +194,43 @@ async fn async_main(
         handle.cancel.cancel();
         await_shutdown("mcp server", handle.wait()).await;
     }
+
+    Ok(())
+}
+
+/// Configure CPU affinity for tokio worker threads.
+///
+/// Each worker thread is pinned to a specific CPU core in round-robin order.
+/// The vector length should match `worker_threads`.
+/// Panics if any core index exceeds the available CPU count.
+fn configure_cpu_affinity(
+    builder: &mut tokio::runtime::Builder,
+    affinity: &Vec<usize>,
+) -> Result<()> {
+    let core_ids = core_affinity::get_core_ids().unwrap_or_default();
+    for &core_idx in affinity {
+        anyhow::ensure!(
+            core_idx < core_ids.len(),
+            "cpu_affinity contains core index {core_idx}, but only {} cores available",
+            core_ids.len()
+        );
+    }
+
+    tracing::info!(cpu_affinity = ?affinity, "CPU affinity configured");
+    let affinity = affinity.clone();
+    builder.on_thread_start(move || {
+        static INDEX: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let idx = INDEX.fetch_add(1, std::sync::atomic::Ordering::Relaxed) % affinity.len();
+        if let Some(core_id) = affinity.get(idx).and_then(|&id| core_ids.get(id)).copied()
+            && core_affinity::set_for_current(core_id)
+        {
+            tracing::info!(
+                worker_index = idx,
+                core_id = core_id.id,
+                "pinned worker thread to CPU core"
+            );
+        }
+    });
 
     Ok(())
 }

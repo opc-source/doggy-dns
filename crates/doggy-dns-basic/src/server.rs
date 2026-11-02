@@ -19,6 +19,11 @@ pub struct ServerConfig {
     /// socket, no reuseport). Only effective on Linux.
     #[serde(default = "default_reuseport_listen_num")]
     pub reuseport_listen_num: u16,
+    /// Pin each tokio worker thread to a specific CPU core. When set, the
+    /// vector length should equal `worker_threads`; element `[i]` is the core
+    /// ID assigned to worker `i`. Improves cache locality and reduces
+    /// cross-core migration overhead.
+    pub cpu_affinity: Option<Vec<usize>>,
     pub tls: Option<TlsConfig>,
     pub https: Option<HttpsConfig>,
 }

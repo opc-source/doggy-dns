@@ -27,6 +27,7 @@ pub fn full_config(observability: ObservabilityConfig) -> DoggyDnsConfig {
             worker_threads: 1,
             rotate_answers: true,
             reuseport_listen_num: 1,
+            cpu_affinity: None,
             tls: None,
             https: None,
         },
