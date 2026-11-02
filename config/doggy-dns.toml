@@ -4,6 +4,14 @@ port = 15353
 tcp_timeout = 10
 shutdown_timeout = 5
 worker_threads = 1    # defaults to 1 (runs as DaemonSet, one per node)
+#reuseport_listen_num = 1  # Number of UDP sockets to bind with SO_REUSEPORT for
+                            # kernel-level load balancing across receive tasks.
+                            # Default: 1 (single socket, no reuseport).
+                            # Recommended: set equal to physical core count (not
+                            # vCPU count) for optimal performance. E.g., on a
+                            # 4-core machine with hyperthreading (8 vCPUs), set
+                            # both worker_threads and reuseport_listen_num to 4.
+                            # Only effective on Linux.
 #rotate_answers = true # cycle multi-record answers so clients spread across
 #                      # instances; false keeps the authority's own order
 
