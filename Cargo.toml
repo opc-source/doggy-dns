@@ -32,6 +32,7 @@ hickory-server = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 anyhow = { workspace = true }
+core_affinity = "0.8"
 
 [dev-dependencies]
 dashmap = { workspace = true }

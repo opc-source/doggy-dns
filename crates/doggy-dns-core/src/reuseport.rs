@@ -8,7 +8,9 @@
 //! real implementation; on other platforms it exposes a stub that always
 //! returns an error (config validation should prevent this path anyway).
 
-use anyhow::{Context, Result};
+use anyhow::Result;
+#[cfg(target_os = "linux")]
+use anyhow::Context;
 use tokio::net::UdpSocket;
 
 #[cfg(target_os = "linux")]

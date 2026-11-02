@@ -21,6 +21,25 @@ pub fn validate_config(config: &DoggyDnsConfig) -> anyhow::Result<()> {
             "server.reuseport_listen_num > 1 is only supported on Linux (SO_REUSEPORT)"
         );
     }
+    if let Some(affinity) = &config.server.cpu_affinity {
+        anyhow::ensure!(
+            !affinity.is_empty(),
+            "server.cpu_affinity must not be empty when specified"
+        );
+        anyhow::ensure!(
+            affinity.len() == config.server.worker_threads,
+            "server.cpu_affinity length ({}) must equal worker_threads ({})",
+            affinity.len(),
+            config.server.worker_threads
+        );
+        let mut seen = std::collections::HashSet::new();
+        for &core_id in affinity {
+            anyhow::ensure!(
+                seen.insert(core_id),
+                "server.cpu_affinity contains duplicate core ID {core_id}"
+            );
+        }
+    }
     if let Some(tls) = &config.server.tls
         && tls.enabled
     {
