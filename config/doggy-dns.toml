@@ -12,6 +12,13 @@ worker_threads = 1    # defaults to 1 (runs as DaemonSet, one per node)
                             # 4-core machine with hyperthreading (8 vCPUs), set
                             # both worker_threads and reuseport_listen_num to 4.
                             # Only effective on Linux.
+#cpu_affinity = [0, 2, 4, 6]  # One core per worker thread, so a worker keeps that
+#                             # core's caches instead of roaming. The length must
+#                             # equal worker_threads and core ids must be unique and
+#                             # within the available CPU set. A hard mask on
+#                             # Linux/Windows/BSDs, only a hint on Apple platforms.
+#                             # Pairs with reuseport_listen_num on a dedicated node
+#                             # (docs/benchmarks/cpu-affinity-report-2026-11-02.md).
 #rotate_answers = true # cycle multi-record answers so clients spread across
 #                      # instances; false keeps the authority's own order
 
