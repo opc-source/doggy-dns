@@ -1,60 +1,27 @@
 #![allow(clippy::disallowed_methods)]
 
-use async_trait::async_trait;
+//! Handler pipeline cost, per answer shape.
+//!
+//! The `threads` parameter sizes the runtime a request is driven on. One request
+//! runs at a time, so what a larger count changes is how much of tokio's worker
+//! set contends for the cache lines the pipeline touches — which is why a
+//! per-query shared refcount shows up here at all.
+
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use dashmap::DashMap;
 use doggy_dns_core::handler::{AnswerRotation, DoggyDnsHandler};
 use doggy_dns_nacos::authority::NacosAuthority;
 use doggy_dns_nacos::watcher::{CachedInstance, ServiceKey};
 use doggy_dns_plugin::authority_chain::AuthorityChain;
-use hickory_proto::op::{Header, HeaderCounts, Message, MessageType, OpCode, Query};
-use hickory_proto::rr::{Name, Record, RecordType};
-use hickory_server::net::NetError;
 use hickory_server::net::runtime::TokioTime;
-use hickory_server::net::xfer::Protocol;
-use hickory_server::server::{Request, RequestHandler, ResponseHandler, ResponseInfo};
-use hickory_server::zone_handler::MessageResponse;
+use hickory_server::server::RequestHandler;
 use std::hint::black_box;
-use std::net::{Ipv4Addr, SocketAddr};
-use std::str::FromStr;
 use std::sync::Arc;
 
-#[derive(Clone)]
-struct NoOpResponseHandler;
+mod common;
+use common::{NoOpResponseHandler, make_request};
 
-#[async_trait]
-impl ResponseHandler for NoOpResponseHandler {
-    async fn send_response<'a>(
-        &mut self,
-        response: MessageResponse<
-            '_,
-            'a,
-            impl Iterator<Item = &'a Record> + Send + 'a,
-            impl Iterator<Item = &'a Record> + Send + 'a,
-            impl Iterator<Item = &'a Record> + Send + 'a,
-            impl Iterator<Item = &'a Record> + Send + 'a,
-        >,
-    ) -> Result<ResponseInfo, NetError> {
-        let metadata = *response.metadata();
-        Ok(ResponseInfo::from(Header {
-            metadata,
-            counts: HeaderCounts::default(),
-        }))
-    }
-}
-
-fn make_request(domain: &str) -> Request {
-    let mut message = Message::new(1234, MessageType::Query, OpCode::Query);
-    message.metadata.recursion_desired = true;
-    let mut query = Query::new();
-    query.set_name(Name::from_str(domain).unwrap());
-    query.set_query_type(RecordType::A);
-    message.add_query(query);
-    let bytes = message.to_vec().unwrap();
-    let src = SocketAddr::from((Ipv4Addr::LOCALHOST, 12345));
-    Request::from_bytes(bytes, src, Protocol::Udp).unwrap()
-}
-
+/// A name the Nacos authority holds an answer for.
 fn bench_handler_pipeline_nacos_hit(c: &mut Criterion) {
     let cache = Arc::new(DashMap::new());
     cache.insert(

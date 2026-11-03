@@ -84,6 +84,14 @@ jobs:
           git checkout origin/main
           rm -rf target/criterion
           cargo bench -p doggy-dns-core --bench handler_bench -- --save-baseline base | tee /tmp/bench-base.txt
+          # A bench target main does not have yet cannot be baselined — this
+          # step's checkout is main's tree. It runs uncompared on the PR side
+          # and joins the baseline set once merged.
+          if [ -f crates/doggy-dns-core/benches/query_path_bench.rs ]; then
+            cargo bench -p doggy-dns-core --bench query_path_bench -- --save-baseline base | tee -a /tmp/bench-base.txt
+          else
+            echo "query_path_bench: not in base, PR numbers will be report-only"
+          fi
           cargo bench -p doggy-dns-plugin --bench chain_bench -- --save-baseline base | tee -a /tmp/bench-base.txt
           cargo bench -p doggy-dns-nacos --bench nacos_bench -- --save-baseline base | tee -a /tmp/bench-base.txt
       - name: Checkout PR head
@@ -99,6 +107,7 @@ jobs:
         if: github.event_name == 'pull_request'
         run: |
           cargo bench -p doggy-dns-core --bench handler_bench -- --baseline-lenient base | tee /tmp/bench-pr.txt
+          cargo bench -p doggy-dns-core --bench query_path_bench -- --baseline-lenient base | tee -a /tmp/bench-pr.txt
           cargo bench -p doggy-dns-plugin --bench chain_bench -- --baseline-lenient base | tee -a /tmp/bench-pr.txt
           cargo bench -p doggy-dns-nacos --bench nacos_bench -- --baseline-lenient base | tee -a /tmp/bench-pr.txt
       # A push to main has no PR to compare against; keep a fresh baseline.
@@ -107,6 +116,7 @@ jobs:
         run: |
           rm -rf target/criterion
           cargo bench -p doggy-dns-core --bench handler_bench -- --save-baseline base | tee /tmp/bench-main.txt
+          cargo bench -p doggy-dns-core --bench query_path_bench -- --save-baseline base | tee -a /tmp/bench-main.txt
           cargo bench -p doggy-dns-plugin --bench chain_bench -- --save-baseline base | tee -a /tmp/bench-main.txt
           cargo bench -p doggy-dns-nacos --bench nacos_bench -- --save-baseline base | tee -a /tmp/bench-main.txt
       # End-to-end: the pure userspace path (no XDP), forward plugin, so this

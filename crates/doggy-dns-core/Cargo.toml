@@ -32,3 +32,7 @@ criterion = { workspace = true }
 [[bench]]
 name = "handler_bench"
 harness = false
+
+[[bench]]
+name = "query_path_bench"
+harness = false

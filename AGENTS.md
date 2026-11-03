@@ -128,20 +128,28 @@ rebuild the chain, swap.
 
 The swap points exist because hickory's `Server` owns the `RequestHandler` by
 value: the handler can never be replaced, only what it reads through. So
-`DoggyDnsHandler` keeps the chain in an `ArcSwap`, hands a `ReloadHandle`
-(chain + rotation cursor) out before `build_server`, and `middleware.logging` is
-an `AtomicBool` inside an always-installed logging middleware — the middleware
-chain owns the live XDP cache map and the OTel instruments, so it is never
-rebuilt. When adding a reloadable setting, follow that shape: put it behind an
-`Arc` the handler shares out, do not try to construct a new handler.
+`DoggyDnsHandler` keeps everything a query reads from config — the authority
+chain and the rotation flag — in one `ArcSwap<QueryPath>`, and hands a
+`ReloadHandle` out before `build_server`; that handle has a single method, one
+store, so a reload is never observable as two changes. `middleware.logging` is
+the exception and stays an `AtomicBool` inside an always-installed logging
+middleware — the middleware chain owns the live XDP cache map and the OTel
+instruments, so it is never rebuilt. The rotation *cursor* is not part of the
+swapped snapshot either: it is a counter, and surviving the swap is the point.
+When adding a reloadable setting, follow that shape: put it behind the shared
+`ArcSwap` if the query path reads it, do not try to construct a new handler.
 
 `doggy_dns_basic::reload::reload_conflicts` is the allow-list: `[[plugins]]`,
 `server.rotate_answers` and `middleware.logging` may differ, everything else
 refuses the **whole** reload (a half-applied config is the failure mode this
 prevents). The rule is an allow-list on purpose — when a section becomes
-reloadable, add it to the list *and* move its swap point behind the handle;
+reloadable, add it to the list *and* move its swap point behind the handle.
+The list is written field by field and
 `crates/doggy-dns-basic/tests/reload_compat_test.rs` has one case per refused
-path, so a new config field is not silently reloadable by default.
+path, so **a field nobody added to either is reloadable by construction and is
+then silently ignored**: the reload is accepted, the config in memory records
+the new value, and nothing on the query path reads the difference. A new config
+field therefore needs a `FORBIDDEN` case there or a swap point, deliberately.
 
 Reloads are serialised (one `tokio::sync::Mutex` covers an apply) and coalesced
 (500 ms window, newest request wins). Failure and rejection leave everything
@@ -201,5 +209,6 @@ TOML config at `config/doggy-dns.toml`. Key structs in `crates/doggy-dns-basic` 
   (`crates/doggy-dns-nacos/tests/pool_test.rs`, pure), the orchestrator's
   decisions (`tests/reload_orchestrator_test.rs`, forward-only chains so no
   network) and the triggers end to end (`tests/nacos_e2e_test.rs`)
-- Benchmarks in `crates/*/benches/` using criterion 0.8, parameterized over worker_threads 1..4
+- Benchmarks in `crates/*/benches/` using criterion 0.8, parameterized over worker_threads 1..4 where the measurement is a request pipeline; `doggy-dns-core`'s `query_path_bench` also has `query_path_read`, a single-threaded decomposition of the per-query snapshot read (`plain`/`clone`/`swap`/`cached`), which is priced without a runtime because a thread knob there would measure tokio's task machinery, not the refcount traffic
+- Shared bench helpers live in `crates/doggy-dns-core/benches/common/mod.rs` (same `mod common;` pattern as `crates/doggy-dns-observability/tests/common/`)
 - Benchmark output starts with "running 0 tests" (from default harness) — this is normal, criterion results follow

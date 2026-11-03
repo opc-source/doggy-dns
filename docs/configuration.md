@@ -213,11 +213,15 @@ operator sees the line they actually changed. Half-applied configs are the
 failure mode this rule exists to prevent: answers that quietly disagree with the
 config file on disk.
 
-The swap itself is atomic. A query in flight finishes on the chain it started
-with, so a reload never changes the rules under a request mid-resolution. Reload
-requests are coalesced over a 500 ms window and the newest wins, which folds a
-burst of `SIGHUP`s — or the several callbacks Nacos delivers for one multi-change
-edit — into a single rebuild.
+The authority chain and `server.rotate_answers` go over in one store, so a
+query cannot pair a rebuilt chain with the rotation flag left behind by the
+config it replaced: a query in flight finishes on the path it started with.
+`middleware.logging` cannot join that store — the flag lives in the middleware
+chain, which is never rebuilt — so it is a separate write, and a query that
+straddles a reload can log under the old setting while answering from the new
+chain. Reload requests are coalesced over a 500 ms window and the newest wins,
+which folds a burst of `SIGHUP`s — or the several callbacks Nacos delivers for
+one multi-change edit — into a single rebuild.
 
 **Nacos connections survive a reload.** A watcher is keyed by its connection
 identity (`server_addr`, `namespace`, `group`), so re-publishing a zone under a

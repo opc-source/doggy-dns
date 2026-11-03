@@ -3,10 +3,10 @@
 //! A config reload reaches the handler that is already answering traffic.
 //!
 //! hickory's `Server` owns the handler by value, so the only thing a reload can
-//! change is what the handler reads through: the authority chain (swapped
-//! wholesale) and rotation (a flag on the shared cursor). These tests build a
-//! handler, take its `ReloadHandle`, then keep querying the same handler to
-//! prove the swap is what the next answer sees.
+//! change is what the handler reads through: one query-path snapshot holding the
+//! authority chain and the rotation flag, swapped wholesale while the rotation
+//! cursor stays put. These tests build a handler, take its `ReloadHandle`, then
+//! keep querying the same handler to prove the swap is what the next answer sees.
 
 use async_trait::async_trait;
 use dashmap::DashMap;
@@ -206,7 +206,7 @@ async fn swapped_chain_answers_the_next_query() {
         vec!["10.0.0.1".to_string()]
     );
 
-    reload.swap_authority_chain(chain_with(&["10.0.0.2", "10.0.0.3"], 11));
+    reload.swap_query_path(chain_with(&["10.0.0.2", "10.0.0.3"], 11), false);
 
     let capture = query(&handler).await;
     assert_eq!(
@@ -237,10 +237,13 @@ async fn swapped_chain_can_drop_every_authority() {
 
     // All plugins disabled or removed: the chain is empty and every query
     // falls through to NXDOMAIN rather than keeping the old answers.
-    reload.swap_authority_chain(AuthorityChain::new(vec![(
-        "skip".to_string(),
-        Arc::new(SkipZoneHandler) as Arc<dyn ZoneHandler>,
-    )]));
+    reload.swap_query_path(
+        AuthorityChain::new(vec![(
+            "skip".to_string(),
+            Arc::new(SkipZoneHandler) as Arc<dyn ZoneHandler>,
+        )]),
+        false,
+    );
 
     let capture = query(&handler).await;
     assert_eq!(
@@ -270,7 +273,7 @@ async fn rotation_toggles_on_the_live_handler() {
         "rotation off keeps the authority's order"
     );
 
-    reload.set_rotation(true);
+    reload.swap_query_path(chain_with(&["10.0.0.1", "10.0.0.2", "10.0.0.3"], 6), true);
     let mut walked = Vec::new();
     for _ in 0..3 {
         walked.push(query(&handler).await.answer_ips()[0].clone());
@@ -285,7 +288,7 @@ async fn rotation_toggles_on_the_live_handler() {
         "turning rotation on mid-life must start walking the instance list"
     );
 
-    reload.set_rotation(false);
+    reload.swap_query_path(chain_with(&["10.0.0.1", "10.0.0.2", "10.0.0.3"], 6), false);
     assert_eq!(
         query(&handler).await.answer_ips()[0],
         "10.0.0.1",
@@ -335,7 +338,7 @@ async fn swapping_under_concurrent_queries_answers_valid_generations() {
         tokio::spawn(async move {
             for generation in 0..20u8 {
                 let ip = format!("10.1.0.{generation}");
-                reload.swap_authority_chain(chain_with(&[ip.as_str()], 6));
+                reload.swap_query_path(chain_with(&[ip.as_str()], 6), false);
                 tokio::task::yield_now().await;
             }
         })

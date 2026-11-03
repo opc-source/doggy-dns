@@ -84,15 +84,18 @@ through on lookup failure so a later `forward` plugin can still answer.
 
 hickory's `Server` takes the `RequestHandler` by value, so the handler a running
 process serves from can never be replaced — only what it reads through.
-`DoggyDnsHandler` therefore keeps the authority chain in an `ArcSwap` and hands
-out a `ReloadHandle` (that chain plus the rotation cursor) before the server is
-built, and the two remaining reloadable settings are flags rather than structures:
-`server.rotate_answers` gates the shared `AnswerRotation`, and `middleware.logging`
+`DoggyDnsHandler` therefore keeps the halves of the config a query reads — the
+authority chain and the `server.rotate_answers` flag — together in one
+`ArcSwap<QueryPath>` and hands out a `ReloadHandle` with a single store method
+before the server is built, so a reload is one change rather than two that a
+query could straddle; in-flight queries hold the path they started on. The
+rotation *cursor* stays on the handler instead of in the snapshot, because it is
+a counter and surviving the swap is what keeps the answer sequence continuous.
+`middleware.logging` is the reloadable setting that cannot join that store: it
 gates a `LoggingToggle` inside a logging middleware that is installed
 unconditionally — the middleware chain owns the live XDP cache map and the OTel
 instruments, so rebuilding it on a reload would rebuild the kernel handle and
-the metric instruments too. A swap is atomic and in-flight queries hold the chain
-they started on.
+the metric instruments too — so it is a separate atomic write.
 
 `ReloadOrchestrator` (`src/reload.rs`, reachable because the binary package also
 has a lib target) is the single decision point both triggers funnel into: read the

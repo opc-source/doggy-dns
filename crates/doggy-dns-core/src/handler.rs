@@ -11,7 +11,7 @@ use hickory_server::zone_handler::{
     AuthLookup, LookupControlFlow, LookupError, LookupRecords, MessageResponseBuilder,
 };
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use tokio::time::Instant;
 use tracing::Instrument;
 
@@ -30,30 +30,36 @@ use tracing::Instrument;
 /// allocation.
 #[derive(Debug)]
 pub struct AnswerRotation {
-    enabled: AtomicBool,
+    /// What a freshly built handler starts with; the live switch is
+    /// `QueryPath::rotate`, so a reload moves it together with the chain.
+    enabled: bool,
     cursor: AtomicUsize,
 }
 
 impl AnswerRotation {
     pub fn new(enabled: bool) -> Self {
         Self {
-            enabled: AtomicBool::new(enabled),
+            enabled,
             cursor: AtomicUsize::new(0),
         }
     }
 
-    /// Turn rotation on or off without rebuilding the handler. The cursor is
-    /// kept, so switching off simply stops advancing it.
-    pub fn set_enabled(&self, enabled: bool) {
-        self.enabled.store(enabled, Ordering::Relaxed);
+    /// The flag this rotation was built with, consumed once when the handler is
+    /// assembled into its first `QueryPath`.
+    pub fn is_enabled(&self) -> bool {
+        self.enabled
     }
 
     /// Advances the cursor and rotates `records` so its first entry walks the
     /// instance list. Single-record and empty answers are left alone, which is
     /// the common case: one instance, or a negative answer.
+    ///
+    /// Whether to rotate at all is the caller's decision (it reads
+    /// `QueryPath::rotate`), which keeps one atomic read — the cursor — on the
+    /// path instead of two.
     pub fn apply(&self, records: &mut [Record]) {
         let len = records.len();
-        if !self.enabled.load(Ordering::Relaxed) || len < 2 {
+        if len < 2 {
             return;
         }
         let offset = self.cursor.fetch_add(1, Ordering::Relaxed) % len;
@@ -61,40 +67,60 @@ impl AnswerRotation {
     }
 }
 
+/// The halves of the configuration that answer queries: which chain resolves,
+/// and whether answers rotate.
+///
+/// These travel together because a reload must not be observable as two
+/// changes: swapping the chain and setting the rotation flag separately would
+/// let a query pair the new chain with the old flag and answer in an order
+/// neither the old nor the new config describes. The rotation *cursor* is
+/// deliberately not here: it is a counter, not a decision, and surviving a swap
+/// is the point.
+struct QueryPath {
+    chain: Arc<AuthorityChain>,
+    rotate: bool,
+}
+
+impl QueryPath {
+    fn new(chain: Arc<AuthorityChain>, rotate: bool) -> Self {
+        Self { chain, rotate }
+    }
+}
+
 /// Handle for swapping the reloadable parts of a running `DoggyDnsHandler`.
 ///
 /// The handler itself cannot be replaced: hickory's `Server` takes it by value
 /// at start-up and owns it for the process lifetime. Everything a config
-/// reload may change therefore lives behind an `Arc` the handler shares out
-/// here — the authority chain (swapped wholesale) and rotation (a flag flip on
-/// the existing cursor). Query-logging is the third reloadable knob and is not
-/// part of this handle: its `LoggingToggle` is created by whoever builds the
-/// middleware chain.
+/// reload may change therefore lives behind one `ArcSwap<QueryPath>` the handler
+/// shares out here, and the handle has one method: one store. Query-logging is
+/// the third reloadable knob and cannot join them: its `LoggingToggle` is read
+/// by the middleware chain, which owns the live XDP cache map and the metrics
+/// instruments and is never rebuilt.
 #[derive(Clone)]
 pub struct ReloadHandle {
-    authority_chain: Arc<ArcSwap<AuthorityChain>>,
-    rotation: Arc<AnswerRotation>,
+    query_path: Arc<ArcSwap<QueryPath>>,
 }
 
 impl ReloadHandle {
-    /// Point the running handler at a freshly built chain.
+    /// Install a rebuilt chain together with the rotation flag that goes with
+    /// it, in one store.
     ///
-    /// Queries already in flight hold the chain they started with, so a reload
-    /// never changes the rules under a request mid-resolution.
-    pub fn swap_authority_chain(&self, chain: AuthorityChain) {
-        self.authority_chain.store(Arc::new(chain));
-    }
-
-    pub fn set_rotation(&self, enabled: bool) {
-        self.rotation.set_enabled(enabled);
+    /// Queries already in flight hold the path they started with, so a reload
+    /// never changes the rules under a request mid-resolution, and no query can
+    /// observe a half-applied config. The rotation cursor lives on the handler
+    /// rather than in the swapped path, so replacing the path keeps the sequence
+    /// already handed out.
+    pub fn swap_query_path(&self, chain: AuthorityChain, rotate: bool) {
+        self.query_path
+            .store(Arc::new(QueryPath::new(Arc::new(chain), rotate)));
     }
 }
 
 pub struct DoggyDnsHandler {
     middlewares: Vec<Arc<dyn Middleware>>,
-    authority_chain: Arc<ArcSwap<AuthorityChain>>,
+    query_path: Arc<ArcSwap<QueryPath>>,
     xdp_enabled: bool,
-    rotation: Arc<AnswerRotation>,
+    rotation: AnswerRotation,
 }
 
 impl DoggyDnsHandler {
@@ -106,18 +132,20 @@ impl DoggyDnsHandler {
     ) -> Self {
         Self {
             middlewares,
-            authority_chain: Arc::new(ArcSwap::from(authority_chain)),
+            query_path: Arc::new(ArcSwap::from_pointee(QueryPath::new(
+                authority_chain,
+                rotation.is_enabled(),
+            ))),
             xdp_enabled,
-            rotation: Arc::new(rotation),
+            rotation,
         }
     }
 
-    /// The reloadable halves of this handler, shared with the config-reload
-    /// orchestrator before the handler is handed to the server.
+    /// The reloadable half of this handler, shared out before the handler is
+    /// handed to the server.
     pub fn reload_handle(&self) -> ReloadHandle {
         ReloadHandle {
-            authority_chain: Arc::clone(&self.authority_chain),
-            rotation: Arc::clone(&self.rotation),
+            query_path: Arc::clone(&self.query_path),
         }
     }
 
@@ -230,12 +258,13 @@ impl RequestHandler for DoggyDnsHandler {
             );
             span_for_body.record("client.port", request_info.src.port());
 
-            // Resolve through authority chain. `query.name()` is the `LowerName`
-            // the server already lowercased once at parse time, so it goes to the
-            // chain by reference; the log string is the only owned copy.
-            // `load_full` clones the current chain's `Arc` (one refcount bump, no
+            // Resolve through the live query path. `query.name()` is the
+            // `LowerName` the server already lowercased once at parse time, so
+            // it goes to the chain by reference; the log string is the only
+            // owned copy.
+            // `load_full` clones the current path's `Arc` (one refcount bump, no
             // allocation) so an in-flight query keeps the generation it started
-            // on even if a reload swaps the chain before it finishes.
+            // on even if a reload swaps the path before it finishes.
             let query_type = request_info.query.query_type();
             let query_display = request_info.query.name().to_string();
             let resolve_span = tracing::info_span!(
@@ -245,8 +274,9 @@ impl RequestHandler for DoggyDnsHandler {
                 "dns.authority" = tracing::field::Empty,
                 "dns.answers" = tracing::field::Empty,
             );
-            let chain = self.authority_chain.load_full();
-            let resolve_result = chain
+            let path = self.query_path.load_full();
+            let resolve_result = path
+                .chain
                 .resolve(request_info.query.name(), query_type, Some(&request_info))
                 .instrument(resolve_span.clone())
                 .await;
@@ -264,7 +294,9 @@ impl RequestHandler for DoggyDnsHandler {
                     let mut records = take_answer_records(lookup);
                     // Before anything reads the order: the response, the XDP
                     // cache payload, and the answer count all see one sequence.
-                    self.rotation.apply(&mut records);
+                    if path.rotate {
+                        self.rotation.apply(&mut records);
+                    }
                     let answer_count = records.len();
 
                     let mut metadata = Metadata::response_from_request(&request.metadata);

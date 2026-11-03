@@ -7,9 +7,12 @@
 //! rebuilds the authority chain and swaps it into the live handler.
 //!
 //! The chain rebuild reuses pooled Nacos connections (`doggy_dns_nacos::pool`)
-//! so a reload that only touches TTLs or plugins does not reconnect, and the
-//! swap is atomic: a query in flight keeps answering from the chain it started
-//! on.
+//! so a reload that only touches TTLs or plugins does not reconnect. The chain
+//! and the answer-rotation flag go over in one store, so no query can pair the
+//! new chain with the old flag; a query in flight keeps answering from the path
+//! it started on. The `middleware.logging` flag cannot join that store — it is
+//! read by the middleware chain, which is never rebuilt — so it is a separate
+//! atomic write, and a query may see a reload apply to one and not the other.
 //!
 //! A unit-testable seam exists here because the binary crate also has a lib
 //! target (`src/lib.rs`); the swap itself is exercised end-to-end by
@@ -164,8 +167,8 @@ impl ReloadOrchestrator {
         };
 
         let authorities = chain.len();
-        self.reload.swap_authority_chain(chain);
-        self.reload.set_rotation(candidate.server.rotate_answers);
+        self.reload
+            .swap_query_path(chain, candidate.server.rotate_answers);
         self.logging.set(candidate.middleware.logging);
 
         state.current = candidate;
