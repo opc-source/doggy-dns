@@ -17,6 +17,7 @@ use opentelemetry_appender_tracing::layer::OpenTelemetryTracingBridge;
 use opentelemetry_sdk::logs::SdkLoggerProvider;
 use opentelemetry_sdk::metrics::SdkMeterProvider;
 use opentelemetry_sdk::trace::SdkTracerProvider;
+use std::io::IsTerminal;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::task::JoinHandle;
@@ -185,12 +186,19 @@ fn install_subscriber(
 ) -> Result<()> {
     let stdout = !config.enabled || config.logs.stdout;
     let json = stdout && log_format.is_some_and(|format| format.eq_ignore_ascii_case("json"));
+    // Colour is a terminal affordance, not part of the record: always-on escape
+    // codes make a log file or a pipe unreadable to anything that later greps
+    // or parses it.
+    let ansi = stdout && std::io::stdout().is_terminal();
 
     if json {
-        let fmt_layer = fmt::layer().json().with_filter(env_filter(stdout));
+        let fmt_layer = fmt::layer()
+            .json()
+            .with_ansi(ansi)
+            .with_filter(env_filter(stdout));
         install_layers(fmt_layer, config, logger_provider, tracer_provider)
     } else {
-        let fmt_layer = fmt::layer().with_filter(env_filter(stdout));
+        let fmt_layer = fmt::layer().with_ansi(ansi).with_filter(env_filter(stdout));
         install_layers(fmt_layer, config, logger_provider, tracer_provider)
     }
 }
