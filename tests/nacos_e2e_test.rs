@@ -50,14 +50,28 @@ const GROUP: &str = "DEFAULT_GROUP";
 const NAMESPACE: &str = "public";
 const RECORD_TTL: u32 = 6;
 
-/// Nacos answers and pushes are network round trips; the first subscribe after
-/// a cold server start can take a few seconds, so wait generously rather than
-/// turning CI jitter into a failure.
+/// Nacos answers are network round trips; the first subscribe after a cold server
+/// start can take a few seconds, so wait generously rather than turning CI jitter
+/// into a failure.
 const DEADLINE: Duration = Duration::from_secs(60);
+/// A remote-config push has to survive the SDK's own polling rhythm before the
+/// process can even see it: nacos-sdk 0.8.3 sleeps 60 s between change notices
+/// (`src/config/worker.rs:406`), and the publish can land anywhere in a cycle.
+/// A deadline of one cycle therefore fails about as often as it passes, which is
+/// a coin flip rather than a test — this one covers two full cycles plus the
+/// debounce and rebuild.
+const PUSH_DEADLINE: Duration = Duration::from_secs(150);
+/// How long a SIGHUP reload is given to land. Deliberately far below
+/// [`PUSH_DEADLINE`]: the signal path is this process re-reading a file, so if it
+/// needed a minute it would be the Nacos poll delivering the change rather than
+/// the signal, which is the thing this case is meant to prove.
+const SIGHUP_DEADLINE: Duration = Duration::from_secs(10);
 const POLL: Duration = Duration::from_millis(300);
-/// How long a reload that must NOT happen is watched for: a reload lands within
-/// the 500 ms debounce window plus one chain build, so a few seconds of
-/// unchanged answers is evidence, not luck.
+/// How long a reload that must NOT happen is watched for, for a change the
+/// process learns about through a signal: a SIGHUP reload lands within the 500 ms
+/// debounce window plus one chain build, so a few seconds of unchanged answers is
+/// evidence, not luck. A pushed change is not covered by this — see
+/// [`PUSH_DEADLINE`] for the window that proves delivery.
 const STABLE_WINDOW: Duration = Duration::from_secs(3);
 
 fn nacos_addr() -> String {
@@ -251,15 +265,29 @@ impl DoggyDns {
         what: &str,
         predicate: impl Fn(&Message) -> bool,
     ) -> Message {
-        let deadline = tokio::time::Instant::now() + DEADLINE;
+        self.poll_until_within(qname, rtype, what, DEADLINE, predicate)
+            .await
+    }
+
+    /// `poll_until` with the wait chosen by the caller, for the effects whose
+    /// delivery is paced by something outside this process.
+    async fn poll_until_within(
+        &self,
+        qname: &str,
+        rtype: RecordType,
+        what: &str,
+        deadline: Duration,
+        predicate: impl Fn(&Message) -> bool,
+    ) -> Message {
+        let until = tokio::time::Instant::now() + deadline;
         loop {
             if let Some(message) = self.send(qname, rtype).await
                 && predicate(&message)
             {
                 return message;
             }
-            if tokio::time::Instant::now() >= deadline {
-                panic!("timed out after {DEADLINE:?} waiting for {what} on {qname}");
+            if tokio::time::Instant::now() >= until {
+                panic!("timed out after {deadline:?} waiting for {what} on {qname}");
             }
             tokio::time::sleep(POLL).await;
         }
@@ -289,10 +317,16 @@ impl DoggyDns {
     /// TTL is the cheapest proof that a rebuilt chain is answering: it comes
     /// from the plugin config, not from Nacos.
     async fn await_ttl(&self, qname: &str, want_ttl: u32) -> Message {
-        self.poll_until(
+        self.await_ttl_within(qname, want_ttl, DEADLINE).await
+    }
+
+    /// `await_ttl` with the wait chosen by the caller.
+    async fn await_ttl_within(&self, qname: &str, want_ttl: u32, deadline: Duration) -> Message {
+        self.poll_until_within(
             qname,
             RecordType::A,
             &format!("answers with ttl {want_ttl}"),
+            deadline,
             |message| {
                 message.metadata.response_code == ResponseCode::NoError
                     && !message.answers.is_empty()
@@ -562,7 +596,7 @@ async fn e2e_sighup_reload_applies_plugin_change() {
         .reload_via_sighup(&[("ttl", "11"), ("rotate_answers", "false")])
         .await;
 
-    let reloaded = server.await_ttl(&qname, 11).await;
+    let reloaded = server.await_ttl_within(&qname, 11, SIGHUP_DEADLINE).await;
     assert_eq!(
         answer_ips(&reloaded),
         instances,
@@ -647,7 +681,7 @@ async fn e2e_nacos_config_push_reloads() {
         ))
         .await;
 
-    let reloaded = server.await_ttl(&qname, 12).await;
+    let reloaded = server.await_ttl_within(&qname, 12, PUSH_DEADLINE).await;
     assert_eq!(
         answer_ips(&reloaded),
         instances,
@@ -657,6 +691,10 @@ async fn e2e_nacos_config_push_reloads() {
 
     // A push that moves the listener is refused; the file on disk is untouched
     // and the running path keeps its ttl.
+    //
+    // The window has to be the length of a push wait, not the 3 s used against
+    // SIGHUP: here the absence of a change is only evidence once the change
+    // notice has certainly arrived, and the SDK's 60 s rhythm decides when.
     config
         .publish(&NacosConfigClient::case_config_text(
             RELOAD_CONFIG_PATH,
@@ -665,7 +703,7 @@ async fn e2e_nacos_config_push_reloads() {
         ))
         .await;
     server
-        .assert_still_answering(&qname, &instances, 12, STABLE_WINDOW)
+        .assert_still_answering(&qname, &instances, 12, PUSH_DEADLINE)
         .await;
 
     config.remove().await;
