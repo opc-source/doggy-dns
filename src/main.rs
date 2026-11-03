@@ -129,8 +129,7 @@ async fn async_main(
     // Build authority chain from plugins. Nacos watchers are pooled by the
     // connection they opened so a reload can reuse them, and they feed the
     // control plane's live cache signals.
-    let mut pool: Vec<PooledWatcher> = Vec::new();
-    let authority_chain = build_chain(&config, &mut pool)
+    let (authority_chain, pool) = build_chain(&config, &[])
         .await
         .context("failed to build authority chain")?;
 
@@ -153,13 +152,7 @@ async fn async_main(
     // Every reload trigger (SIGHUP, remote pushes) funnels through one channel
     // into one task, so two sources cannot rebuild the chain concurrently.
     let (reload_tx, reload_rx) = mpsc::unbounded_channel::<ReloadRequest>();
-    let orchestrator = ReloadOrchestrator::new(
-        config_path,
-        config.clone(),
-        std::mem::take(&mut pool),
-        reload,
-        logging,
-    );
+    let orchestrator = ReloadOrchestrator::new(config_path, config.clone(), pool, reload, logging);
     tokio::spawn(run_reload_loop(orchestrator, reload_rx));
 
     // The kernel answers a cache hit without asking userspace again, so the

@@ -157,9 +157,9 @@ fn plans_address_the_pool_as_it_was_on_entry() {
 }
 
 #[test]
-fn a_watcher_no_target_asks_for_is_left_in_place() {
-    // One plan per target, always: an unasked-for watcher cannot be closed (the
-    // SDK exposes no shutdown), so it simply stays pooled until a restart.
+fn plans_do_not_mention_a_watcher_no_target_asks_for() {
+    // One plan per target, always: an unasked-for watcher is absent from the
+    // plan, and the reload retires it (unsubscribes) once the new chain is live.
     let targets = vec![target("a:8848", "a.local")];
     let pool = vec![
         identity("a:8848", "public", "DEFAULT_GROUP"),

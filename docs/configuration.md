@@ -221,15 +221,17 @@ chain, which is never rebuilt — so it is a separate write, and a query that
 straddles a reload can log under the old setting while answering from the new
 chain. Reload requests are coalesced over a 500 ms window and the newest wins,
 which folds a burst of `SIGHUP`s — or the several callbacks Nacos delivers for
-one multi-change edit — into a single rebuild.
+one multi-change edit — into a single rebuild. A candidate identical to the
+config already in force is skipped before anything is rebuilt.
 
 **Nacos connections survive a reload.** A watcher is keyed by its connection
 identity (`server_addr`, `namespace`, `group`), so re-publishing a zone under a
 new name or changing a TTL reuses the existing gRPC connection and the instances
 already pushed into its cache. Only a config that changes one of those three
-fields opens a new connection. A watcher whose server no plugin asks for is kept
-rather than released — the Nacos SDK exposes no way to close a naming connection,
-so orphans are dropped by a restart.
+fields opens a new connection. A watcher no plugin asks for any more is retired:
+once the new chain is live its push subscriptions are removed, so it stops
+consuming instances into a cache nothing reads. The naming connection itself
+stays open until the process exits — the SDK exposes no way to close one.
 
 **What a reload cannot pick up.** A reload does not re-subscribe an existing
 watcher, so services registered in Nacos after start-up only reach a *pooled*

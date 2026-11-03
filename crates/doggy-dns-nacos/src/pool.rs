@@ -80,6 +80,11 @@ pub enum ReusePlan {
 }
 
 /// A watcher kept alive across reloads, with the target it currently serves.
+///
+/// A clone is a second handle on the same connection and the same cache, not a
+/// second watcher: a reload stages its pool from clones and commits it only
+/// once the chain is complete, so a failed rebuild leaves the live pool alone.
+#[derive(Clone)]
 pub struct PooledWatcher {
     pub identity: NacosIdentity,
     /// Zone the watcher's cache is being published under right now. Only used
@@ -119,6 +124,20 @@ impl PooledWatcher {
     /// See `NacosServiceWatcher::last_push`.
     pub fn last_push(&self) -> Arc<AtomicI64> {
         self.watcher.last_push()
+    }
+
+    /// Whether two handles serve the same connection.
+    pub fn same_watcher(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.watcher, &other.watcher)
+    }
+
+    /// Stop the push subscriptions of a watcher no reloaded chain asks for.
+    ///
+    /// The connection itself cannot be closed through the SDK, so retiring a
+    /// watcher means unsubscribing it: without that it keeps receiving pushes
+    /// and filling a cache no authority reads.
+    pub async fn retire(&self) {
+        self.watcher.unsubscribe_all().await;
     }
 }
 

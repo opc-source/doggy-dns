@@ -110,6 +110,10 @@ allow-list live in
   racing a push cannot build two chains at once; each reload applies against the
   config the previous one installed. Requests are coalesced over a 500 ms window
   and the newest wins, because it carries the newest intent.
+- **Idempotent.** A candidate identical to the config in force is skipped before
+  anything is rebuilt. The pool is staged from clones and committed only after a
+  successful build, and a Nacos watcher the new chain does not use is retired
+  (unsubscribed) once that chain is live.
 - **All or nothing.** A conflict rejects the candidate whole and leaves the
   running path untouched; an unreadable, invalid or unbuildable candidate fails
   the same way. The generation counter only moves on an applied reload, so it

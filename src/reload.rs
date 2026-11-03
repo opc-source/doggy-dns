@@ -73,6 +73,10 @@ pub enum ReloadOutcome {
         /// Config paths that differ, e.g. `server.port`.
         conflicts: Vec<String>,
     },
+    /// The candidate is identical to the config already in force; nothing was
+    /// rebuilt. A multi-line edit delivered as several pushes often ends with
+    /// one of these once the debounce window has already applied it.
+    Skipped,
     /// The candidate was unreadable, unparseable, invalid, or the new chain
     /// could not be built; the previous path stays live.
     Failed { error: String },
@@ -156,8 +160,17 @@ impl ReloadOrchestrator {
             return ReloadOutcome::Rejected { conflicts };
         }
 
-        let chain = match build_chain(&candidate, &mut state.pool).await {
-            Ok(chain) => chain,
+        if candidate == state.current {
+            tracing::info!(
+                source,
+                generation = state.generation,
+                "config reload skipped: candidate identical to the config in force"
+            );
+            return ReloadOutcome::Skipped;
+        }
+
+        let (chain, pool) = match build_chain(&candidate, &state.pool).await {
+            Ok(built) => built,
             Err(error) => {
                 tracing::error!(source, generation = state.generation, %error, "config reload failed to build authority chain");
                 return ReloadOutcome::Failed {
@@ -165,6 +178,12 @@ impl ReloadOrchestrator {
                 };
             }
         };
+        let retired: Vec<PooledWatcher> = state
+            .pool
+            .iter()
+            .filter(|old| !pool.iter().any(|new| new.same_watcher(old)))
+            .cloned()
+            .collect();
 
         let authorities = chain.len();
         self.reload
@@ -172,17 +191,30 @@ impl ReloadOrchestrator {
         self.logging.set(candidate.middleware.logging);
 
         state.current = candidate;
+        state.pool = pool;
         state.generation += 1;
+        let generation = state.generation;
+        let rotate_answers = state.current.server.rotate_answers;
+        let logging = state.current.middleware.logging;
+        drop(state);
+
+        // The new chain is live; a watcher it does not use must stop filling a
+        // cache nothing reads. This cannot fail the reload.
+        for watcher in &retired {
+            watcher.retire().await;
+        }
+
         tracing::info!(
             source,
-            generation = state.generation,
+            generation,
             authorities,
-            rotate_answers = state.current.server.rotate_answers,
-            logging = state.current.middleware.logging,
+            rotate_answers,
+            logging,
+            retired = retired.len(),
             "config reload applied"
         );
         ReloadOutcome::Applied {
-            generation: state.generation,
+            generation,
             authorities,
         }
     }
@@ -201,21 +233,24 @@ fn read_candidate(path: &str, request: ReloadRequest) -> Result<DoggyDnsConfig> 
 
 /// Build the authority chain from `[[plugins]]`, reusing pooled watchers.
 ///
-/// Indices in the reuse plan address the pool as it is on entry; the loop only
-/// ever appends, so an index stays valid for the whole build. A watcher whose
-/// identity no plugin asks for stays pooled — the Nacos SDK exposes no way to
-/// close a naming connection, so releasing one would mean a restart.
+/// The staged pool is returned instead of being written back into `previous`:
+/// every fallible step happens before the caller commits, so a failed rebuild
+/// leaves the live pool and every watcher's zone exactly as they were. Watchers
+/// opened on the way are unsubscribed if a later step fails. A watcher the new
+/// chain does not use is absent from the returned pool; the caller retires it
+/// after committing, so a reload never leaves a subscription behind.
 pub async fn build_chain(
     config: &DoggyDnsConfig,
-    pool: &mut Vec<PooledWatcher>,
-) -> Result<AuthorityChain> {
-    let mut handlers: Vec<(String, Arc<dyn ZoneHandler>)> = Vec::new();
-
+    previous: &[PooledWatcher],
+) -> Result<(AuthorityChain, Vec<PooledWatcher>)> {
     if config.plugins.is_empty() {
         tracing::info!("no plugins configured, defaulting to forward");
         let forward = default_forward().await?;
-        handlers.push(("forward[default]".to_string(), Arc::new(forward)));
-        return Ok(AuthorityChain::new(handlers));
+        let handlers: Vec<(String, Arc<dyn ZoneHandler>)> = vec![(
+            "forward[default]".to_string(),
+            Arc::new(forward) as Arc<dyn ZoneHandler>,
+        )];
+        return Ok((AuthorityChain::new(handlers), Vec::new()));
     }
 
     let targets: Vec<NacosTarget> = config
@@ -224,12 +259,64 @@ pub async fn build_chain(
         .filter(|plugin| plugin.enabled && plugin.kind == PluginKind::Nacos)
         .map(NacosTarget::from_plugin)
         .collect();
-    let pooled_identities: Vec<_> = pool
+    let pooled_identities: Vec<_> = previous
         .iter()
         .map(|watcher| watcher.identity.clone())
         .collect();
     let plans = plan_reuse(&targets, &pooled_identities);
 
+    let mut staged: Vec<PooledWatcher> = Vec::with_capacity(targets.len());
+    let mut opened: Vec<usize> = Vec::new();
+    for (index, target) in targets.iter().enumerate() {
+        match plans[index] {
+            ReusePlan::Existing(pool_index) => {
+                let mut watcher = previous
+                    .get(pool_index)
+                    .with_context(|| format!("pooled watcher index {pool_index} vanished"))?
+                    .clone();
+                watcher.zone.clone_from(&target.zone);
+                staged.push(watcher);
+            }
+            ReusePlan::Open => match PooledWatcher::open(target).await {
+                Ok(watcher) => {
+                    opened.push(staged.len());
+                    staged.push(watcher);
+                }
+                Err(error) => {
+                    retire_opened(&staged, &opened).await;
+                    return Err(error);
+                }
+            },
+        }
+    }
+
+    let handlers = match assemble_handlers(config, &targets, &plans, &staged).await {
+        Ok(handlers) => handlers,
+        Err(error) => {
+            retire_opened(&staged, &opened).await;
+            return Err(error);
+        }
+    };
+
+    tracing::info!(chain_length = handlers.len(), "authority chain built");
+    Ok((AuthorityChain::new(handlers), staged))
+}
+
+/// Undo the connections a failed rebuild opened but never committed.
+async fn retire_opened(staged: &[PooledWatcher], opened: &[usize]) {
+    for &index in opened {
+        staged[index].retire().await;
+    }
+}
+
+/// Turn the staged watchers and the rest of the plugin list into handlers.
+async fn assemble_handlers(
+    config: &DoggyDnsConfig,
+    targets: &[NacosTarget],
+    plans: &[ReusePlan],
+    staged: &[PooledWatcher],
+) -> Result<Vec<(String, Arc<dyn ZoneHandler>)>> {
+    let mut handlers: Vec<(String, Arc<dyn ZoneHandler>)> = Vec::new();
     let mut target_index = 0;
     for (index, plugin) in config.plugins.iter().enumerate() {
         if !plugin.enabled {
@@ -241,21 +328,10 @@ pub async fn build_chain(
             PluginKind::Nacos => {
                 let target = &targets[target_index];
                 let plan = plans[target_index];
+                let watcher = staged
+                    .get(target_index)
+                    .expect("every nacos target is staged before handlers are built");
                 target_index += 1;
-
-                let watcher: &PooledWatcher = match plan {
-                    ReusePlan::Existing(pool_index) => {
-                        let entry = pool.get_mut(pool_index).with_context(|| {
-                            format!("pooled watcher index {pool_index} vanished")
-                        })?;
-                        entry.zone.clone_from(&target.zone);
-                        &*entry
-                    }
-                    ReusePlan::Open => {
-                        pool.push(PooledWatcher::open(target).await?);
-                        pool.last().expect("just pooled")
-                    }
-                };
 
                 let name = format!("nacos[{}]", target.zone);
                 let authority = NacosAuthority::new(watcher.cache(), &target.zone, target.ttl);
@@ -299,8 +375,7 @@ pub async fn build_chain(
         }
     }
 
-    tracing::info!(chain_length = handlers.len(), "authority chain built");
-    Ok(AuthorityChain::new(handlers))
+    Ok(handlers)
 }
 
 async fn default_forward() -> Result<ForwardAuthority> {

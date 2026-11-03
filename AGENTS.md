@@ -142,14 +142,13 @@ When adding a reloadable setting, follow that shape: put it behind the shared
 `doggy_dns_basic::reload::reload_conflicts` is the allow-list: `[[plugins]]`,
 `server.rotate_answers` and `middleware.logging` may differ, everything else
 refuses the **whole** reload (a half-applied config is the failure mode this
-prevents). The rule is an allow-list on purpose — when a section becomes
-reloadable, add it to the list *and* move its swap point behind the handle.
-The list is written field by field and
-`crates/doggy-dns-basic/tests/reload_compat_test.rs` has one case per refused
-path, so **a field nobody added to either is reloadable by construction and is
-then silently ignored**: the reload is accepted, the config in memory records
-the new value, and nothing on the query path reads the difference. A new config
-field therefore needs a `FORBIDDEN` case there or a swap point, deliberately.
+prevents). The rule is enforced structurally: both configs are serialised and
+walked as TOML against `HOT_PATHS`, so a field nobody listed is restart-required
+by construction rather than silently reloadable. When a section becomes
+reloadable, add its path to `HOT_PATHS` *and* move its swap point behind the
+handle. Because the comparison is on serialised values, every config type must
+derive `Serialize` and must not `skip_serializing_if` a configurable field:
+`reload_compat_test.rs` proves the round trip and walks every leaf of the config.
 
 Reloads are serialised (one `tokio::sync::Mutex` covers an apply) and coalesced
 (500 ms window, newest request wins). Failure and rejection leave everything
@@ -161,9 +160,13 @@ keyed by connection identity (`server_addr`, `namespace`, `group`) and *not* by
 zone or TTL, so republishing a zone keeps the gRPC connection and its warm
 cache. `plan_reuse` matching consumes, so two zones on one server take two
 watchers. A reused watcher is deliberately not re-subscribed (the SDK's listener
-set would grow per reload) and a watcher no plugin wants is not released (the
-SDK has no shutdown), which is why `subscribe_all` semantics and the control
-plane's per-zone live signals stay start-up facts until a restart.
+set would grow per reload). A watcher no plugin wants any more is retired once
+the new chain is live: `unsubscribe_all` removes its subscriptions so it stops
+filling a cache nothing reads, though the connection itself cannot be closed
+through the SDK. `build_chain` stages the next pool from clones and commits only
+after every fallible step, so a failed rebuild leaves the live pool and every
+watcher zone untouched. `subscribe_all` semantics and the control plane's
+per-zone live signals stay start-up facts until a restart.
 
 ### Server (`core/server.rs`)
 
@@ -187,7 +190,7 @@ The tokio runtime is built manually in `main()` with configurable `worker_thread
 
 ### Immutability Pattern
 
-Cache updates replace the entire Vec for a key (never mutate in place). Config structs are `Clone` and `PartialEq` — the reload compat check compares the running config with a candidate field by field, so a new config struct or field has to derive `PartialEq` (add it to the derive list; a plain `PartialEq` on a secret-carrying struct is fine, its redaction lives in `Debug`). Use `Arc<DashMap>` for concurrent access.
+Cache updates replace the entire Vec for a key (never mutate in place). Config structs are `Clone`, `PartialEq` and `Serialize` — the reload compat check compares the serialised documents, so a new config struct or field has to derive all three and must not skip serialising a configurable field (a plain `PartialEq` on a secret-carrying struct is fine, its redaction lives in `Debug`). Use `Arc<DashMap>` for concurrent access.
 
 ## Configuration
 
@@ -203,8 +206,8 @@ TOML config at `config/doggy-dns.toml`. Key structs in `crates/doggy-dns-basic` 
 - Forward/native tests make real network calls
 - Nacos tests use mock DashMap caches (no Nacos server needed)
 - Hot reload is tested per layer, so a failure names the layer it broke: the
-  allow-list (`crates/doggy-dns-basic/tests/reload_compat_test.rs`, one case per
-  refused config path), the swap (`crates/doggy-dns-core/tests/handler_reload_test.rs`,
+  allow-list (`crates/doggy-dns-basic/tests/reload_compat_test.rs`, a structural
+  walk over every config leaf), the swap (`crates/doggy-dns-core/tests/handler_reload_test.rs`,
   against a handler that is already answering), the reuse decision
   (`crates/doggy-dns-nacos/tests/pool_test.rs`, pure), the orchestrator's
   decisions (`tests/reload_orchestrator_test.rs`, forward-only chains so no

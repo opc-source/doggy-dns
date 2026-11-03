@@ -130,6 +130,11 @@ pub struct NacosServiceWatcher {
     namespace: String,
     group: String,
     last_push: Arc<AtomicI64>,
+    /// Service name -> the exact `Arc` handed to the SDK at subscribe time.
+    /// [`Self::unsubscribe_all`] has to present that same `Arc`, because the SDK
+    /// matches a listener by pointer rather than by content, so a rebuilt
+    /// equivalent would remove nothing.
+    listeners: std::sync::Mutex<Vec<(String, Arc<InstanceChangeListener>)>>,
 }
 
 impl NacosServiceWatcher {
@@ -147,29 +152,102 @@ impl NacosServiceWatcher {
             namespace: namespace.to_string(),
             group: group.to_string(),
             last_push: Arc::new(AtomicI64::new(0)),
+            listeners: std::sync::Mutex::new(Vec::new()),
         })
     }
 
     /// Subscribe to a specific service for push updates.
     pub async fn subscribe(&self, service_name: &str) -> anyhow::Result<()> {
-        let listener = InstanceChangeListener {
+        let listener = Arc::new(InstanceChangeListener {
             cache: Arc::clone(&self.cache),
             group: self.group.clone(),
             namespace: self.namespace.clone(),
             last_push: Arc::clone(&self.last_push),
-        };
+        });
 
-        self.naming_service
+        self.remember(service_name, Arc::clone(&listener));
+        let registered = self
+            .naming_service
             .subscribe(
                 service_name.to_string(),
                 Some(self.group.clone()),
                 vec![],
-                Arc::new(listener),
+                listener,
             )
-            .await?;
+            .await;
+        match registered {
+            Ok(()) => {
+                tracing::info!("subscribed to nacos service: {}", service_name);
+                Ok(())
+            }
+            Err(error) => {
+                // Nothing was registered, so there is nothing to unsubscribe.
+                self.forget(service_name);
+                Err(error.into())
+            }
+        }
+    }
 
-        tracing::info!("subscribed to nacos service: {}", service_name);
-        Ok(())
+    /// Register every subscription this watcher holds with the SDK, so a later
+    /// retire can undo them.
+    fn remember(&self, service_name: &str, listener: Arc<InstanceChangeListener>) {
+        let mut listeners = self.lock_listeners();
+        listeners.retain(|(name, _)| name != service_name);
+        listeners.push((service_name.to_string(), listener));
+    }
+
+    /// Forget the subscription whose registration failed.
+    fn forget(&self, service_name: &str) {
+        let mut listeners = self.lock_listeners();
+        listeners.retain(|(name, _)| name != service_name);
+    }
+
+    /// A poisoned lock means a subscribe panicked while holding it; the list is
+    /// only bookkeeping for teardown, so its content is kept rather than lost.
+    fn lock_listeners(
+        &self,
+    ) -> std::sync::MutexGuard<'_, Vec<(String, Arc<InstanceChangeListener>)>> {
+        self.listeners
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// Drop every push subscription this watcher registered.
+    ///
+    /// This does not close the naming connection — the SDK exposes no way to
+    /// close one, which is why a watcher whose identity a reload no longer asks
+    /// for is retired rather than freed. Unsubscribing is still what makes
+    /// retirement mean something: without it a retired watcher keeps receiving
+    /// pushes and filling a cache no authority reads.
+    ///
+    /// Failures are logged and skipped: this runs while a reload is being
+    /// applied, and a server that will not acknowledge an unsubscribe is not a
+    /// reason to abandon the reload.
+    pub async fn unsubscribe_all(&self) {
+        let pending = {
+            let mut listeners = self.lock_listeners();
+            std::mem::take(&mut *listeners)
+        };
+        let count = pending.len();
+        for (service_name, listener) in pending {
+            if let Err(error) = self
+                .naming_service
+                .unsubscribe(
+                    service_name.clone(),
+                    Some(self.group.clone()),
+                    vec![],
+                    listener,
+                )
+                .await
+            {
+                tracing::warn!(
+                    service = %service_name,
+                    %error,
+                    "failed to unsubscribe from a nacos service"
+                );
+            }
+        }
+        tracing::info!(services = count, "unsubscribed from nacos services");
     }
 
     /// Get cached instances for a service.

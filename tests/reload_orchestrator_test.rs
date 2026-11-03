@@ -15,7 +15,6 @@ use doggy_dns::reload::{
 use doggy_dns_core::config::parse_config;
 use doggy_dns_core::handler::{AnswerRotation, DoggyDnsHandler};
 use doggy_dns_core::middleware::logging::LoggingToggle;
-use doggy_dns_nacos::pool::PooledWatcher;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -65,8 +64,7 @@ fn temp_path(label: &str) -> PathBuf {
 /// orchestrator that may replace what it answers from.
 async fn setup(label: &str, content: &str) -> (ReloadOrchestrator, LoggingToggle, PathBuf) {
     let config = parse_config(content).expect("the test config must be valid");
-    let mut pool: Vec<PooledWatcher> = Vec::new();
-    let chain = build_chain(&config, &mut pool)
+    let (chain, pool) = build_chain(&config, &[])
         .await
         .expect("the test chain must build");
     let handler = DoggyDnsHandler::new(
@@ -143,6 +141,24 @@ async fn a_pushed_config_becomes_authoritative_without_touching_the_file() {
 }
 
 #[tokio::test]
+async fn an_identical_candidate_is_skipped_without_rebuilding() {
+    // A multi-line edit arrives as one push per changed line; once the first is
+    // applied, the rest carry a config that is already in force. Rebuilding the
+    // chain for it would be pure churn.
+    let (orchestrator, toggle, _path) = setup("identical", &config(true, ONE_PLUGIN)).await;
+
+    let outcome = orchestrator
+        .apply(ReloadRequest::Nacos {
+            content: config(true, ONE_PLUGIN),
+        })
+        .await;
+
+    assert_eq!(outcome, ReloadOutcome::Skipped);
+    assert_eq!(orchestrator.generation().await, 0);
+    assert!(toggle.is_enabled());
+}
+
+#[tokio::test]
 async fn a_forbidden_change_is_rejected_and_nothing_moves() {
     let (orchestrator, toggle, path) = setup("reject", &config(true, ONE_PLUGIN)).await;
 
@@ -213,6 +229,7 @@ async fn a_missing_config_file_fails_without_killing_the_query_path() {
 async fn generations_count_applied_reloads_only() {
     let (orchestrator, _toggle, path) = setup("generation", &config(true, ONE_PLUGIN)).await;
 
+    std::fs::write(&path, config(false, ONE_PLUGIN)).expect("write");
     assert!(matches!(
         orchestrator.apply(ReloadRequest::Sighup).await,
         ReloadOutcome::Applied { generation: 1, .. }
@@ -317,7 +334,7 @@ async fn concurrent_requests_are_applied_one_at_a_time() {
         tokio::spawn(async move {
             orchestrator
                 .apply(ReloadRequest::Nacos {
-                    content: config(true, ONE_PLUGIN),
+                    content: config(false, TWO_PLUGINS),
                 })
                 .await
         })
@@ -346,6 +363,6 @@ async fn concurrent_requests_are_applied_one_at_a_time() {
 fn outcome_generation(outcome: &ReloadOutcome) -> u64 {
     match outcome {
         ReloadOutcome::Applied { generation, .. } => *generation,
-        ReloadOutcome::Rejected { .. } | ReloadOutcome::Failed { .. } => 0,
+        ReloadOutcome::Rejected { .. } | ReloadOutcome::Skipped | ReloadOutcome::Failed { .. } => 0,
     }
 }
