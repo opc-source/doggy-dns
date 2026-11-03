@@ -166,7 +166,8 @@ Points worth knowing before reading a failure:
 | `crates/doggy-dns-basic/tests/reload_compat_test.rs` | 10 | The reload allow-list: reloadable changes accepted, every config leaf outside them refused, the serialised config round-trips and the structural walk reports each changed path |
 | `crates/doggy-dns-core/tests/handler_test.rs` | 17 | Handler pipeline: NoError, NXDomain, NODATA, ServFail, Refused, middleware callbacks, EDNS cache admission, AA/RA flags, SOA on negatives |
 | `crates/doggy-dns-core/tests/handler_reload_test.rs` | 4 | A reload reaching the live handler: swapped chain answers the next query, TTL moves, rotation toggles, concurrent queries never mix two generations |
-| `crates/doggy-dns-core/tests/middleware_test.rs` | 3 | Logging middleware: `before_request` continues, `after_request` completes, the shared toggle suppresses and restores the lines |
+| `crates/doggy-dns-core/tests/middleware_test.rs` | 2 | Logging middleware: `before_request` continues, `after_request` completes |
+| `crates/doggy-dns-core/tests/logging_toggle_test.rs` | 1 | The shared toggle suppresses and restores log lines; its own binary so tracing's process-wide callsite cache cannot be poisoned by a no-subscriber test |
 | `crates/doggy-dns-core/tests/server_test.rs` | 2 | UDP/TCP listener binding for bare and bracketed IPv6 addresses |
 | `crates/doggy-dns-core/tests/wire_golden_test.rs` | 5 | Golden wire bytes for the Nacos paths: hit (name lowercased), NXDOMAIN, NODATA, apex SOA |
 | `crates/doggy-dns-nacos/tests/alloc_guard_test.rs` | 1 | Allocation budget for `NacosAuthority::lookup`: 6 on a hit, 2 on an in-zone miss |
