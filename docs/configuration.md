@@ -86,7 +86,8 @@ cache_size = 1024
 min_ttl = 30
 max_ttl = 600
 
-# Optional: hot-reload config from Nacos config service
+# Optional: remote config source; a push here triggers a hot reload.
+# Which settings a reload may change and which it refuses: see "Hot reload".
 [remote_config]
 enabled = false
 server_addr = "127.0.0.1:8848"
@@ -180,6 +181,64 @@ apex `SOA`. With the XDP fast path enabled the kernel answers a cache hit
 without consulting userspace again, so a hit replays the order that was captured
 when the entry was written until its TTL expires; startup logs one `warn` when
 both settings are on. See [xdp.md](xdp.md#limitations--notes).
+
+## Hot reload
+
+Two triggers ask a running process to rebuild its query path: `SIGHUP`, which
+re-reads the config file the process was started with, and — when
+`[remote_config] enabled = true` — a push from the Nacos config service. Both end
+in the same place: parse, expand `${NAME}`, validate, compare, rebuild, swap. A
+pushed config therefore has to satisfy every rule in [Validation](#validation),
+and an invalid or unparseable one is dropped with the previous path still
+serving.
+
+What a reload may change is an allow-list, because everything else was consumed
+before any query could be answered: the sockets and TLS listeners are bound once,
+the tokio runtime (worker count, CPU pinning) exists before the config is read a
+second time, the tracing subscriber is installed once for the process, the XDP
+program attaches at start-up, and `[remote_config]` is the source of the change
+rather than something it can carry.
+
+| Applied in place | Requires a restart |
+| --- | --- |
+| `[[plugins]]` — add, drop, disable, reorder, `dns_zone`, `ttl`, `upstream`, cache sizes and TTL bounds | `server.listen_addr`, `server.port`, `server.tcp_timeout`, `server.shutdown_timeout`, `server.worker_threads`, `server.reuseport_listen_num`, `server.cpu_affinity`, `[server.tls]`, `[server.https]` |
+| `server.rotate_answers` | `middleware.log_format` |
+| `middleware.logging` | `[remote_config]`, `[observability]`, `[xdp]`, `[control]` |
+
+A reload is all-or-nothing. If a candidate changes anything in the right-hand
+column, the whole thing is refused — the reloadable half is not applied either —
+and the log names every offending path
+(`config reload rejected: restart required; conflicts=server.port`) so the
+operator sees the line they actually changed. Half-applied configs are the
+failure mode this rule exists to prevent: answers that quietly disagree with the
+config file on disk.
+
+The swap itself is atomic. A query in flight finishes on the chain it started
+with, so a reload never changes the rules under a request mid-resolution. Reload
+requests are coalesced over a 500 ms window and the newest wins, which folds a
+burst of `SIGHUP`s — or the several callbacks Nacos delivers for one multi-change
+edit — into a single rebuild.
+
+**Nacos connections survive a reload.** A watcher is keyed by its connection
+identity (`server_addr`, `namespace`, `group`), so re-publishing a zone under a
+new name or changing a TTL reuses the existing gRPC connection and the instances
+already pushed into its cache. Only a config that changes one of those three
+fields opens a new connection. A watcher whose server no plugin asks for is kept
+rather than released — the Nacos SDK exposes no way to close a naming connection,
+so orphans are dropped by a restart.
+
+**What a reload cannot pick up.** A reload does not re-subscribe an existing
+watcher, so services registered in Nacos after start-up only reach a *pooled*
+connection's cache if the server pushed them; a fresh subscription needs a restart
+(or a change to a connection field, which opens a new watcher). Control-plane
+live signals (`/readyz`) and the MCP plugin list are built at start-up too:
+per-zone signals for a zone added by a reload, and any `[control]` change, wait
+for the restart.
+
+**A push is in-memory only.** The pushed content becomes what the process
+answers from, but the local file keeps its previous content and is what the next
+start reads. Treat the remote config service as the source of truth once it is
+enabled, or write the pushed content back to the file before restarting.
 
 ## Endpoint formats
 

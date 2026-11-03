@@ -1,0 +1,34 @@
+# Configuration for the hot-reload cases of tests/nacos_e2e_test.rs (a live
+# Nacos server is required).
+#
+# Same single nacos plugin as config/doggy-dns-nacos-e2e.toml, plus the
+# remote-config subscription those cases push a new config through. The data_id
+# belongs to the reload cases alone, so a leftover publish from a previous run
+# cannot reach any other test.
+#
+# The local file is what the process boots from; a push replaces the query path
+# without touching it.
+
+[server]
+listen_addr = "127.0.0.1"
+port = 15417
+worker_threads = 1
+
+[middleware]
+logging = false
+
+[[plugins]]
+kind = "nacos"
+enabled = true
+server_addr = "${DOGGY_NACOS_ADDR}"
+namespace = "public"
+group = "DEFAULT_GROUP"
+dns_zone = "nacos.e2e.test"
+ttl = 6
+
+[remote_config]
+enabled = true
+server_addr = "${DOGGY_NACOS_ADDR}"
+namespace = "public"
+group = "DOGGY_DNS"
+data_id = "doggy-dns-e2e-reload.toml"

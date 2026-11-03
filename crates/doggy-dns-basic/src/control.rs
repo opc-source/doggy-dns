@@ -4,7 +4,7 @@ use serde::Deserialize;
 /// introspection protocol and plain health endpoints for probes.
 /// The centralized admin UI lives in the separate doggy-dns-console project,
 /// which consumes these endpoints.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct ControlConfig {
     #[serde(default)]
     pub enabled: bool,

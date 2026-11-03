@@ -11,7 +11,7 @@ pub enum PluginKind {
 /// Flat plugin config. Each field is optional; only the fields relevant
 /// to the plugin's `kind` are used. Unknown fields for a given kind
 /// are simply ignored at runtime.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct PluginConfig {
     pub kind: PluginKind,
     #[serde(default = "default_enabled")]

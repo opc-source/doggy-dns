@@ -12,6 +12,7 @@ pub mod middleware;
 pub mod net;
 pub mod observability;
 pub mod plugin;
+pub mod reload;
 pub mod remote;
 pub mod server;
 pub mod time;
@@ -21,19 +22,20 @@ pub mod xdp;
 use serde::Deserialize;
 
 pub use control::{CONTROL_ENDPOINTS, ControlConfig};
-pub use load::load_config;
+pub use load::{load_config, parse_config};
 pub use middleware::MiddlewareConfig;
 pub use observability::{
     BasicAuthConfig, LogsConfig, MetricsConfig, MetricsTemporality, ObservabilityBackend,
     ObservabilityConfig, ObservabilityProtocol, ProfilesConfig, TracesConfig,
 };
 pub use plugin::{PluginConfig, PluginKind};
+pub use reload::{is_reloadable, reload_conflicts};
 pub use remote::RemoteConfig;
 pub use server::{HttpsConfig, ServerConfig, TlsConfig};
 pub use validate::validate_config;
 pub use xdp::XdpConfig;
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct DoggyDnsConfig {
     pub server: ServerConfig,
     #[serde(default)]

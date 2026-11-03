@@ -25,9 +25,9 @@ struct NamedHandler {
     /// Lazily filled rather than fetched in `new`, because `new` is synchronous
     /// and has 38 call sites. Two concurrent first-timers may both fetch; the
     /// loser's `set` is ignored, which is benign and keeps this off the
-    /// async-lock path. The value goes stale only if plugin TTLs ever become
-    /// hot-reloadable - the chain is rebuilt with the config in that case, as
-    /// it already is for `[[plugins]]` changes.
+    /// async-lock path. A config reload builds a brand new chain, so this
+    /// cache is generation-local: the reloaded authority's first negative
+    /// answer fetches a fresh SOA and cannot see the previous chain's.
     ///
     /// The first negative answer's `RequestInfo` is the one the fetch sees,
     /// and every later query reuses that record. That is sound only while
@@ -126,6 +126,11 @@ impl AuthorityChain {
             authoritative: false,
             soa: None,
         }
+    }
+
+    /// Number of authorities in the chain.
+    pub fn len(&self) -> usize {
+        self.handlers.len()
     }
 
     pub fn is_empty(&self) -> bool {

@@ -80,6 +80,49 @@ through on lookup failure so a later `forward` plugin can still answer.
   RNAME = `hostmaster.<zone>`, minimum TTL = the plugin `ttl`); the same record
   is attached to `NXDOMAIN`/`NODATA` responses
 
+## Config hot reload
+
+hickory's `Server` takes the `RequestHandler` by value, so the handler a running
+process serves from can never be replaced — only what it reads through.
+`DoggyDnsHandler` therefore keeps the authority chain in an `ArcSwap` and hands
+out a `ReloadHandle` (that chain plus the rotation cursor) before the server is
+built, and the two remaining reloadable settings are flags rather than structures:
+`server.rotate_answers` gates the shared `AnswerRotation`, and `middleware.logging`
+gates a `LoggingToggle` inside a logging middleware that is installed
+unconditionally — the middleware chain owns the live XDP cache map and the OTel
+instruments, so rebuilding it on a reload would rebuild the kernel handle and
+the metric instruments too. A swap is atomic and in-flight queries hold the chain
+they started on.
+
+`ReloadOrchestrator` (`src/reload.rs`, reachable because the binary package also
+has a lib target) is the single decision point both triggers funnel into: read the
+candidate (`load_config` for `SIGHUP`, `parse_config` for a pushed string that
+never touches a filesystem — the same expansion and validation either way), ask
+`doggy_dns_basic::reload::reload_conflicts` whether anything outside the
+query path changed, rebuild the chain, swap. The rules and the reason they are an
+allow-list live in
+[configuration.md](configuration.md#hot-reload).
+
+- **Serialised.** One `tokio::sync::Mutex` covers the whole apply, so a `SIGHUP`
+  racing a push cannot build two chains at once; each reload applies against the
+  config the previous one installed. Requests are coalesced over a 500 ms window
+  and the newest wins, because it carries the newest intent.
+- **All or nothing.** A conflict rejects the candidate whole and leaves the
+  running path untouched; an unreadable, invalid or unbuildable candidate fails
+  the same way. The generation counter only moves on an applied reload, so it
+  keeps meaning "how many query paths this process has served".
+- **Chain building lives in the binary.** `doggy-dns-core` does not depend on
+  `doggy-dns-nacos`, so `build_chain` sits with the orchestrator and core only
+  exposes the swap.
+- **Nacos watchers are pooled.** A watcher owns a gRPC connection and a warm
+  instance cache, and rebuilding it is the expensive part of a reload, so
+  `doggy_dns_nacos::pool` keys it by connection identity (`server_addr`,
+  `namespace`, `group`) and `plan_reuse` says which pooled watcher serves which
+  plugin — matching consumes, so two zones on one server take two watchers.
+  Zone and TTL are excluded from the identity: republishing a zone keeps the
+  connection and everything already pushed. A released watcher cannot be closed
+  (the SDK exposes no shutdown), so an unused one stays pooled until a restart.
+
 ## Server protocols
 
 | Protocol | Default Port | Description |

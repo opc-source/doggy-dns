@@ -4,7 +4,7 @@ use std::fmt;
 
 /// OTLP export configuration. A single target is supported; fan-out should be
 /// handled by an OTel Collector or Vector in front of the final backend.
-#[derive(Clone, Deserialize)]
+#[derive(Clone, PartialEq, Deserialize)]
 pub struct ObservabilityConfig {
     #[serde(default)]
     pub enabled: bool,
@@ -133,7 +133,7 @@ pub enum MetricsTemporality {
     Delta,
 }
 
-#[derive(Clone, Deserialize)]
+#[derive(Clone, PartialEq, Deserialize)]
 pub struct BasicAuthConfig {
     pub username: String,
     pub password: String,
@@ -148,7 +148,7 @@ impl fmt::Debug for BasicAuthConfig {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct LogsConfig {
     #[serde(default = "default_true")]
     pub enabled: bool,
@@ -173,7 +173,7 @@ impl Default for LogsConfig {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct MetricsConfig {
     #[serde(default = "default_true")]
     pub enabled: bool,
@@ -197,7 +197,7 @@ impl Default for MetricsConfig {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct TracesConfig {
     #[serde(default = "default_true")]
     pub enabled: bool,
@@ -227,7 +227,7 @@ impl Default for TracesConfig {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct ProfilesConfig {
     #[serde(default)]
     pub enabled: bool,

@@ -59,6 +59,10 @@ doggy-dns/                    # Binary entrypoint
   `/readyz` probes. → [crates/doggy-dns-control/README.md](crates/doggy-dns-control/README.md)
 - **XDP fast path** (optional, Linux): answers cached DNS queries in the kernel
   via an aya eBPF program. → [docs/xdp.md](docs/xdp.md)
+- **Config hot-reload**: `SIGHUP` or a Nacos config push rebuilds the query path
+  (plugins, TTLs, rotation, query logging) without dropping a query; a change
+  that needs new sockets, a new runtime or a new subscriber is refused whole
+  instead of half-applied. → [docs/configuration.md](docs/configuration.md#hot-reload)
 
 ## Configuration
 
@@ -123,7 +127,11 @@ cargo tarpaulin --config tarpaulin.toml
 - [ ] Redis backend (`redis-rs`)
 - [ ] Database backend (`sqlx`)
 - [ ] Dynamic plugin registry (load plugins at runtime)
-- [ ] Config hot-reload via Nacos config service (watcher implemented, wiring pending)
+- [x] Config hot-reload (SIGHUP + Nacos config push) for the query path: plugins,
+      TTLs, rotation and query logging; anything else is refused until it can be
+      re-bound — [docs/configuration.md](docs/configuration.md#hot-reload)
+- [ ] Widen hot-reload to listeners, observability and the control plane (needs a
+      server whose handler can be replaced)
 - [x] OTLP/gRPC export (HTTP/protobuf is supported today)
 - [x] Multi-target OTLP fan-out (use a Collector/Vector today)
 

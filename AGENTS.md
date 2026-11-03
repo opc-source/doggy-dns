@@ -117,6 +117,46 @@ payload rather than only the sent response. With XDP enabled a cache hit replays
 the order captured when the entry was written until its TTL expires (rotation
 then only spreads misses).
 
+### Config Hot Reload
+
+A running process rebuilds its query path on `SIGHUP` (re-read the file it
+started with) and, when `[remote_config]` is enabled, on a push from the Nacos
+config service. Both go through `ReloadOrchestrator::apply` (`src/reload.rs`):
+read the candidate (`load_config` / `parse_config` — the same expansion and
+validation either way), refuse it if anything outside the query path changed,
+rebuild the chain, swap.
+
+The swap points exist because hickory's `Server` owns the `RequestHandler` by
+value: the handler can never be replaced, only what it reads through. So
+`DoggyDnsHandler` keeps the chain in an `ArcSwap`, hands a `ReloadHandle`
+(chain + rotation cursor) out before `build_server`, and `middleware.logging` is
+an `AtomicBool` inside an always-installed logging middleware — the middleware
+chain owns the live XDP cache map and the OTel instruments, so it is never
+rebuilt. When adding a reloadable setting, follow that shape: put it behind an
+`Arc` the handler shares out, do not try to construct a new handler.
+
+`doggy_dns_basic::reload::reload_conflicts` is the allow-list: `[[plugins]]`,
+`server.rotate_answers` and `middleware.logging` may differ, everything else
+refuses the **whole** reload (a half-applied config is the failure mode this
+prevents). The rule is an allow-list on purpose — when a section becomes
+reloadable, add it to the list *and* move its swap point behind the handle;
+`crates/doggy-dns-basic/tests/reload_compat_test.rs` has one case per refused
+path, so a new config field is not silently reloadable by default.
+
+Reloads are serialised (one `tokio::sync::Mutex` covers an apply) and coalesced
+(500 ms window, newest request wins). Failure and rejection leave everything
+alone: the old chain keeps answering and `generation` does not move, which is
+what makes the counter mean "how many query paths this process served".
+
+Nacos watchers are pooled across reloads (`doggy_dns_nacos::pool`): a watcher is
+keyed by connection identity (`server_addr`, `namespace`, `group`) and *not* by
+zone or TTL, so republishing a zone keeps the gRPC connection and its warm
+cache. `plan_reuse` matching consumes, so two zones on one server take two
+watchers. A reused watcher is deliberately not re-subscribed (the SDK's listener
+set would grow per reload) and a watcher no plugin wants is not released (the
+SDK has no shutdown), which is why `subscribe_all` semantics and the control
+plane's per-zone live signals stay start-up facts until a restart.
+
 ### Server (`core/server.rs`)
 
 `build_server()` binds UDP + TCP on the configured port. Optionally registers TLS (DoT, port 853) and HTTPS (DoH, port 443, path `/dns-query`) when `[server.tls]`/`[server.https]` are enabled. Uses `rustls` for TLS.
@@ -139,7 +179,7 @@ The tokio runtime is built manually in `main()` with configurable `worker_thread
 
 ### Immutability Pattern
 
-Cache updates replace the entire Vec for a key (never mutate in place). Config structs are `Clone`. Use `Arc<DashMap>` for concurrent access.
+Cache updates replace the entire Vec for a key (never mutate in place). Config structs are `Clone` and `PartialEq` — the reload compat check compares the running config with a candidate field by field, so a new config struct or field has to derive `PartialEq` (add it to the derive list; a plain `PartialEq` on a secret-carrying struct is fine, its redaction lives in `Debug`). Use `Arc<DashMap>` for concurrent access.
 
 ## Configuration
 
@@ -147,10 +187,19 @@ TOML config at `config/doggy-dns.toml`. Key structs in `crates/doggy-dns-basic` 
 
 `validate_config()` checks: worker_threads > 0, TLS/HTTPS cert files exist when enabled, remote_config fields non-empty when enabled, plugin rules (one enabled plugin when `[[plugins]]` exists; Nacos connection fields, valid unique zone; `min_ttl <= max_ttl`; forward upstream is IP or IP:port), observability ranges/URLs (observability enabled, signal ranges, profile duration/frequency, log level, endpoint format), and control-plane rules when `[control]` is enabled (valid `listen_addr`; `endpoints` non-empty, unique, within `mcp|healthz|readyz`). Every config string may use `${ENV_VAR}`; expansion happens in `load_config()` before deserialisation and a missing variable is fatal (the raw, unexpanded file content is what the MCP `get_config` tool sees).
 
+`parse_config(content)` is the same pipeline without the filesystem — it is what a hot reload runs on pushed content, so remote and local config can never diverge in validation. `reload_conflicts(old, new)` returns the config paths whose difference forbids an in-place reload; see [Config Hot Reload](#config-hot-reload).
+
 ## Test Conventions
 
 - Integration tests in `tests/` and `crates/*/tests/` (not inline `#[cfg(test)]` modules)
 - Forward/native tests make real network calls
 - Nacos tests use mock DashMap caches (no Nacos server needed)
+- Hot reload is tested per layer, so a failure names the layer it broke: the
+  allow-list (`crates/doggy-dns-basic/tests/reload_compat_test.rs`, one case per
+  refused config path), the swap (`crates/doggy-dns-core/tests/handler_reload_test.rs`,
+  against a handler that is already answering), the reuse decision
+  (`crates/doggy-dns-nacos/tests/pool_test.rs`, pure), the orchestrator's
+  decisions (`tests/reload_orchestrator_test.rs`, forward-only chains so no
+  network) and the triggers end to end (`tests/nacos_e2e_test.rs`)
 - Benchmarks in `crates/*/benches/` using criterion 0.8, parameterized over worker_threads 1..4
 - Benchmark output starts with "running 0 tests" (from default harness) — this is normal, criterion results follow

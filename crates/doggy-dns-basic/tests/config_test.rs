@@ -1,6 +1,6 @@
 #![allow(clippy::disallowed_methods)]
 
-use doggy_dns_basic::{DoggyDnsConfig, PluginKind, load_config, validate_config};
+use doggy_dns_basic::{DoggyDnsConfig, PluginKind, load_config, parse_config, validate_config};
 
 #[test]
 fn parse_full_config() {
@@ -1198,4 +1198,56 @@ fn container_default_config_loads_with_no_environment() {
         "the baked config has to answer something, and `native` would loop back \
          to the resolver itself under hostNetwork"
     );
+}
+
+/// Hot reload hands `parse_config` content that never touched a filesystem, so
+/// it has to run the same expansion and validation `load_config` runs.
+#[test]
+fn parse_config_validates_content_that_never_touched_disk() {
+    let toml_str = r#"
+[server]
+listen_addr = "0.0.0.0"
+port = 53
+
+[[plugins]]
+kind = "nacos"
+enabled = true
+server_addr = "127.0.0.1:8848"
+"#;
+
+    let error = parse_config(toml_str).unwrap_err().to_string();
+    assert!(
+        error.contains("is required for an enabled nacos plugin"),
+        "a remote config must be rejected by the same rule as a file: {error}"
+    );
+}
+
+#[test]
+fn parse_config_rejects_a_reference_to_a_missing_variable() {
+    let toml_str = r#"
+[server]
+listen_addr = "0.0.0.0"
+port = 53
+cpu_affinity = [${DOGGY_DNS_UNSET_TEST_VARIABLE}]
+"#;
+
+    let error = parse_config(toml_str).unwrap_err().to_string();
+    assert!(
+        error.contains("DOGGY_DNS_UNSET_TEST_VARIABLE"),
+        "the missing variable has to be named: {error}"
+    );
+}
+
+/// The two entry points must agree: a push whose content equals the file on disk
+/// yields an equal config, which is what keeps a reload from reporting phantom
+/// differences.
+#[test]
+fn parse_config_and_load_config_agree_on_the_same_content() {
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../examples/deploy/container-default.toml"
+    );
+    let (from_file, raw) = load_config(path).expect("the shipped config must load");
+    let from_content = parse_config(&raw).expect("the shipped config must parse from content");
+    assert_eq!(from_file, from_content);
 }

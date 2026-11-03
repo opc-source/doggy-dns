@@ -1,3 +1,4 @@
+use arc_swap::ArcSwap;
 use async_trait::async_trait;
 use doggy_dns_plugin::authority_chain::AuthorityChain;
 use doggy_dns_plugin::{Middleware, MiddlewareAction, RequestOutcome};
@@ -10,7 +11,7 @@ use hickory_server::zone_handler::{
     AuthLookup, LookupControlFlow, LookupError, LookupRecords, MessageResponseBuilder,
 };
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use tokio::time::Instant;
 use tracing::Instrument;
 
@@ -29,16 +30,22 @@ use tracing::Instrument;
 /// allocation.
 #[derive(Debug)]
 pub struct AnswerRotation {
-    enabled: bool,
+    enabled: AtomicBool,
     cursor: AtomicUsize,
 }
 
 impl AnswerRotation {
     pub fn new(enabled: bool) -> Self {
         Self {
-            enabled,
+            enabled: AtomicBool::new(enabled),
             cursor: AtomicUsize::new(0),
         }
+    }
+
+    /// Turn rotation on or off without rebuilding the handler. The cursor is
+    /// kept, so switching off simply stops advancing it.
+    pub fn set_enabled(&self, enabled: bool) {
+        self.enabled.store(enabled, Ordering::Relaxed);
     }
 
     /// Advances the cursor and rotates `records` so its first entry walks the
@@ -46,7 +53,7 @@ impl AnswerRotation {
     /// the common case: one instance, or a negative answer.
     pub fn apply(&self, records: &mut [Record]) {
         let len = records.len();
-        if !self.enabled || len < 2 {
+        if !self.enabled.load(Ordering::Relaxed) || len < 2 {
             return;
         }
         let offset = self.cursor.fetch_add(1, Ordering::Relaxed) % len;
@@ -54,11 +61,40 @@ impl AnswerRotation {
     }
 }
 
+/// Handle for swapping the reloadable parts of a running `DoggyDnsHandler`.
+///
+/// The handler itself cannot be replaced: hickory's `Server` takes it by value
+/// at start-up and owns it for the process lifetime. Everything a config
+/// reload may change therefore lives behind an `Arc` the handler shares out
+/// here — the authority chain (swapped wholesale) and rotation (a flag flip on
+/// the existing cursor). Query-logging is the third reloadable knob and is not
+/// part of this handle: its `LoggingToggle` is created by whoever builds the
+/// middleware chain.
+#[derive(Clone)]
+pub struct ReloadHandle {
+    authority_chain: Arc<ArcSwap<AuthorityChain>>,
+    rotation: Arc<AnswerRotation>,
+}
+
+impl ReloadHandle {
+    /// Point the running handler at a freshly built chain.
+    ///
+    /// Queries already in flight hold the chain they started with, so a reload
+    /// never changes the rules under a request mid-resolution.
+    pub fn swap_authority_chain(&self, chain: AuthorityChain) {
+        self.authority_chain.store(Arc::new(chain));
+    }
+
+    pub fn set_rotation(&self, enabled: bool) {
+        self.rotation.set_enabled(enabled);
+    }
+}
+
 pub struct DoggyDnsHandler {
     middlewares: Vec<Arc<dyn Middleware>>,
-    authority_chain: Arc<AuthorityChain>,
+    authority_chain: Arc<ArcSwap<AuthorityChain>>,
     xdp_enabled: bool,
-    rotation: AnswerRotation,
+    rotation: Arc<AnswerRotation>,
 }
 
 impl DoggyDnsHandler {
@@ -70,9 +106,18 @@ impl DoggyDnsHandler {
     ) -> Self {
         Self {
             middlewares,
-            authority_chain,
+            authority_chain: Arc::new(ArcSwap::from(authority_chain)),
             xdp_enabled,
-            rotation,
+            rotation: Arc::new(rotation),
+        }
+    }
+
+    /// The reloadable halves of this handler, shared with the config-reload
+    /// orchestrator before the handler is handed to the server.
+    pub fn reload_handle(&self) -> ReloadHandle {
+        ReloadHandle {
+            authority_chain: Arc::clone(&self.authority_chain),
+            rotation: Arc::clone(&self.rotation),
         }
     }
 
@@ -188,6 +233,9 @@ impl RequestHandler for DoggyDnsHandler {
             // Resolve through authority chain. `query.name()` is the `LowerName`
             // the server already lowercased once at parse time, so it goes to the
             // chain by reference; the log string is the only owned copy.
+            // `load_full` clones the current chain's `Arc` (one refcount bump, no
+            // allocation) so an in-flight query keeps the generation it started
+            // on even if a reload swaps the chain before it finishes.
             let query_type = request_info.query.query_type();
             let query_display = request_info.query.name().to_string();
             let resolve_span = tracing::info_span!(
@@ -197,8 +245,8 @@ impl RequestHandler for DoggyDnsHandler {
                 "dns.authority" = tracing::field::Empty,
                 "dns.answers" = tracing::field::Empty,
             );
-            let resolve_result = self
-                .authority_chain
+            let chain = self.authority_chain.load_full();
+            let resolve_result = chain
                 .resolve(request_info.query.name(), query_type, Some(&request_info))
                 .instrument(resolve_span.clone())
                 .await;

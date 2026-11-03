@@ -288,7 +288,14 @@ start a cold start on a fresh path rather than mixing formats.
   object names containing a `.`. `pin_path` must be dot-free, and `validate_config`
   rejects a dotted one at startup rather than failing when the program attaches.
 - **Config edits not taking effect** — a `subPath` mount is bound at mount time.
-  `kubectl rollout restart` after editing a ConfigMap.
+  `kubectl rollout restart` after editing a ConfigMap. If the edit is inside the
+  reloadable set (`[[plugins]]`, `server.rotate_answers`, `middleware.logging`)
+  you can also signal the running process instead of cycling the Pod:
+  `kubectl -n doggy-dns exec <pod> -c doggy-dns -- kill -HUP 1`. Anything else
+  (ports, TLS, workers, CPU pinning, observability, XDP, control plane) is
+  refused by design, and the reload is logged as
+  `config reload rejected: restart required` with the offending paths, so a
+  rollout stays the answer.
 - **Changing `cache_size` has no effect** — the capacity is fixed when the pinned
   map is created; editing the config changes nothing until the pin file is
   removed. The server warns at startup when the pinned map's capacity and the

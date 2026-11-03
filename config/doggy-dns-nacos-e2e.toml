@@ -12,6 +12,10 @@
 listen_addr = "127.0.0.1"
 port = 15411
 worker_threads = 1
+# Stated rather than left to the default, because the SIGHUP case of
+# tests/nacos_e2e_test.rs rewrites this line: rotate_answers is one of the
+# settings a running process applies in place.
+rotate_answers = true
 
 [middleware]
 logging = false
