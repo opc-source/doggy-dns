@@ -86,7 +86,8 @@ cache_size = 1024
 min_ttl = 30
 max_ttl = 600
 
-# Optional: hot-reload config from Nacos config service
+# Optional: reload from a Nacos config data id; see "Hot reload" for what a
+# push changes at runtime and how long it takes to land
 [remote_config]
 enabled = false
 server_addr = "127.0.0.1:8848"
@@ -180,6 +181,40 @@ apex `SOA`. With the XDP fast path enabled the kernel answers a cache hit
 without consulting userspace again, so a hit replays the order that was captured
 when the entry was written until its TTL expires; startup logs one `warn` when
 both settings are on. See [xdp.md](xdp.md#limitations--notes).
+
+## Hot reload
+
+Two triggers feed one pipeline: `SIGHUP` (POSIX) re-reads the file the process
+started with, and `[remote_config]` takes a whole configuration published to a
+Nacos config data id. Whichever arrives, the same checks and the same swap run.
+
+Applied without a restart: `[[plugins]]` (order, kind, every field),
+`middleware.logging` and `server.rotate_answers`. Anything else that differs —
+`listen_addr`, `port`, `worker_threads`, TLS/HTTPS, `[remote_config]` itself,
+`[control]`, `[observability]`, `[xdp]` — cannot take effect on a live socket, so
+the reload still applies the hot fields and logs the other paths at `warn`:
+`these configuration changes need a restart to take effect`. Content identical to
+the configuration in force is skipped, and in-flight queries finish on the chain
+they entered with.
+
+What a reload guarantees, and what it costs:
+
+- **An unusable push changes nothing.** Unparsable TOML, a config that fails
+  validation, or a plugin that cannot connect is rejected at `error`; the running
+  chain, the process and the trigger all stay as they were.
+- **Unchanged entries keep their connections.** A `[[plugins]]` entry equal to the
+  one in force *at the same position* is reused with its subscriptions and warm
+  instance cache; only changed entries are rebuilt, and a rebuilt nacos authority
+  serves its zone only after the new subscription reports the instances (about
+  half a second in our runs).
+  Moving an entry rebuilds it and everything after it.
+- **A pushed configuration lands on a poll, not instantly.** Measured against a
+  standalone Nacos 2.5.4 with nacos-sdk 0.8.3: the SDK notices the change on its
+  60-second list-watch round, so plan for up to a minute of propagation; `SIGHUP`
+  is immediate. See `tests/nacos_e2e_test.rs`.
+- **Retired naming clients are unsubscribed, not closed.** nacos-sdk 0.8.3 has no
+  client shutdown, so a reload stops instance pushes for the old watcher but its
+  gRPC connection lives until the process exits.
 
 ## Endpoint formats
 

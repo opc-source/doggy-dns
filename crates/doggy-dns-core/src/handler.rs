@@ -1,3 +1,4 @@
+use arc_swap::ArcSwap;
 use async_trait::async_trait;
 use doggy_dns_plugin::authority_chain::AuthorityChain;
 use doggy_dns_plugin::{Middleware, MiddlewareAction, RequestOutcome};
@@ -10,7 +11,7 @@ use hickory_server::zone_handler::{
     AuthLookup, LookupControlFlow, LookupError, LookupRecords, MessageResponseBuilder,
 };
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use tokio::time::Instant;
 use tracing::Instrument;
 
@@ -29,16 +30,23 @@ use tracing::Instrument;
 /// allocation.
 #[derive(Debug)]
 pub struct AnswerRotation {
-    enabled: bool,
+    enabled: AtomicBool,
     cursor: AtomicUsize,
 }
 
 impl AnswerRotation {
     pub fn new(enabled: bool) -> Self {
         Self {
-            enabled,
+            enabled: AtomicBool::new(enabled),
             cursor: AtomicUsize::new(0),
         }
+    }
+
+    /// Hot-switch rotation on or off. The cursor is deliberately **not**
+    /// reset: a toggle must not restart the walk from the first instance, and
+    /// the counter carries no meaning while disabled anyway.
+    pub fn set_enabled(&self, enabled: bool) {
+        self.enabled.store(enabled, Ordering::Relaxed);
     }
 
     /// Advances the cursor and rotates `records` so its first entry walks the
@@ -46,7 +54,7 @@ impl AnswerRotation {
     /// the common case: one instance, or a negative answer.
     pub fn apply(&self, records: &mut [Record]) {
         let len = records.len();
-        if !self.enabled || len < 2 {
+        if !self.enabled.load(Ordering::Relaxed) || len < 2 {
             return;
         }
         let offset = self.cursor.fetch_add(1, Ordering::Relaxed) % len;
@@ -54,9 +62,19 @@ impl AnswerRotation {
     }
 }
 
+/// The request-path handler.
+///
+/// The middleware set and the authority chain live behind `ArcSwap` so a
+/// config reload can replace both without a restart or a lock the query path
+/// has to wait on: a reload `store`s new values, and every request reads a
+/// consistent snapshot by `load_full`ing the two fields once at entry.
+/// In-flight requests keep their own snapshot alive (the old chain's `Arc`),
+/// so nothing drains or blocks. `xdp_enabled` and the rotation cursor are
+/// deliberately *not* hot-swappable — the XDP fast path is frozen at attach
+/// time, and rotation is switched via [`DoggyDnsHandler::set_rotation`].
 pub struct DoggyDnsHandler {
-    middlewares: Vec<Arc<dyn Middleware>>,
-    authority_chain: Arc<AuthorityChain>,
+    middlewares: ArcSwap<Vec<Arc<dyn Middleware>>>,
+    authority_chain: ArcSwap<AuthorityChain>,
     xdp_enabled: bool,
     rotation: AnswerRotation,
 }
@@ -69,15 +87,48 @@ impl DoggyDnsHandler {
         rotation: AnswerRotation,
     ) -> Self {
         Self {
-            middlewares,
-            authority_chain,
+            middlewares: ArcSwap::from_pointee(middlewares),
+            authority_chain: ArcSwap::from(authority_chain),
             xdp_enabled,
             rotation,
         }
     }
 
+    /// Replace the middleware set and the authority chain in one call.
+    ///
+    /// The two `store`s are independent, not one atomic pair: a request that
+    /// enters between them sees the new middlewares with the old chain. That
+    /// window is invisible to resolution (the chain is the only functional
+    /// piece), and keeping one swap call is what stops callers from ordering
+    /// the two themselves.
+    pub fn swap_runtime(
+        &self,
+        middlewares: Vec<Arc<dyn Middleware>>,
+        authority_chain: Arc<AuthorityChain>,
+    ) {
+        self.middlewares.store(Arc::new(middlewares));
+        self.authority_chain.store(authority_chain);
+    }
+
+    /// Hot-switch answer rotation; the cursor is untouched (see
+    /// [`AnswerRotation::set_enabled`]).
+    pub fn set_rotation(&self, enabled: bool) {
+        self.rotation.set_enabled(enabled);
+    }
+
+    /// The middleware set currently in force. For tests and reload reporting.
+    pub fn middlewares(&self) -> Arc<Vec<Arc<dyn Middleware>>> {
+        self.middlewares.load_full()
+    }
+
+    /// Answer rotation currently in force.
+    pub fn rotation_enabled(&self) -> bool {
+        self.rotation.enabled.load(Ordering::Relaxed)
+    }
+
     async fn finish(
         &self,
+        middlewares: &[Arc<dyn Middleware>],
         request: &Request,
         start: Instant,
         span: &tracing::Span,
@@ -85,7 +136,7 @@ impl DoggyDnsHandler {
     ) {
         let duration_ms = start.elapsed().as_millis() as u64;
         record_outcome(span, outcome, duration_ms);
-        for middleware in &self.middlewares {
+        for middleware in middlewares {
             middleware
                 .after_request(request, duration_ms, outcome)
                 .await;
@@ -102,6 +153,10 @@ impl RequestHandler for DoggyDnsHandler {
     ) -> ResponseInfo {
         let start = Instant::now();
         let request_id = request.metadata.id;
+        // One snapshot per request: middlewares and chain stay consistent for
+        // the whole exchange even if a reload swaps both mid-flight.
+        let middlewares = self.middlewares.load_full();
+        let authority_chain = self.authority_chain.load_full();
 
         let span = tracing::info_span!(
             "dns.request",
@@ -122,10 +177,11 @@ impl RequestHandler for DoggyDnsHandler {
 
         async move {
             // Run before_request on all middlewares
-            for middleware in &self.middlewares {
+            for middleware in middlewares.iter() {
                 if let MiddlewareAction::ShortCircuit = middleware.before_request(request).await {
                     let outcome = RequestOutcome::error(ResponseCode::Refused);
-                    self.finish(request, start, &span_for_body, &outcome).await;
+                    self.finish(&middlewares, request, start, &span_for_body, &outcome)
+                        .await;
                     tracing::warn!(
                         request_id = request_id,
                         duration_ms = start.elapsed().as_millis() as u64,
@@ -148,7 +204,8 @@ impl RequestHandler for DoggyDnsHandler {
                 Ok(info) => info,
                 Err(e) => {
                     let outcome = RequestOutcome::error(ResponseCode::FormErr);
-                    self.finish(request, start, &span_for_body, &outcome).await;
+                    self.finish(&middlewares, request, start, &span_for_body, &outcome)
+                        .await;
                     tracing::warn!(
                         request_id = request_id,
                         error = %e,
@@ -197,8 +254,7 @@ impl RequestHandler for DoggyDnsHandler {
                 "dns.authority" = tracing::field::Empty,
                 "dns.answers" = tracing::field::Empty,
             );
-            let resolve_result = self
-                .authority_chain
+            let resolve_result = authority_chain
                 .resolve(request_info.query.name(), query_type, Some(&request_info))
                 .instrument(resolve_span.clone())
                 .await;
@@ -395,12 +451,34 @@ impl RequestHandler for DoggyDnsHandler {
             };
 
             resolve_span.record("dns.answers", tracing::field::display(outcome.answers));
-            self.finish(request, start, &span_for_body, &outcome).await;
+            self.finish(&middlewares, request, start, &span_for_body, &outcome)
+                .await;
 
             response_info
         }
         .instrument(span)
         .await
+    }
+}
+
+/// `Arc` wrapper that lets the server and the reload coordinator share one
+/// handler.
+///
+/// hickory owns its handler by value (`Server<H>` stores `H`), and
+/// `RequestHandler` has no `Clone` supertrait — while a config reload needs a
+/// second handle that swaps the same chain the query path reads. The swap
+/// lives on `DoggyDnsHandler`; this is only the shared-ownership newtype.
+#[derive(Clone)]
+pub struct SharedHandler(pub Arc<DoggyDnsHandler>);
+
+#[async_trait]
+impl RequestHandler for SharedHandler {
+    async fn handle_request<R: ResponseHandler, T: hickory_server::net::runtime::Time>(
+        &self,
+        request: &Request,
+        response_handle: R,
+    ) -> ResponseInfo {
+        RequestHandler::handle_request::<R, T>(&*self.0, request, response_handle).await
     }
 }
 

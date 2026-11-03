@@ -131,9 +131,21 @@ DOGGY_NACOS_ADDR=127.0.0.1:8848 \
 
 Points worth knowing before reading a failure:
 
-- **Subscriptions are established once, at start-up** (`subscribe_all()` in
-  `src/main.rs`); there is no periodic rescan and no subscribe-on-miss, so a
-  service created in Nacos after doggy-dns started is only picked up on restart.
+- **The reload cases read their server's log, not its console.** They start the
+  process with output redirected to `nacos-e2e-<port>.log` beside the case config
+  in `CARGO_TARGET_TMPDIR`, because what they assert — a push rejected, an entry
+  reused (no `unsubscribed from all nacos services` line), a reload that named
+  `source=sighup` — is only visible there. `--nocapture` therefore shows the other
+  cases' process output only, and a failed wait on a log line panics with the tail
+  of that file. The reads strip ANSI escapes before matching: the resolver only
+  colourises a real terminal, so a redirected log is plain text, and the stripping
+  is a guard against a regression silently un-covering the reload cases
+  (`strip_ansi_leaves_field_pairs_searchable` checks it without a server).
+- **Subscriptions are established when a plugin is built** — `subscribe_all()`
+  runs in `reload::build_chain`, at startup and again for every `[[plugins]]`
+  entry a reload rebuilds. There is no periodic rescan and no subscribe-on-miss,
+  so a service created in Nacos after that moment is only picked up when its own
+  plugin entry changes and reloads.
 - **Ephemeral instances live and die with the registering client's connection.**
   The test keeps its `NamingService` handle alive for exactly this reason.
 - **A batch registration replaces the service's instance list** rather than
@@ -145,10 +157,12 @@ Points worth knowing before reading a failure:
 
 | Test File | Tests | Description |
 |-----------|-------|-------------|
-| `crates/doggy-dns-basic/tests/config_test.rs` | 49 | Config parsing, defaults, validation (plugins/TLS/HTTPS/remote_config/observability/xdp/control plane) |
+| `crates/doggy-dns-basic/tests/config_test.rs` | 57 | Config parsing, defaults, validation (plugins/TLS/HTTPS/remote_config/observability/xdp/control plane) |
 | `crates/doggy-dns-basic/tests/env_test.rs` | 8 | `${ENV_VAR}` expansion across tables and arrays, malformed references |
 | `crates/doggy-dns-basic/tests/net_test.rs` | 5 | IPv4/IPv6 listen-address parsing, bracketed literals, rejects hostnames |
-| `crates/doggy-dns-core/tests/handler_test.rs` | 17 | Handler pipeline: NoError, NXDomain, NODATA, ServFail, Refused, middleware callbacks, EDNS cache admission, AA/RA flags, SOA on negatives |
+| `crates/doggy-dns-basic/tests/time_test.rs` | 2 | `unix_now_secs` wall-clock stamp used by the live signals |
+| `crates/doggy-dns-core/tests/handler_test.rs` | 21 | Handler pipeline: NoError, NXDomain, NODATA, ServFail, Refused, middleware callbacks, EDNS cache admission, AA/RA flags, SOA on negatives, answer rotation (on, off, XDP payload) |
+| `crates/doggy-dns-core/tests/hot_swap_test.rs` | 3 | `swap_runtime` replaces chain and middlewares, an in-flight query keeps the chain it entered with, `set_rotation` leaves the cursor alone |
 | `crates/doggy-dns-core/tests/middleware_test.rs` | 2 | Logging middleware: `before_request` continues, `after_request` completes |
 | `crates/doggy-dns-core/tests/server_test.rs` | 2 | UDP/TCP listener binding for bare and bracketed IPv6 addresses |
 | `crates/doggy-dns-core/tests/wire_golden_test.rs` | 5 | Golden wire bytes for the Nacos paths: hit (name lowercased), NXDOMAIN, NODATA, apex SOA |
@@ -162,9 +176,10 @@ Points worth knowing before reading a failure:
 | `crates/doggy-dns-plugin/tests/system_dns_test.rs` | 1 | Native resolver (requires network) |
 | `crates/doggy-dns-plugin/tests/wire_query_name_test.rs` | 2 | The wire-name handoff both fallback authorities use: label bytes survive, and the `&str` path's underscore rejection stays a premise |
 | `crates/doggy-dns-xdp/tests/*` | 22 + 6 ignored | Userspace cache/interface/middleware/stats; XDP attach tests need root + Linux |
-| `crates/doggy-dns-control/tests/*` | 28 | Control plane: HTTP contract, endpoint selection, token scoping, live signals, state snapshots, redaction |
+| `crates/doggy-dns-control/tests/*` | 31 | Control plane: HTTP contract, endpoint selection, token scoping, live signals (including the per-reload zone handoff), state snapshots, redaction |
 | `tests/integration_test.rs` | 3 | End-to-end chain: Nacos hit, outside-zone fallthrough, in-zone miss stays authoritative |
-| `tests/nacos_e2e_test.rs` | 4 ignored | Live Nacos: boot-time instances, push after start-up, in-zone NXDOMAIN, IPv4-only NODATA |
+| `tests/reload_test.rs` | 16 | The reload pipeline itself: applied / rejected / skipped, restart-required path diff, position-wise plugin reuse, retire and default-chain paths |
+| `tests/nacos_e2e_test.rs` | 8 ignored + 1 | Live Nacos: boot-time instances, push after start-up, in-zone NXDOMAIN, IPv4-only NODATA, and the reload triggers — a pushed configuration changing the answer TTL and retiring its watcher, a rejected push changing nothing, a push that touches no plugin reusing the warm cache, and `SIGHUP` applying a hot field within seconds while reporting the restart-required one. The one case that runs without a server checks the log reads those triggers depend on |
 
 Forward tests run against a local mock upstream, native tests make real
 network calls, and the Nacos unit tests use mock DashMap caches (no Nacos

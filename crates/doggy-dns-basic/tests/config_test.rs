@@ -305,6 +305,30 @@ data_id = ""
 }
 
 #[test]
+fn remote_config_enabled_missing_group_fails() {
+    let toml_str = r#"
+[server]
+listen_addr = "0.0.0.0"
+port = 53
+
+[remote_config]
+enabled = true
+server_addr = "127.0.0.1:8848"
+data_id = "doggy-dns.toml"
+"#;
+
+    let config: DoggyDnsConfig = toml::from_str(toml_str).unwrap();
+    let result = validate_config(&config);
+    assert!(result.is_err());
+    assert!(
+        result
+            .unwrap_err()
+            .to_string()
+            .contains("remote_config.group is required")
+    );
+}
+
+#[test]
 fn tls_disabled_nonexistent_cert_passes_validation() {
     let toml_str = r#"
 [server]

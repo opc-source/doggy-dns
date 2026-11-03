@@ -11,6 +11,7 @@ hickory-server = { workspace = true }
 hickory-proto = { workspace = true }
 tokio = { workspace = true }
 anyhow = { workspace = true }
+arc-swap = { workspace = true }
 async-trait = { workspace = true }
 tracing = { workspace = true }
 rustls = { workspace = true }

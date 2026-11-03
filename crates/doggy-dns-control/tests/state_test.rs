@@ -79,6 +79,75 @@ kind = "native"
     assert_eq!(snapshots[2].details["cacheSize"], 4096);
 }
 
+/// A config reload replaces the runtime snapshot whole: the MCP tools must
+/// then report what is in force, not what the process started with — and the
+/// freshly pushed content must go through redaction like the startup file.
+#[test]
+fn update_runtime_replaces_config_and_plugins() {
+    let startup = r#"
+[observability.basic_auth]
+username = "root@example.com"
+password = "startup-secret"
+
+[[plugins]]
+kind = "native"
+"#;
+    let pushed = r#"
+[observability.basic_auth]
+username = "root@example.com"
+password = "pushed-secret"
+
+[[plugins]]
+kind = "forward"
+upstream = ["1.1.1.1:53"]
+"#;
+    let state = McpState::from_parts(
+        "dns-node-1".into(),
+        1,
+        "0.1.0".into(),
+        Utc::now(),
+        "0.0.0.0:15353".into(),
+        vec!["udp".into(), "tcp".into()],
+        doggy_dns_control::snapshots_from(&plugins_of(startup)),
+        startup,
+    );
+
+    {
+        let runtime = state.runtime();
+        let doggy_dns_control::ConfigSnapshot::Redacted { content, .. } = &runtime.config else {
+            panic!("startup content is valid TOML");
+        };
+        assert!(!content.contains("startup-secret"), "redacted at startup");
+        assert_eq!(runtime.plugins.len(), 1);
+        assert_eq!(runtime.plugins[0].kind, "native");
+    }
+
+    state.update_runtime(pushed, &plugins_of(pushed));
+
+    let runtime = state.runtime();
+    let doggy_dns_control::ConfigSnapshot::Redacted {
+        content,
+        redacted_keys,
+    } = &runtime.config
+    else {
+        panic!("pushed content is valid TOML");
+    };
+    assert!(!content.contains("pushed-secret"), "redacted after reload");
+    assert!(!content.contains("startup-secret"), "old content is gone");
+    assert!(redacted_keys.iter().any(|k| k.ends_with(".password")));
+    assert_eq!(runtime.plugins.len(), 1);
+    assert_eq!(runtime.plugins[0].kind, "forward");
+    assert_eq!(runtime.plugins[0].details["upstream"][0], "1.1.1.1:53");
+}
+
+fn plugins_of(content: &str) -> Vec<PluginConfig> {
+    #[derive(serde::Deserialize)]
+    struct Wrapper {
+        plugins: Vec<PluginConfig>,
+    }
+    toml::from_str::<Wrapper>(content).unwrap().plugins
+}
+
 #[test]
 fn enabled_protocols_reflect_tls_and_https() {
     #[derive(serde::Deserialize)]

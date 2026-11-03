@@ -7,6 +7,10 @@
 # Only the nacos plugin is enabled: inside `dns_zone` the authority is
 # authoritative (unknown service -> NXDOMAIN, no fallthrough), so a case that
 # expects NXDOMAIN proves the zone boundary without touching any upstream.
+#
+# No `[remote_config]` here: only the push cases need the trigger, and each of
+# them appends its own section with its own data id — so a push meant for one
+# case cannot reload another case's server.
 
 [server]
 listen_addr = "127.0.0.1"

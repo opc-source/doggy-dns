@@ -25,6 +25,10 @@ use crate::state::McpState;
 pub struct ControlPlaneHandle {
     pub addr: SocketAddr,
     pub cancel: CancellationToken,
+    /// The state the MCP tools read. A config reload updates the runtime
+    /// snapshot through this handle (`McpState::update_runtime`) so `get_config`
+    /// and `list_plugins` report what is actually in force.
+    pub state: Arc<McpState>,
     join: tokio::task::JoinHandle<()>,
 }
 
@@ -52,7 +56,7 @@ pub async fn start(
     let listener = TcpListener::bind(addr).await?;
     let addr = listener.local_addr()?;
 
-    let router = build_router(state, &live, &cfg, cancel.clone());
+    let router = build_router(state.clone(), &live, &cfg, cancel.clone());
 
     let cancel_for_shutdown = cancel.clone();
     let join = tokio::spawn(async move {
@@ -64,7 +68,12 @@ pub async fn start(
             .ok();
     });
 
-    Ok(ControlPlaneHandle { addr, cancel, join })
+    Ok(ControlPlaneHandle {
+        addr,
+        cancel,
+        state,
+        join,
+    })
 }
 
 /// Build the axum router for the control plane, exposing only the

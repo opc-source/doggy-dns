@@ -1,6 +1,6 @@
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ServerConfig {
     pub listen_addr: String,
     pub port: u16,
@@ -48,7 +48,7 @@ fn default_reuseport_listen_num() -> u16 {
     1
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct TlsConfig {
     #[serde(default)]
     pub enabled: bool,
@@ -62,7 +62,7 @@ fn default_tls_port() -> u16 {
     853
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct HttpsConfig {
     #[serde(default)]
     pub enabled: bool,

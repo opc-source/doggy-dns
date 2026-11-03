@@ -130,6 +130,10 @@ pub struct NacosServiceWatcher {
     namespace: String,
     group: String,
     last_push: Arc<AtomicI64>,
+    /// Service name -> the exact [`Arc`] handed to the SDK at subscribe time.
+    /// [`Self::unsubscribe_all`] must present that same `Arc`, because the SDK
+    /// matches listeners by pointer, not by content.
+    subscriptions: DashMap<String, Arc<InstanceChangeListener>>,
 }
 
 impl NacosServiceWatcher {
@@ -147,29 +151,75 @@ impl NacosServiceWatcher {
             namespace: namespace.to_string(),
             group: group.to_string(),
             last_push: Arc::new(AtomicI64::new(0)),
+            subscriptions: DashMap::new(),
         })
     }
 
     /// Subscribe to a specific service for push updates.
     pub async fn subscribe(&self, service_name: &str) -> anyhow::Result<()> {
-        let listener = InstanceChangeListener {
+        let listener = Arc::new(InstanceChangeListener {
             cache: Arc::clone(&self.cache),
             group: self.group.clone(),
             namespace: self.namespace.clone(),
             last_push: Arc::clone(&self.last_push),
-        };
+        });
 
         self.naming_service
             .subscribe(
                 service_name.to_string(),
                 Some(self.group.clone()),
                 vec![],
-                Arc::new(listener),
+                Arc::clone(&listener) as Arc<dyn NamingEventListener>,
             )
             .await?;
 
+        self.subscriptions
+            .insert(service_name.to_string(), listener);
+
         tracing::info!("subscribed to nacos service: {}", service_name);
         Ok(())
+    }
+
+    /// Remove every subscription this watcher registered, best-effort.
+    ///
+    /// Used when a config reload retires a watcher whose plugin changed or
+    /// went away. Unsubscribe failures are logged and skipped: teardown must
+    /// never fail the reload that performs it. The SDK's connection itself
+    /// lives until process exit (nacos-sdk 0.8.3 has no naming-client
+    /// shutdown); what this removes are the server-side subscriptions, so a
+    /// retired watcher stops being pushed instance updates.
+    pub async fn unsubscribe_all(&self) {
+        let entries: Vec<(String, Arc<dyn NamingEventListener>)> = self
+            .subscriptions
+            .iter()
+            .map(|e| {
+                (
+                    e.key().clone(),
+                    Arc::clone(e.value()) as Arc<dyn NamingEventListener>,
+                )
+            })
+            .collect();
+
+        for (service_name, listener) in entries {
+            if let Err(e) = self
+                .naming_service
+                .unsubscribe(
+                    service_name.clone(),
+                    Some(self.group.clone()),
+                    vec![],
+                    listener,
+                )
+                .await
+            {
+                tracing::warn!(
+                    "failed to unsubscribe from service '{}': {}",
+                    service_name,
+                    e
+                );
+            }
+        }
+        self.subscriptions.clear();
+        tracing::info!("unsubscribed from all nacos services");
     }
 
     /// Get cached instances for a service.

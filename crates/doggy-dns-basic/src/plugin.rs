@@ -1,6 +1,6 @@
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum PluginKind {
     Nacos,
@@ -11,7 +11,7 @@ pub enum PluginKind {
 /// Flat plugin config. Each field is optional; only the fields relevant
 /// to the plugin's `kind` are used. Unknown fields for a given kind
 /// are simply ignored at runtime.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct PluginConfig {
     pub kind: PluginKind,
     #[serde(default = "default_enabled")]
