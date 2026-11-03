@@ -26,7 +26,7 @@ fn test_state() -> McpState {
 }
 
 fn test_live() -> Arc<LiveState> {
-    let mut live = LiveState::new();
+    let live = LiveState::new();
     live.register(
         "nacos.nacos.local",
         || serde_json::json!({"cachedServices": 3}),
