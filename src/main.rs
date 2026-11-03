@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use doggy_dns::reload::{self, Applied, ReloadCoordinator, ReloadSource};
+use doggy_dns::reload::{self, Applied, ReloadCoordinator};
 use doggy_dns_control::live::LiveState;
 use doggy_dns_core::config::{DoggyDnsConfig, RemoteConfig, load_config};
 use doggy_dns_core::handler::{AnswerRotation, DoggyDnsHandler, SharedHandler};
@@ -154,14 +154,16 @@ async fn async_main(
     let live = build_live_state(&slots, xdp.enabled());
     let mcp_handle = start_control_plane(&config, config_content, live.clone()).await;
 
-    // The reload pipeline: both triggers end up in this one coordinator, which
-    // owns the in-force chain.
+    // The reload pipeline: both triggers hand requests to one channel, one task
+    // applies them in order, and a burst inside [`reload::RELOAD_DEBOUNCE`]
+    // folds into the newest request. The coordinator owns the in-force chain.
     let coordinator = Arc::new(ReloadCoordinator::new(
         config_path.to_path_buf(),
         Applied {
             raw: config_content.to_string(),
             config: config.clone(),
             slots,
+            generation: 0,
         },
         Arc::clone(&handler),
         base_middlewares,
@@ -169,8 +171,11 @@ async fn async_main(
         live,
     ));
 
-    spawn_sighup_trigger(Arc::clone(&coordinator));
-    spawn_remote_config_trigger(Arc::clone(&coordinator), config.remote_config.clone());
+    let (reload_tx, reload_rx) = tokio::sync::mpsc::unbounded_channel::<reload::ReloadRequest>();
+    tokio::spawn(reload::run_reload_loop(Arc::clone(&coordinator), reload_rx));
+
+    spawn_sighup_trigger(reload_tx.clone());
+    spawn_remote_config_trigger(reload_tx, config.remote_config.clone());
 
     // Run server until shutdown signal
     let shutdown_timeout = Duration::from_secs(config.server.shutdown_timeout);
@@ -282,12 +287,13 @@ fn build_live_state(slots: &[reload::PluginSlot], xdp_attached: bool) -> Arc<Liv
     Arc::new(live)
 }
 
-/// SIGHUP: re-read the startup config file through the shared pipeline.
+/// SIGHUP: ask for a re-read of the startup config file.
 ///
-/// A reload-in-progress queues behind it on the coordinator's lock, and a
-/// rejected file leaves the running config untouched, so an editor that writes
-/// a half-saved file cannot take the resolver down.
-fn spawn_sighup_trigger(coordinator: Arc<ReloadCoordinator>) {
+/// The signal task only queues the request, so a reload already in progress
+/// cannot make the handler miss the next signal; the pipeline applies the two
+/// one after the other, and a rejected file leaves the running config untouched,
+/// so an editor that writes a half-saved file cannot take the resolver down.
+fn spawn_sighup_trigger(requests: tokio::sync::mpsc::UnboundedSender<reload::ReloadRequest>) {
     tokio::spawn(async move {
         let mut sighup = match signal::unix::signal(signal::unix::SignalKind::hangup()) {
             Ok(sighup) => sighup,
@@ -298,33 +304,33 @@ fn spawn_sighup_trigger(coordinator: Arc<ReloadCoordinator>) {
         };
         tracing::info!("config reload listening on SIGHUP");
         while sighup.recv().await.is_some() {
-            coordinator.apply_reload(ReloadSource::Sighup, None).await;
+            if requests.send(reload::ReloadRequest::sighup()).is_err() {
+                tracing::warn!("reload queue is closed; file-triggered reload is disabled");
+                return;
+            }
         }
     });
 }
 
 /// `[remote_config]`: one Nacos config watcher for the life of the process.
 ///
-/// The SDK hands pushed content to a synchronous callback, so it crosses into
-/// the async pipeline through a bounded channel; `try_send` drops a push only
-/// when the queue is already full, and the next push or a SIGHUP
-/// resynchronises — the identical-content skip makes a re-push cheap.
+/// The SDK hands pushed content to a synchronous callback, which is exactly what
+/// an unbounded channel send needs: the callback queues the request and returns,
+/// and [`reload::RELOAD_DEBOUNCE`] folds a multi-line edit into one reload.
 ///
 /// Connection failure is non-fatal and retried every 30 s, following the
 /// control-plane precedent: the resolver keeps serving DNS without its remote
 /// trigger.
-fn spawn_remote_config_trigger(coordinator: Arc<ReloadCoordinator>, remote: RemoteConfig) {
+fn spawn_remote_config_trigger(
+    requests: tokio::sync::mpsc::UnboundedSender<reload::ReloadRequest>,
+    remote: RemoteConfig,
+) {
     if !remote.enabled {
         return;
     }
     tokio::spawn(async move {
-        let (tx, mut rx) = tokio::sync::mpsc::channel::<String>(8);
-
-        // Held, never read: the SDK pushes to the listener registered on this
-        // watcher's config service, so dropping it would end the trigger — the
-        // channel would close and this loop would exit with it.
         let _watcher = loop {
-            match connect_remote_config(&remote, &tx).await {
+            match connect_remote_config(&remote, &requests).await {
                 Ok(watcher) => break watcher,
                 Err(error) => {
                     tracing::warn!(
@@ -342,17 +348,16 @@ fn spawn_remote_config_trigger(coordinator: Arc<ReloadCoordinator>, remote: Remo
             group = %remote.group,
             "config reload listening on nacos push"
         );
-        while let Some(content) = rx.recv().await {
-            coordinator
-                .apply_reload(ReloadSource::Nacos, Some(content))
-                .await;
-        }
+        // Park holding the watcher: the SDK pushes to the listener registered on
+        // this watcher's config service, so dropping it would end the trigger.
+        // Shutdown cancels this task, and that is when it goes.
+        std::future::pending::<()>().await;
     });
 }
 
 async fn connect_remote_config(
     remote: &RemoteConfig,
-    tx: &tokio::sync::mpsc::Sender<String>,
+    requests: &tokio::sync::mpsc::UnboundedSender<reload::ReloadRequest>,
 ) -> Result<NacosConfigWatcher> {
     let watcher = NacosConfigWatcher::new(
         &remote.server_addr,
@@ -363,10 +368,10 @@ async fn connect_remote_config(
     .await
     .context("failed to connect the remote config watcher")?;
 
-    let tx = tx.clone();
+    let requests = requests.clone();
     watcher
         .start_watching(move |content| {
-            let _ = tx.try_send(content);
+            let _ = requests.send(reload::ReloadRequest::nacos(content));
         })
         .await
         .context("failed to subscribe to the remote config data id")?;

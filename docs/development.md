@@ -133,9 +133,11 @@ Points worth knowing before reading a failure:
 
 - **The reload cases read their server's log, not its console.** They start the
   process with output redirected to `nacos-e2e-<port>.log` beside the case config
-  in `CARGO_TARGET_TMPDIR`, because what they assert — a push rejected, an entry
-  reused (no `unsubscribed from all nacos services` line), a reload that named
-  `source=sighup` — is only visible there. `--nocapture` therefore shows the other
+  in `CARGO_TARGET_TMPDIR`, because what they assert — a push rejected, a
+  connection reused (`nacos connection reused`, and no `unsubscribed from all
+  nacos services` line), a connection retired (that same line, where the identity
+  did change), a reload that named `source=sighup` — is only visible there.
+  `--nocapture` therefore shows the other
   cases' process output only, and a failed wait on a log line panics with the tail
   of that file. The reads strip ANSI escapes before matching: the resolver only
   colourises a real terminal, so a redirected log is plain text, and the stripping
@@ -143,9 +145,12 @@ Points worth knowing before reading a failure:
   (`strip_ansi_leaves_field_pairs_searchable` checks it without a server).
 - **Subscriptions are established when a plugin is built** — `subscribe_all()`
   runs in `reload::build_chain`, at startup and again for every `[[plugins]]`
-  entry a reload rebuilds. There is no periodic rescan and no subscribe-on-miss,
-  so a service created in Nacos after that moment is only picked up when its own
-  plugin entry changes and reloads.
+  entry whose naming connection a reload has to open. An entry that keeps its
+  connection keeps its subscription list too, and is deliberately not
+  re-subscribed: re-subscribing on every reload would add a listener per service
+  each time. There is no periodic rescan and no subscribe-on-miss, so a service
+  created in Nacos after that moment is picked up when its plugin entry changes
+  enough to need a new connection, or on restart.
 - **Ephemeral instances live and die with the registering client's connection.**
   The test keeps its `NamingService` handle alive for exactly this reason.
 - **A batch registration replaces the service's instance list** rather than
@@ -178,8 +183,8 @@ Points worth knowing before reading a failure:
 | `crates/doggy-dns-xdp/tests/*` | 22 + 6 ignored | Userspace cache/interface/middleware/stats; XDP attach tests need root + Linux |
 | `crates/doggy-dns-control/tests/*` | 31 | Control plane: HTTP contract, endpoint selection, token scoping, live signals (including the per-reload zone handoff), state snapshots, redaction |
 | `tests/integration_test.rs` | 3 | End-to-end chain: Nacos hit, outside-zone fallthrough, in-zone miss stays authoritative |
-| `tests/reload_test.rs` | 16 | The reload pipeline itself: applied / rejected / skipped, restart-required path diff, position-wise plugin reuse, retire and default-chain paths |
-| `tests/nacos_e2e_test.rs` | 8 ignored + 1 | Live Nacos: boot-time instances, push after start-up, in-zone NXDOMAIN, IPv4-only NODATA, and the reload triggers — a pushed configuration changing the answer TTL and retiring its watcher, a rejected push changing nothing, a push that touches no plugin reusing the warm cache, and `SIGHUP` applying a hot field within seconds while reporting the restart-required one. The one case that runs without a server checks the log reads those triggers depend on |
+| `tests/reload_test.rs` | 30 | The reload pipeline itself: applied / rejected / skipped, restart-required differences kept out of the baseline (changed values and sections that exist on one side only), the reuse plan (carry by position, keep the connection by `server_addr`+`namespace`+`group`, consume-on-match, identity picks its own connection when entries reorder, disabled claims nothing), retire and default-chain paths, generation counting, burst coalescing |
+| `tests/nacos_e2e_test.rs` | 9 ignored + 1 | Live Nacos: boot-time instances, push after start-up, in-zone NXDOMAIN, IPv4-only NODATA, and the reload triggers — a pushed TTL reusing the naming connection with no sample left unserved, a push that changes the server address retiring the old connection and reporting the restart-required field, a rejected push changing nothing, a push that touches no plugin reusing the warm cache, and `SIGHUP` applying a hot field within seconds. The one case that runs without a server checks the log reads those triggers depend on |
 
 Forward tests run against a local mock upstream, native tests make real
 network calls, and the Nacos unit tests use mock DashMap caches (no Nacos

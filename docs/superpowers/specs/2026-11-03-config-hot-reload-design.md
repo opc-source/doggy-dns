@@ -382,7 +382,10 @@ skipped).
 
 1. **Position-wise plugin diff** — inserting/removing a plugin in the middle
    rebuilds all later plugins (fresh Nacos connections, cold caches for those
-   plugins only). Rare operation; LCS-style diffing not worth it now.
+   plugins only). Rare operation; LCS-style diffing not worth it now. §13
+   narrows this: the handlers still shift, but a later entry pointing at the same
+   `server_addr`/`namespace`/`group` keeps its connection and its cache, because
+   reuse is matched by identity rather than by position.
 2. **Retired Nacos connections linger** — nacos-sdk 0.8.3 has no
    `NamingService` shutdown; subscriptions *are* removed server-side via
    `unsubscribe`, but the retired client's TCP connection lives until process
@@ -540,9 +543,8 @@ and one validation rule.
   calls `check_not_blank(group)`, so an enabled trigger without a group would have
   retried forever with a `warn` instead of failing at startup. Covered by
   `crates/doggy-dns-basic/tests/config_test.rs::remote_config_enabled_missing_group_fails`.
-- **Four e2e cases, not one.** `e2e_config_push_reloads_plugins` (push changes the
-  answer TTL; also asserts the rebuilt authority re-reads the instances and that
-  the retired watcher logs `unsubscribed from all nacos services`) and
+- **Four e2e cases, not one.** `e2e_config_push_reloads_plugins` (§13 replaced this
+  case: a TTL push now reuses its connection instead of rebuilding and retiring) and
   `e2e_invalid_config_push_keeps_the_running_config` (a rejected push leaves the
   configuration in force, the process alive, and the watcher still listening).
   Both start their resolver with stdout/stderr redirected to a log file and wait
@@ -594,7 +596,7 @@ and one validation rule.
   subscription and the first instance list arrives a moment later as an ordinary
   change event (~0.5 s in our runs, never asserted as a bound). Inherent to D2's
   "changed entries get rebuilt", and the e2e case waits for it rather than seeding
-  the cache by hand.
+  the cache by hand. §13 leaves this only to entries that move the connection.
 
 - **The §9 mock-level `unsubscribe_all` test was dropped.** The teardown calls
   `NamingService::unsubscribe` directly, so there is nothing to observe without a
@@ -603,12 +605,14 @@ and one validation rule.
   process logs show `unsubscribed from all nacos services` on the retire path.
 
 Live result against the Podman `nacos-server:v2.5.4` recipe at the top of
-`tests/nacos_e2e_test.rs`: 8 of 8 ignored cases pass in 123.5 s. Each push case's
-own log file shows the whole path — `config reload listening on nacos push`, then
+`tests/nacos_e2e_test.rs`: 8 of 8 ignored cases pass in 123.5 s (the re-run after
+§13's port: 9 of 9 in 123.00 s). Each push case's own log file shows the whole
+path — `config reload listening on nacos push`, then
 `config reload applied source=nacos` (and, for the invalid one,
 `config reload rejected: invalid configuration, keeping the one in force
 source=nacos` first), then `unsubscribed from all nacos services` when the ttl
-change retires the watcher.
+change retires the watcher — §13 removed that last part, since a ttl push now
+keeps its connection.
 
 The two reload-specific logs say what §8's D2 promise is worth in a live process:
 
@@ -617,6 +621,82 @@ The two reload-specific logs say what §8's D2 promise is worth in a live proces
   delivered anything, with `paths=["server.worker_threads"]` reported for the
   field it cannot apply;
 - the warm-cache case applied `logging=true` and never logged a retire line, while
-  the `SIGHUP` case's own timeline shows why that absence matters: its swap left
-  the zone unserved until `nacos service changed: e2e-sighup` 641 ms later, so a
-  rebuild under the warm case's ~135 ms sampling would have shown several blips.
+  the `SIGHUP` case's own timeline showed why that absence mattered *in this
+  round*: its swap left the zone unserved until `nacos service changed:
+  e2e-sighup` 641 ms later, so a rebuild under the warm case's ~135 ms sampling
+  would have shown several blips. §13's identity reuse is the answer to that gap.
+
+## 13. Second round: what PR #33 got right, and what this branch took from it
+
+PR #33 implements the same feature on a competing branch. Audited side by side
+(its `src/reload.rs`, `crates/doggy-dns-basic/src/reload.rs`,
+`crates/doggy-dns-nacos/src/pool.rs`), four of its ideas are better than what §12
+shipped, and this round ports them. What §12 relies on stays: unsubscribe on
+retire, skip when nothing changed, restart-required fields reported while the hot
+ones apply, live-signal refresh after each reload, and deadlines measured against
+the SDK's poll (`PUSH_DEADLINE` 120 s, `SIGHUP_DEADLINE` 10 s). #33 has none of
+those — `unsubscribe` appears nowhere in its `src/` or crate sources, unpooled
+watchers "stay pooled" forever, an identical push still rebuilds the chain, and a
+push that touches `worker_threads` is rejected whole, so its hot fields never
+land; its single `DEADLINE = 60 s` equals the poll period nacos-sdk 0.8.3 needs to
+notice a config change, which makes its own e2e cases flaky by construction.
+
+- **Reuse by connection identity.** `NacosIdentity { server_addr, namespace,
+  group }` (`src/reload.rs`) is the reuse key, with `dns_zone` and `ttl`
+  deliberately outside it — neither belongs to the naming connection. So the
+  change operators actually make, a TTL push, keeps the connection *and* the warm
+  `DashMap`, and only the `NacosAuthority` struct above that cache is rebuilt. §8
+  and §12's "a rebuilt authority is briefly empty" now apply only to a real
+  identity change. Unlike #33's shared pool, the watcher stays owned by the slot
+  that reuses it: exactly one owner, so `unsubscribe_all` keeps its meaning and
+  the retire path stays honest. Reuse logs `nacos connection reused` and does not
+  re-subscribe.
+- **Planning as a pure function.** `plan_slots(desired, previous) -> Vec<SlotPlan>`
+  returns `Carry(i)` (same position, exact `PluginConfig` equality),
+  `ReuseConnection(j)` (identity match anywhere, consumed on match so two plugins
+  on one server take two connections) or `Build`. D5's position rule survives for
+  the handlers; only connections are matched by identity. Ten unit cases test the
+  decision without a server, where before it was observable only through
+  `Arc::ptr_eq` on a chain that had to be built first — and one of them found a
+  bug on the way: taking the first free connection and checking its identity only
+  afterwards left the second plugin of a reordered pair with a fresh connection
+  (`reordered_connections_go_to_their_own_plugins`).
+- **Debounce and generation.** Both triggers send `ReloadRequest` on an unbounded
+  channel and `run_reload_loop` folds a burst newest-wins over `RELOAD_DEBOUNCE`
+  (500 ms); `Applied.generation` counts applied reloads — a skip or a rejection
+  does not move it — and rides on the applied and restart-warning lines.
+- **A truthful baseline.** §12 recorded the whole pushed configuration as the
+  baseline, so a restart-required field was reported once and then looked applied
+  forever. `adopt_hot_paths_only` moves only the hot paths into the baseline, so
+  every later reload still reports the field it cannot apply
+  (`a_restart_required_change_is_reported_and_kept_out_of_the_baseline`). Shape is
+  part of the same rule: `keep_hot_only` matches tables key by key, so a section
+  that exists in the pushed config only — an added `[server.tls]`, whose `Option`
+  field is absent from the in-force tree — never enters the baseline
+  (`a_section_the_process_never_opened_stays_out_of_the_baseline`), while a hot
+  path is adopted whole even where the old tree had none
+  (`the_first_plugins_entry_moves_into_the_baseline`).
+
+Verification after the port: `cargo fmt --all -- --check`, `cargo clippy
+--all-features --all-targets -- -D warnings`, `cargo test --workspace` and `cargo
+bench --no-run --workspace` exit 0; `tests/reload_test.rs` is at 30 cases; live
+against the same Podman `nacos-server:v2.5.4`, 9 of 9 ignored cases pass in 123.00 s.
+
+The four per-case process logs are what those claims rest on:
+
+- `e2e_push_ttl_only_reuses_the_nacos_connection` (15415): `nacos connection
+  reused plugin=nacos[nacos.e2e.test] addr=127.0.0.1:8848` at `05:58:27.338`,
+  `config reload applied source=nacos generation=1` under a millisecond later, no `unsubscribed
+  from all nacos services` in the file, and the zone sampled across the swap with
+  zero blips before the answer takes the pushed TTL;
+- `e2e_sighup_reloads_the_config_immediately` (15417): the same reuse line, applied
+  0.97 s after `config reload listening on SIGHUP`, with
+  `paths=["server.worker_threads"]` reported for the field it left alone;
+- `e2e_push_without_plugin_changes_keeps_the_warm_cache` (15418): applied with
+  `logging=true` and neither a reuse nor a retire line — the entry was carried, not
+  rebuilt;
+- `e2e_push_a_different_server_addr_retires_the_old_connection` (15419):
+  `unsubscribed from all nacos services` on the same millisecond as the applied
+  line, no reuse line, `paths=["remote_config.server_addr"]` reported, and the new
+  `localhost:8848` subscription reporting the instances 507 ms later — §12's gap,
+  now confined to the reload that actually moves the connection.

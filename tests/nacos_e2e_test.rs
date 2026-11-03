@@ -225,7 +225,57 @@ impl DoggyDns {
             .await;
     }
 
-    /// The `[remote_config]` section the three push cases append.
+    /// Publish `content`, sampling `qname` until the reload has been in force
+    /// for `WARM_SAMPLES_AFTER` samples; returns `(samples, applied_samples,
+    /// blips)`.
+    ///
+    /// A rebuilt authority owns its zone with an empty cache until its own
+    /// subscription reports instances, so a reuse that avoids the rebuild has to
+    /// be measured *across* the reload: the window opens when the chain is
+    /// swapped, which is one log line before the reload says it applied.
+    async fn publish_and_sample(
+        &self,
+        nacos: &NacosClient,
+        content: &str,
+        qname: &str,
+        served: impl Fn(&Message) -> bool,
+    ) -> (usize, usize, usize) {
+        self.publish(nacos, content).await;
+
+        let mut samples = 0usize;
+        let mut blips = 0usize;
+        let mut after_applied = 0usize;
+        let until = tokio::time::Instant::now() + PUSH_DEADLINE;
+        loop {
+            let answered = match self.send(qname, RecordType::A).await {
+                Some(message) => served(&message),
+                // Silence is the worst kind of blip.
+                None => false,
+            };
+            if !answered {
+                blips += 1;
+            }
+            samples += 1;
+            // The first `applied` in this log is this push: the content published
+            // before start-up is the file the process loaded, so it only ever
+            // skips.
+            if self.log_contains("config reload applied") {
+                after_applied += 1;
+                if after_applied >= WARM_SAMPLES_AFTER {
+                    break;
+                }
+            } else if tokio::time::Instant::now() >= until {
+                panic!(
+                    "timed out after {PUSH_DEADLINE:?} waiting for the reload of {qname}, \
+                     after {samples} samples"
+                );
+            }
+            tokio::time::sleep(WARM_POLL).await;
+        }
+        (samples, after_applied, blips)
+    }
+
+    /// The `[remote_config]` section the four push cases append.
     ///
     /// Committed configs keep the trigger off: the other cases only need the
     /// naming path, and a watcher per case would be one more connection to the
@@ -668,11 +718,12 @@ async fn start_with_remote_config(nacos: &NacosClient, port: u16) -> (String, Do
     (startup, server)
 }
 
-/// A configuration Nacos pushes replaces the authority chain while the resolver
-/// keeps answering: the record TTL is the visible proof.
+/// A pushed TTL — the change operators actually make — is applied on the
+/// connection that is already up: the same warm cache, a new TTL, and no stretch
+/// in which the zone answers nothing.
 #[tokio::test]
 #[ignore]
-async fn e2e_config_push_reloads_plugins() {
+async fn e2e_push_ttl_only_reuses_the_nacos_connection() {
     let port = 15415;
     let nacos = NacosClient::connect().await;
     nacos
@@ -683,22 +734,49 @@ async fn e2e_config_push_reloads_plugins() {
     let qname = service_qname("e2e-reload");
     server.await_a_with_ttl(&qname, 2, RECORD_TTL).await;
 
-    server
-        .publish(&nacos, &DoggyDns::with_ttl(&startup, PUSHED_TTL))
+    // Either TTL counts as served: what is being measured is whether the zone
+    // ever stops answering, not which configuration was in force for a sample.
+    let (samples, after_applied, blips) = server
+        .publish_and_sample(
+            &nacos,
+            &DoggyDns::with_ttl(&startup, PUSHED_TTL),
+            &qname,
+            |message| {
+                matches_a_with_ttl(message, 2, RECORD_TTL)
+                    || matches_a_with_ttl(message, 2, PUSHED_TTL)
+            },
+        )
         .await;
+
+    assert!(
+        samples > 20,
+        "the push has to have arrived after enough sampling to notice a gap, got {samples}"
+    );
+    assert_eq!(
+        after_applied, WARM_SAMPLES_AFTER,
+        "the gap check must outlast the reload it is checking"
+    );
+    assert_eq!(
+        blips, 0,
+        "a TTL change keeps the naming connection and the cache behind it, so the zone is \
+         never left unserved ({blips} of {samples} samples did not answer)"
+    );
+    assert!(
+        server.log_contains("nacos connection reused"),
+        "the reuse is what the reload reports, and the only thing that can explain no gap"
+    );
+    assert!(
+        !server.log_contains("unsubscribed from all nacos services"),
+        "reusing the connection must retire nothing"
+    );
+
+    // The new TTL is what the zone answers with now.
     let message = server.await_a_with_ttl(&qname, 2, PUSHED_TTL).await;
     assert_eq!(
         answer_ips(&message),
         HashSet::from(["10.0.0.51".to_string(), "10.0.0.52".to_string()]),
-        "a rebuilt authority re-reads the instances; it must not serve an empty zone"
+        "the reused cache still holds the instances it was pushed"
     );
-
-    // The watcher the old authority used is retired, not leaked: teardown
-    // unsubscribes it, and a reload does that synchronously — so the line shows
-    // up in the same window the answers did.
-    server
-        .await_log_line("unsubscribed from all nacos services")
-        .await;
 }
 
 /// A push that cannot be parsed changes nothing: the resolver keeps serving the
@@ -817,40 +895,14 @@ async fn e2e_push_without_plugin_changes_keeps_the_warm_cache() {
         .publish(&nacos, &DoggyDns::with_logging(&startup, true))
         .await;
 
-    // Sample the zone across the whole reload. A rebuilt authority owns it with
-    // an empty cache until its own subscription reports instances, and that
-    // window opens when the chain is swapped — which happens one log line
-    // before the reload says it applied. So sampling keeps running past the
-    // line instead of stopping at it.
-    let mut samples = 0usize;
-    let mut blips = 0usize;
-    let mut after_applied = 0usize;
-    let until = tokio::time::Instant::now() + PUSH_DEADLINE;
-    loop {
-        let answered = match server.send(&qname, RecordType::A).await {
-            Some(message) => matches_a_with_ttl(&message, 2, RECORD_TTL),
-            // Silence is the worst kind of blip.
-            None => false,
-        };
-        if !answered {
-            blips += 1;
-        }
-        samples += 1;
-        // The first `applied` in this log is this push: the content published
-        // before start-up is the file the process loaded, so it only ever skips.
-        if server.log_contains("config reload applied") {
-            after_applied += 1;
-            if after_applied >= WARM_SAMPLES_AFTER {
-                break;
-            }
-        } else if tokio::time::Instant::now() >= until {
-            panic!(
-                "timed out after {PUSH_DEADLINE:?} waiting for the logging push on {qname}, \
-                 after {samples} samples"
-            );
-        }
-        tokio::time::sleep(WARM_POLL).await;
-    }
+    let (samples, after_applied, blips) = server
+        .publish_and_sample(
+            &nacos,
+            &DoggyDns::with_logging(&startup, true),
+            &qname,
+            |message| matches_a_with_ttl(message, 2, RECORD_TTL),
+        )
+        .await;
 
     assert!(
         samples > 20,
@@ -878,4 +930,55 @@ async fn e2e_push_without_plugin_changes_keeps_the_warm_cache() {
     // is visible in the one query that follows the reload.
     server.send(&qname, RecordType::A).await;
     server.await_log_line("dns query completed").await;
+}
+
+/// A connection the new configuration does not ask for is unsubscribed rather
+/// than left behind, and the one it does ask for is opened and refilled.
+///
+/// `127.0.0.1:8848` and `localhost:8848` are the same server, so the reload can
+/// succeed — but they are different identities, so nothing is carried over. This
+/// is the half the pooling rule needs: reuse where the identity holds, and a
+/// real teardown where it does not.
+#[tokio::test]
+#[ignore]
+async fn e2e_push_a_different_server_addr_retires_the_old_connection() {
+    let port = 15419;
+    let nacos = NacosClient::connect().await;
+    nacos
+        .register("e2e-reconnect", &[("10.0.0.91", 8080), ("10.0.0.92", 8080)])
+        .await;
+
+    let (startup, server) = start_with_remote_config(&nacos, port).await;
+    let qname = service_qname("e2e-reconnect");
+    server.await_a_with_ttl(&qname, 2, RECORD_TTL).await;
+
+    // `patch_line` rewrites every `server_addr` line, so `[remote_config]` moves
+    // too: that field is not reloadable, and the same reload has to say so.
+    server
+        .publish(
+            &nacos,
+            &DoggyDns::patch_line(&startup, "server_addr", "\"localhost:8848\""),
+        )
+        .await;
+
+    server
+        .await_log_line("unsubscribed from all nacos services")
+        .await;
+    assert!(
+        !server.log_contains("nacos connection reused"),
+        "a different identity must not be matched to the old connection"
+    );
+    assert!(
+        server.log_contains("these configuration changes need a restart"),
+        "and the field a running process cannot change is reported, not applied"
+    );
+
+    // The fresh subscription re-reads the instances, so the zone is served again
+    // from the new connection.
+    let message = server.await_a_with_ttl(&qname, 2, RECORD_TTL).await;
+    assert_eq!(
+        answer_ips(&message),
+        HashSet::from(["10.0.0.91".to_string(), "10.0.0.92".to_string()]),
+        "the rebuilt authority must serve the instances from its own connection"
+    );
 }

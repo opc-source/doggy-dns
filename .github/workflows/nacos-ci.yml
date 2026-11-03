@@ -2,9 +2,9 @@ name: Nacos CI
 
 # Live-Nacos end-to-end coverage: tests/nacos_e2e_test.rs starts a real
 # doggy-dns process against a standalone Nacos server and resolves services
-# through the subscription cache. Three cases additionally publish a whole
+# through the subscription cache. Four cases additionally publish a whole
 # configuration and wait for the running resolver to serve it; they are slow on
-# purpose, because nacos-sdk notices config changes on a ~60 s poll. A fourth
+# purpose, because nacos-sdk notices config changes on a ~60 s poll. A fifth
 # edits the config file and sends SIGHUP, which is immediate. The cases are
 # #[ignore]d, so plain `cargo test --workspace` never needs a server.
 #

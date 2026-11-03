@@ -203,11 +203,24 @@ What a reload guarantees, and what it costs:
   validation, or a plugin that cannot connect is rejected at `error`; the running
   chain, the process and the trigger all stay as they were.
 - **Unchanged entries keep their connections.** A `[[plugins]]` entry equal to the
-  one in force *at the same position* is reused with its subscriptions and warm
-  instance cache; only changed entries are rebuilt, and a rebuilt nacos authority
-  serves its zone only after the new subscription reports the instances (about
-  half a second in our runs).
-  Moving an entry rebuilds it and everything after it.
+  one in force *at the same position* is reused with its handler, its
+  subscriptions and its warm instance cache. A nacos entry that differs only in
+  `dns_zone` or `ttl` keeps the naming *connection* as well: those two shape the
+  answers, not the connection, so a TTL push costs a new authority above the same
+  cache instead of a reconnect and a refill. Any other plugin change rebuilds the
+  entry — and a rebuilt nacos authority serves its zone only after its new
+  subscription reports the instances (about half a second in our runs), while the
+  connection it replaces is unsubscribed. Moving an entry rebuilds the entries
+  after it, but a connection is matched by `server_addr` + `namespace` + `group`
+  wherever it sits.
+- **A burst is one reload.** Requests arriving within 500 ms of each other fold
+  into the newest one, because a multi-line edit reaches Nacos as several pushes.
+  Each applied reload advances a generation, which the `config reload applied`
+  line carries.
+- **A restart-required field keeps being reported.** The baseline a reload records
+  is what is actually in force: only the hot paths move into it, so the next
+  reload names `server.port` again instead of quietly absorbing an edit the
+  running socket never took.
 - **A pushed configuration lands on a poll, not instantly.** Measured against a
   standalone Nacos 2.5.4 with nacos-sdk 0.8.3: the SDK notices the change on its
   60-second list-watch round, so plan for up to a minute of propagation; `SIGHUP`

@@ -7,13 +7,18 @@
 //! authority chain and the middleware set inside [`DoggyDnsHandler`], and
 //! reports whatever it deliberately did **not** apply.
 //!
-//! Reload is all-or-nothing: if parsing, validation, or chain building fails,
-//! the previous config stays in force and the pipeline records nothing, so a
-//! corrected push is not mistaken for a repeat.
+//! A reload rebuilds what can be rebuilt and keeps the rest: an unchanged
+//! `[[plugins]]` entry is carried over with its handler, and a nacos entry whose
+//! zone or TTL moved keeps its naming connection — with the instance cache
+//! already pushed into it — because a reconnect is the expensive part and a
+//! rebuilt authority would have to refill from scratch.
 //!
-//! The chain is built from [`PluginSlot`]s rather than a flat list because a
-//! reload must be able to *keep* the plugins that did not change: their Nacos
-//! connections, subscriptions, and — above all — warm instance caches.
+//! Reload is all-or-nothing for what it applies: if parsing, validation, or
+//! chain building fails, the previous chain keeps serving and the pipeline
+//! records nothing, so a corrected push is not mistaken for a repeat. The
+//! baseline it records is equally strict in the other direction — only the hot
+//! paths move into it, so a change that needs a restart is reported every time
+//! until the restart happens.
 
 use anyhow::Result;
 use doggy_dns_control::live::{LiveProbe, LiveState, nacos_zone_signal};
@@ -54,9 +59,10 @@ impl std::fmt::Display for ReloadSource {
 
 /// One configured plugin plus whatever was built for it.
 ///
-/// `plugin` is the equality unit for reload reuse: when a reload's plugin at
-/// the same index compares equal, the already-built handler (and the watcher
-/// behind it) is carried over instead of rebuilt.
+/// `plugin` is what a reload matches on: unchanged at the same index, the whole
+/// slot carries over with its handler; changed in zone or TTL only, the `watcher`
+/// is handed to the new slot and only the authority above it is rebuilt, so the
+/// warm instance cache comes along.
 pub struct PluginSlot {
     plugin: PluginConfig,
     /// Display name recorded in the authority chain.
@@ -116,8 +122,44 @@ pub fn nacos_zone_signals(slots: &[PluginSlot]) -> Vec<LiveProbe> {
         .collect()
 }
 
+/// The values a nacos plugin falls back to when the config leaves them unset.
+const DEFAULT_SERVER_ADDR: &str = "127.0.0.1:8848";
+const DEFAULT_NAMESPACE: &str = "public";
+const DEFAULT_GROUP: &str = "DEFAULT_GROUP";
+const DEFAULT_ZONE: &str = "nacos.local";
+
 /// The upstream addrs used when no plugins are configured at all.
 const DEFAULT_UPSTREAM: [&str; 2] = ["8.8.8.8:53", "1.1.1.1:53"];
+
+/// What identifies one naming connection.
+///
+/// Zone and TTL are deliberately absent: they shape the answers built on top of
+/// a cache, not the connection feeding it. Changing either one therefore keeps
+/// the connection — and every instance already pushed into its cache.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct NacosIdentity {
+    server_addr: String,
+    namespace: String,
+    group: String,
+}
+
+/// The connection coordinates of a nacos plugin, defaults applied.
+fn nacos_identity(plugin: &PluginConfig) -> NacosIdentity {
+    NacosIdentity {
+        server_addr: plugin
+            .server_addr
+            .clone()
+            .unwrap_or_else(|| DEFAULT_SERVER_ADDR.to_string()),
+        namespace: plugin
+            .namespace
+            .clone()
+            .unwrap_or_else(|| DEFAULT_NAMESPACE.to_string()),
+        group: plugin
+            .group
+            .clone()
+            .unwrap_or_else(|| DEFAULT_GROUP.to_string()),
+    }
+}
 
 /// The [`PluginConfig`] that describes the implicit default forward plugin.
 ///
@@ -153,13 +195,100 @@ fn effective_plugins(config: &DoggyDnsConfig) -> Vec<PluginConfig> {
     }
 }
 
+/// What a reload will do with one desired plugin, decided before anything is
+/// built so that the fallible part and the consuming part stay separate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SlotPlan {
+    /// Carry the previous slot at this index: unchanged config, same handler.
+    Carry(usize),
+    /// Keep the naming connection of the previous slot at this index and build
+    /// a fresh authority above it: only the zone or the TTL moved.
+    ReuseConnection(usize),
+    /// Build from scratch — a new connection, a new forwarder, an empty cache.
+    Build,
+}
+
+/// The share of a previous slot a reuse plan can see.
+///
+/// The plan is pure: it decides from configuration alone, so the rules are
+/// testable without a naming service behind them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreviousEntry {
+    pub plugin: PluginConfig,
+    /// Whether the slot still owns a live naming connection.
+    pub has_connection: bool,
+}
+
+impl PreviousEntry {
+    fn of(slot: &PluginSlot) -> Self {
+        Self {
+            plugin: slot.plugin.clone(),
+            has_connection: slot.watcher.is_some(),
+        }
+    }
+}
+
+/// Plan one reload: which desired entries are carried, which keep a connection,
+/// which have to be built.
+///
+/// Exact matches are index-pinned, because order is the chain's semantics; a
+/// nacos connection is matched by identity anywhere in the previous chain, so
+/// reordering two zones on one server keeps both connections. Matching consumes:
+/// a previous entry backs at most one desired entry.
+pub fn plan_slots(desired: &[PluginConfig], previous: &[PreviousEntry]) -> Vec<SlotPlan> {
+    let mut taken = vec![false; previous.len()];
+
+    // 1. Unchanged entries carry over as they stand.
+    let mut plans: Vec<SlotPlan> = desired
+        .iter()
+        .enumerate()
+        .map(|(index, plugin)| {
+            if previous
+                .get(index)
+                .is_some_and(|entry| &entry.plugin == plugin)
+            {
+                taken[index] = true;
+                SlotPlan::Carry(index)
+            } else {
+                SlotPlan::Build
+            }
+        })
+        .collect();
+
+    // 2. What is left may still want an existing connection.
+    for (index, plugin) in desired.iter().enumerate() {
+        if plans[index] != SlotPlan::Build || !plugin.enabled || plugin.kind != PluginKind::Nacos {
+            continue;
+        }
+        let want = nacos_identity(plugin);
+        // The first free connection that matches, not the first free connection:
+        // two plugins on one server reorder, and a `find` followed by a `filter`
+        // would let the second entry's connection go unclaimed.
+        let free = previous
+            .iter()
+            .enumerate()
+            .find(|(other, entry)| {
+                !taken[*other] && entry.has_connection && nacos_identity(&entry.plugin) == want
+            })
+            .map(|(other, _)| other);
+        if let Some(other) = free {
+            taken[other] = true;
+            plans[index] = SlotPlan::ReuseConnection(other);
+        }
+    }
+
+    plans
+}
+
 /// Build the authority chain for `config`, reusing whatever is still valid
 /// from `previous`.
 ///
-/// Matching is by index and by full [`PluginConfig`] equality: an insertion in
-/// the middle therefore rebuilds every plugin after it. That is the accepted
-/// trade-off (see the design doc) — order is the chain's semantics, so any
-/// smarter matching would have to prove it preserves it.
+/// An entry whose [`PluginConfig`] is unchanged is carried over whole, handler
+/// included. One whose zone or TTL changed keeps its naming connection and only
+/// rebuilds the authority sitting on top of the shared cache, which is what
+/// makes the commonest operational change — a TTL tweak — cost nothing but a
+/// struct. Anything else is rebuilt, and whatever `previous` still holds at the
+/// end is unsubscribed, so a reload never leaves a subscription behind.
 ///
 /// `previous` is only touched once every fallible step succeeded, so an error
 /// leaves the caller's chain exactly as it was.
@@ -169,19 +298,14 @@ pub async fn build_chain(
 ) -> Result<Vec<PluginSlot>> {
     let desired = effective_plugins(config);
     let is_default_chain = config.plugins.is_empty();
+    let entries: Vec<PreviousEntry> = previous.iter().map(PreviousEntry::of).collect();
+    let plans = plan_slots(&desired, &entries);
 
-    // 1. Plan: which desired entries can be carried over as they stand.
-    let mut reuse: Vec<bool> = Vec::with_capacity(desired.len());
-    for (i, plugin) in desired.iter().enumerate() {
-        let carried = previous.get(i).is_some_and(|slot| &slot.plugin == plugin);
-        reuse.push(carried);
-    }
-
-    // 2. Build what cannot be carried. Anything created here is unsubscribed
+    // 1. Build what cannot be carried. Anything created here is unsubscribed
     //    and dropped if a later entry fails, so the old chain stays whole.
     let mut built: Vec<Option<PluginSlot>> = Vec::with_capacity(desired.len());
     for (i, plugin) in desired.iter().enumerate() {
-        if reuse[i] {
+        if plans[i] != SlotPlan::Build {
             built.push(None);
             continue;
         }
@@ -210,29 +334,62 @@ pub async fn build_chain(
         }
     }
 
-    // 3. Commit: only now is `previous` consumed.
+    // 2. Commit: only now is `previous` consumed. Reuse is infallible — a
+    //    connection is either there or it is not, and the plan said it is.
     let mut slots: Vec<PluginSlot> = Vec::with_capacity(desired.len());
     for (i, plugin) in desired.iter().enumerate() {
-        if reuse[i] {
-            let old = &mut previous[i];
-            slots.push(PluginSlot {
-                plugin: plugin.clone(),
-                name: std::mem::take(&mut old.name),
-                handler: old.handler.take(),
-                watcher: old.watcher.take(),
-                zone: old.zone.take(),
-            });
-        } else {
-            slots.push(
-                built
-                    .get_mut(i)
-                    .and_then(|slot| slot.take())
-                    .expect("a planned fresh slot is built above"),
-            );
-        }
+        let slot = match plans[i] {
+            SlotPlan::Carry(old) => {
+                let previous = &mut previous[old];
+                PluginSlot {
+                    plugin: plugin.clone(),
+                    name: std::mem::take(&mut previous.name),
+                    handler: previous.handler.take(),
+                    watcher: previous.watcher.take(),
+                    zone: previous.zone.take(),
+                }
+            }
+            SlotPlan::ReuseConnection(old) => {
+                let previous = &mut previous[old];
+                // `plan_slots` only plans a reuse for a slot that owns a
+                // watcher, and step 1 never touched this one.
+                let watcher = previous
+                    .watcher
+                    .take()
+                    .expect("a planned reuse owns a watcher");
+                let zone = plugin
+                    .dns_zone
+                    .as_deref()
+                    .unwrap_or(DEFAULT_ZONE)
+                    .to_string();
+                let authority = NacosAuthority::new(watcher.cache(), &zone, plugin.ttl);
+                let name = format!("nacos[{zone}]");
+                tracing::info!(
+                    plugin = %name,
+                    addr = %nacos_identity(plugin).server_addr,
+                    "nacos connection reused"
+                );
+                // The old slot's handler was built on the same cache but with
+                // the previous zone/TTL; drop it, keep the connection.
+                previous.handler = None;
+                previous.name.clear();
+                previous.zone = None;
+                PluginSlot {
+                    plugin: plugin.clone(),
+                    name,
+                    handler: Some(Arc::new(authority)),
+                    watcher: Some(watcher),
+                    zone: Some(zone),
+                }
+            }
+            SlotPlan::Build => built[i]
+                .take()
+                .expect("a planned fresh slot is built above"),
+        };
+        slots.push(slot);
     }
 
-    // 4. Retire: everything `previous` still holds was not carried over.
+    // 3. Retire: everything `previous` still holds was not carried over.
     for old in previous.iter_mut() {
         if let Some(watcher) = old.watcher.take() {
             watcher.unsubscribe_all().await;
@@ -275,12 +432,15 @@ async fn build_slot(plugin: &PluginConfig) -> Result<PluginSlot> {
 
     match plugin.kind {
         PluginKind::Nacos => {
-            let addr = plugin.server_addr.as_deref().unwrap_or("127.0.0.1:8848");
-            let ns = plugin.namespace.as_deref().unwrap_or("public");
-            let grp = plugin.group.as_deref().unwrap_or("DEFAULT_GROUP");
-            let zone = plugin.dns_zone.as_deref().unwrap_or("nacos.local");
+            let identity = nacos_identity(plugin);
+            let zone = plugin.dns_zone.as_deref().unwrap_or(DEFAULT_ZONE);
 
-            let watcher = NacosServiceWatcher::new(addr, ns, grp).await?;
+            let watcher = NacosServiceWatcher::new(
+                &identity.server_addr,
+                &identity.namespace,
+                &identity.group,
+            )
+            .await?;
             watcher.subscribe_all().await;
             let cache = watcher.cache();
 
@@ -380,12 +540,16 @@ pub fn restart_required(old: &DoggyDnsConfig, new: &DoggyDnsConfig) -> Vec<Strin
     };
     let mut paths = Vec::new();
     collect_diffs("", &old, &new, &mut paths);
-    paths.retain(|path| {
-        !HOT_PATHS
-            .iter()
-            .any(|hot| path == hot || path.starts_with(&format!("{hot}.")))
-    });
+    paths.retain(|path| !is_hot_path(path));
     paths
+}
+
+/// Whether `path` names the hot subset or something under it.
+fn is_hot_path(path: &str) -> bool {
+    !path.is_empty()
+        && HOT_PATHS
+            .iter()
+            .any(|hot| path == *hot || path.starts_with(&format!("{}.", *hot)))
 }
 
 fn collect_diffs(prefix: &str, old: &toml::Value, new: &toml::Value, out: &mut Vec<String>) {
@@ -407,17 +571,99 @@ fn collect_diffs(prefix: &str, old: &toml::Value, new: &toml::Value, out: &mut V
     }
 }
 
-/// What is in force: the text a configuration came from, what it parsed to, and
-/// the chain built from it.
+/// `new` with every non-hot path replaced by the value still in force.
 ///
-/// Startup produces the three together and a reload replaces them together, so
-/// they travel together — [`ReloadCoordinator::new`] takes one of these.
+/// This is what a reload records as the baseline: the hot subset moved, the rest
+/// of the process is unchanged, and the next comparison has to say so again.
+/// Absorbing a restart-required field into the baseline instead would let the
+/// first reload after an edit silence the warning while the socket is still
+/// bound to the old value.
+///
+/// Reporting only, like [`restart_required`]: a config that cannot make the
+/// round trip through TOML is taken as in force, with a warn.
+fn adopt_hot_paths_only(old: &DoggyDnsConfig, new: &DoggyDnsConfig) -> DoggyDnsConfig {
+    let merged = match (toml::Value::try_from(old), toml::Value::try_from(new)) {
+        (Ok(old_value), Ok(new_value)) => keep_hot_only("", &old_value, &new_value),
+        _ => {
+            tracing::warn!(
+                "cannot compare configurations as TOML; the incoming config is taken as in force"
+            );
+            return new.clone();
+        }
+    };
+    match merged.try_into::<DoggyDnsConfig>() {
+        Ok(config) => config,
+        Err(error) => {
+            tracing::warn!(
+                %error,
+                "merged configuration does not deserialise; the incoming config is taken as in force"
+            );
+            new.clone()
+        }
+    }
+}
+
+/// The tables of `new` with everything outside [`HOT_PATHS`] taken from `old`.
+///
+/// Shape matters as much as value here. A section `new` adds that the process
+/// never opened stays out of the baseline — an added `[control]` or
+/// `[remote_config]` is still a restart-required difference — and a hot path the
+/// incoming config drops leaves the baseline too, because the chain the reload
+/// built really is the one without it.
+fn keep_hot_only(prefix: &str, old: &toml::Value, new: &toml::Value) -> toml::Value {
+    if let (toml::Value::Table(old), toml::Value::Table(new)) = (old, new) {
+        let keys: BTreeSet<&String> = old.keys().chain(new.keys()).collect();
+        let mut merged = toml::Table::new();
+        for key in keys {
+            let path = if prefix.is_empty() {
+                key.clone()
+            } else {
+                format!("{prefix}.{key}")
+            };
+            if is_hot_path(&path) {
+                // Adopted as a whole, "the incoming config has none" included.
+                if let Some(value) = new.get(key) {
+                    merged.insert(key.clone(), value.clone());
+                }
+                continue;
+            }
+            match (old.get(key), new.get(key)) {
+                (Some(old_value), Some(new_value)) => {
+                    merged.insert(key.clone(), keep_hot_only(&path, old_value, new_value));
+                }
+                // In force and no longer asked for: the process still runs it, so
+                // the next comparison has to keep reporting the difference.
+                (Some(old_value), None) => {
+                    merged.insert(key.clone(), old_value.clone());
+                }
+                // Asked for and never applied: not in force, so it stays out.
+                (None, Some(_)) | (None, None) => {}
+            }
+        }
+        return toml::Value::Table(merged);
+    }
+    old.clone()
+}
+
+/// What is in force: the text a configuration came from, what the running
+/// process actually applies of it, the chain built from it, and how many times
+/// it has been reloaded.
+///
+/// Startup produces these together and a reload replaces them together, so they
+/// travel together — [`ReloadCoordinator::new`] takes one of these.
+///
+/// `config` is deliberately *not* the whole of `raw`: a reload applies the hot
+/// paths and leaves the rest at the values the process is really running, so the
+/// restart-required warning keeps naming the same fields until the restart
+/// happens ([`adopt_hot_paths_only`]).
 pub struct Applied {
     /// The raw, unexpanded text last applied — the identical-content guard and
     /// the input for the control plane's redacted snapshot.
     pub raw: String,
     pub config: DoggyDnsConfig,
     pub slots: Vec<PluginSlot>,
+    /// Reloads applied so far; 0 is the start-up configuration.
+    pub generation: u64,
 }
 
 /// How a reload request ended. [`ReloadCoordinator::apply_reload`] already logs
@@ -425,12 +671,66 @@ pub struct Applied {
 /// work from a no-op rather than read the log.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReloadOutcome {
-    /// The new config is now in force.
-    Applied,
+    /// The new config is now in force, at this generation.
+    Applied { generation: u64 },
     /// Identical to what is already in force.
     Skipped,
     /// Rejected: unreadable, invalid, or unbuildable. The old config stays.
     Rejected,
+}
+
+/// A reload request, from whichever trigger.
+#[derive(Debug, Clone)]
+pub struct ReloadRequest {
+    pub source: ReloadSource,
+    /// Pushed content; `None` means re-read the startup file.
+    pub raw: Option<String>,
+}
+
+impl ReloadRequest {
+    /// `kill -HUP`: re-read the file the process started with.
+    pub fn sighup() -> Self {
+        Self {
+            source: ReloadSource::Sighup,
+            raw: None,
+        }
+    }
+
+    /// Content pushed by the remote config service.
+    pub fn nacos(content: String) -> Self {
+        Self {
+            source: ReloadSource::Nacos,
+            raw: Some(content),
+        }
+    }
+}
+
+/// How long a burst of reload requests is folded into one.
+///
+/// The window exists for the remote trigger: an edit that changes several lines
+/// arrives as several pushes, and each reload would rebuild the chain again.
+/// A burst therefore costs one reload — the newest request, because it carries
+/// the newest intent. Folding stops as soon as the channel is quiet for the
+/// window, so a steady stream of pushes still gets served, one reload per
+/// window.
+pub const RELOAD_DEBOUNCE: Duration = Duration::from_millis(500);
+
+/// Apply reload requests as they arrive, one at a time, coalescing bursts.
+///
+/// Both triggers hand their requests over and return, which keeps a signal
+/// handler from awaiting a rebuild it cannot cancel; the channel closing (every
+/// sender dropped, i.e. shutdown) ends the task.
+pub async fn run_reload_loop(
+    coordinator: Arc<ReloadCoordinator>,
+    mut requests: tokio::sync::mpsc::UnboundedReceiver<ReloadRequest>,
+) {
+    while let Some(first) = requests.recv().await {
+        let mut newest = first;
+        while let Ok(Some(request)) = tokio::time::timeout(RELOAD_DEBOUNCE, requests.recv()).await {
+            newest = request;
+        }
+        coordinator.apply_reload(newest.source, newest.raw).await;
+    }
 }
 
 /// Owns the in-force chain and applies reloads to it.
@@ -474,6 +774,12 @@ impl ReloadCoordinator {
     /// The config currently in force.
     pub async fn applied_config(&self) -> DoggyDnsConfig {
         self.applied.lock().await.config.clone()
+    }
+
+    /// How many reloads have been applied; 0 means the start-up config is
+    /// still in force. A rejected or skipped request does not move it.
+    pub async fn generation(&self) -> u64 {
+        self.applied.lock().await.generation
     }
 
     /// Apply a new config, or keep the old one. Never fails the caller: a
@@ -550,11 +856,14 @@ impl ReloadCoordinator {
 
         let plugin_count = slots.len();
         applied.raw = raw;
-        applied.config = config;
+        applied.config = adopt_hot_paths_only(&applied.config, &config);
         applied.slots = slots;
+        applied.generation += 1;
+        let generation = applied.generation;
 
         tracing::info!(
             source = %source,
+            generation,
             plugins = plugin_count,
             logging = applied.config.middleware.logging,
             rotate_answers = applied.config.server.rotate_answers,
@@ -563,10 +872,11 @@ impl ReloadCoordinator {
         if !deferred.is_empty() {
             tracing::warn!(
                 source = %source,
+                generation,
                 paths = ?deferred,
                 "these configuration changes need a restart to take effect"
             );
         }
-        ReloadOutcome::Applied
+        ReloadOutcome::Applied { generation }
     }
 }
