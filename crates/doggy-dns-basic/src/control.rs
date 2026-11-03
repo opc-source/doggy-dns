@@ -1,10 +1,10 @@
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 /// Node-side service control plane: one HTTP listener exposing the MCP
 /// introspection protocol and plain health endpoints for probes.
 /// The centralized admin UI lives in the separate doggy-dns-console project,
 /// which consumes these endpoints.
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub struct ControlConfig {
     #[serde(default)]
     pub enabled: bool,

@@ -160,10 +160,10 @@ Points worth knowing before reading a failure:
 
 | Test File | Tests | Description |
 |-----------|-------|-------------|
-| `crates/doggy-dns-basic/tests/config_test.rs` | 59 | Config parsing, defaults, validation (plugins/TLS/HTTPS/remote_config/observability/xdp/control plane), `parse_config` on content that never touched disk |
+| `crates/doggy-dns-basic/tests/config_test.rs` | 60 | Config parsing, defaults, validation (plugins/TLS/HTTPS/remote_config/observability/xdp/control plane), `parse_config` on content that never touched disk |
 | `crates/doggy-dns-basic/tests/env_test.rs` | 8 | `${ENV_VAR}` expansion across tables and arrays, malformed references |
 | `crates/doggy-dns-basic/tests/net_test.rs` | 5 | IPv4/IPv6 listen-address parsing, bracketed literals, rejects hostnames |
-| `crates/doggy-dns-basic/tests/reload_compat_test.rs` | 7 | The reload allow-list: one case per forbidden config path, reloadable changes accepted, a forbidden change refuses the whole candidate |
+| `crates/doggy-dns-basic/tests/reload_compat_test.rs` | 10 | The reload allow-list: reloadable changes accepted, every config leaf outside them refused, the serialised config round-trips and the structural walk reports each changed path |
 | `crates/doggy-dns-core/tests/handler_test.rs` | 17 | Handler pipeline: NoError, NXDomain, NODATA, ServFail, Refused, middleware callbacks, EDNS cache admission, AA/RA flags, SOA on negatives |
 | `crates/doggy-dns-core/tests/handler_reload_test.rs` | 4 | A reload reaching the live handler: swapped chain answers the next query, TTL moves, rotation toggles, concurrent queries never mix two generations |
 | `crates/doggy-dns-core/tests/middleware_test.rs` | 3 | Logging middleware: `before_request` continues, `after_request` completes, the shared toggle suppresses and restores the lines |

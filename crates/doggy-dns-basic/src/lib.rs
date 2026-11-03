@@ -19,7 +19,7 @@ pub mod time;
 pub mod validate;
 pub mod xdp;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 pub use control::{CONTROL_ENDPOINTS, ControlConfig};
 pub use load::{load_config, parse_config};
@@ -35,7 +35,7 @@ pub use server::{HttpsConfig, ServerConfig, TlsConfig};
 pub use validate::validate_config;
 pub use xdp::XdpConfig;
 
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub struct DoggyDnsConfig {
     pub server: ServerConfig,
     #[serde(default)]

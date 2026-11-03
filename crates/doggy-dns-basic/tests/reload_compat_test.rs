@@ -5,9 +5,11 @@
 //!
 //! A reload rebuilds the query path only, so the compat check is an allow-list:
 //! `[[plugins]]`, `server.rotate_answers` and `middleware.logging` may differ,
-//! anything else makes the whole reload invalid. Each forbidden path gets its own
-//! case here because the message an operator reads has to name the line they
-//! actually changed.
+//! anything else makes the whole reload invalid. The list is enforced by walking
+//! the two serialised configs, so the cases below check two things: that each
+//! forbidden change reports the exact line an operator edited, and that every
+//! leaf of a config is covered by the walk — the property that makes a newly
+//! added field restart-required without anyone having to list it.
 
 use doggy_dns_basic::{DoggyDnsConfig, is_reloadable, parse_config, reload_conflicts};
 
@@ -103,7 +105,7 @@ const FORBIDDEN: &[(&str, Mutation)] = &[
     ("server.cpu_affinity", |config| {
         config.server.cpu_affinity = Some(vec![2, 3])
     }),
-    ("server.tls", |config| {
+    ("server.tls.port", |config| {
         config
             .server
             .tls
@@ -111,7 +113,7 @@ const FORBIDDEN: &[(&str, Mutation)] = &[
             .expect("the base config configures tls")
             .port = 8883;
     }),
-    ("server.https", |config| {
+    ("server.https.enabled", |config| {
         config
             .server
             .https
@@ -122,14 +124,14 @@ const FORBIDDEN: &[(&str, Mutation)] = &[
     ("middleware.log_format", |config| {
         config.middleware.log_format = Some("text".to_string())
     }),
-    ("remote_config", |config| {
+    ("remote_config.data_id", |config| {
         config.remote_config.data_id = "other.toml".to_string()
     }),
-    ("observability", |config| {
+    ("observability.enabled", |config| {
         config.observability.enabled = true
     }),
-    ("xdp", |config| config.xdp.enabled = true),
-    ("control", |config| config.control.enabled = true),
+    ("xdp.enabled", |config| config.xdp.enabled = true),
+    ("control.enabled", |config| config.control.enabled = true),
 ];
 
 #[test]
@@ -163,12 +165,16 @@ fn every_forbidden_change_is_refused_together() {
     for (_, mutate) in FORBIDDEN {
         mutate(&mut candidate);
     }
-    let conflicts = reload_conflicts(&base(), &candidate);
-    let expected: Vec<String> = FORBIDDEN
+    let mut conflicts = reload_conflicts(&base(), &candidate);
+    let mut expected: Vec<String> = FORBIDDEN
         .iter()
         .map(|(path, _)| (*path).to_string())
         .collect();
-    assert_eq!(conflicts, expected, "conflicts are reported in table order");
+    // The walk reports in document order (each table's keys sorted), which is
+    // not the order these cases are written in.
+    conflicts.sort();
+    expected.sort();
+    assert_eq!(conflicts, expected);
 }
 
 #[test]
@@ -224,4 +230,165 @@ fn plugin_order_changes_are_reloadable() {
     let mut candidate = base();
     candidate.plugins.reverse();
     assert!(is_reloadable(&base(), &candidate));
+}
+
+/// The whole config as the walk sees it.
+fn as_document(config: &DoggyDnsConfig) -> toml::Value {
+    toml::Value::try_from(config).expect("every config must serialise to TOML to be comparable")
+}
+
+/// Every leaf path of a document, using the walk's convention: a table is
+/// descended, anything else — arrays included — is one leaf.
+fn leaf_paths(prefix: &str, document: &toml::Value, out: &mut Vec<String>) {
+    match document {
+        toml::Value::Table(table) => {
+            for (key, value) in table {
+                let path = if prefix.is_empty() {
+                    key.clone()
+                } else {
+                    format!("{prefix}.{key}")
+                };
+                leaf_paths(&path, value, out);
+            }
+        }
+        _ => {
+            if !prefix.is_empty() {
+                out.push(prefix.to_string());
+            }
+        }
+    }
+}
+
+fn leaves_of(document: &toml::Value) -> Vec<String> {
+    let mut leaves = Vec::new();
+    leaf_paths("", document, &mut leaves);
+    leaves.sort();
+    leaves
+}
+
+/// Change a leaf without changing what kind of value it is.
+fn mutate(value: &mut toml::Value) {
+    match value {
+        toml::Value::String(text) => text.push_str("-mutated"),
+        toml::Value::Integer(number) => *number = if *number == 0 { 1 } else { *number - 1 },
+        toml::Value::Boolean(flag) => *flag = !*flag,
+        toml::Value::Float(number) => *number += 0.5,
+        toml::Value::Array(items) => {
+            match items.first() {
+                // Repeating an element changes the array without changing the
+                // type of anything in it.
+                Some(first) => items.push(first.clone()),
+                // Every empty array in the config holds strings today; another
+                // element type needs a case here.
+                None => items.push(toml::Value::String("mutated".to_string())),
+            }
+        }
+        // A table is descended to its own leaves, so one never reaches here.
+        toml::Value::Table(_) => unreachable!("a table is not a leaf"),
+        toml::Value::Datetime(_) => {
+            // No config field is a TOML date today; if one appears, this test
+            // has to learn how to change one.
+            unreachable!("the config has a datetime leaf; teach mutate() to change it")
+        }
+    }
+}
+
+/// The value at a dotted leaf path.
+fn lookup<'a>(document: &'a toml::Value, path: &str) -> Option<&'a toml::Value> {
+    let mut cursor = document;
+    for key in path.split('.') {
+        cursor = cursor.get(key)?;
+    }
+    Some(cursor)
+}
+
+/// Apply `mutate` to the leaf at `path` of `document`.
+fn mutate_leaf(document: &mut toml::Value, path: &str) {
+    let mut cursor = document;
+    for key in path.split('.') {
+        cursor = cursor
+            .get_mut(key)
+            .unwrap_or_else(|| panic!("{path} names a leaf that the document does not have"));
+    }
+    mutate(cursor);
+}
+
+fn is_hot(path: &str) -> bool {
+    doggy_dns_basic::reload::HOT_PATHS
+        .iter()
+        .any(|hot| path == *hot || path.starts_with(&format!("{hot}.")))
+}
+
+#[test]
+fn the_serialised_config_round_trips_without_losing_a_field() {
+    // The structural check is only as exhaustive as this round trip: a field
+    // that does not survive it is invisible to the gate.
+    let in_force = base();
+    let back: DoggyDnsConfig = as_document(&in_force)
+        .try_into()
+        .expect("a serialised config must deserialise back to itself");
+    assert_eq!(in_force, back);
+}
+
+#[test]
+fn the_walk_reports_every_leaf_of_the_config() {
+    let in_force = as_document(&base());
+    let leaves = leaves_of(&in_force);
+    assert!(
+        !leaves.is_empty(),
+        "the base config must exercise every section"
+    );
+    for path in leaves {
+        let mut candidate = in_force.clone();
+        mutate_leaf(&mut candidate, &path);
+        assert_eq!(
+            doggy_dns_basic::reload::diff_paths(&in_force, &candidate),
+            vec![path.clone()],
+            "changing {path} alone must be reported at {path}"
+        );
+    }
+}
+
+#[test]
+fn the_gate_refuses_every_leaf_outside_the_hot_paths() {
+    let in_force = base();
+    let document = as_document(&in_force);
+    let mut tag_valued = Vec::new();
+    for path in leaves_of(&document) {
+        let mut candidate_document = document.clone();
+        mutate_leaf(&mut candidate_document, &path);
+        // A leaf whose Rust type accepts only a fixed set of tags (the
+        // `#[serde(rename)]` enums) cannot be mutated into another valid tag
+        // without knowing that set, so it does not deserialise. The walk case
+        // above already proves those paths are compared; here they are checked
+        // to be exactly the tag-valued ones and nothing else.
+        let Ok(candidate) = candidate_document.try_into::<DoggyDnsConfig>() else {
+            assert!(
+                matches!(lookup(&document, &path), Some(toml::Value::String(_))),
+                "{path} is not a string tag, so the generic mutation should have \
+                 produced a value that deserialises"
+            );
+            tag_valued.push(path);
+            continue;
+        };
+        let conflicts = reload_conflicts(&in_force, &candidate);
+        if is_hot(&path) {
+            assert!(
+                conflicts.is_empty(),
+                "{path} is on the hot list and must be applied in place, got {conflicts:?}"
+            );
+        } else {
+            assert_eq!(
+                conflicts,
+                vec![path.clone()],
+                "{path} is not on the hot list and must be refused by that path"
+            );
+        }
+    }
+    // Not a list to maintain: a reload that could not be checked this way has to
+    // be explained.
+    assert!(
+        tag_valued.iter().all(|path| !is_hot(path)),
+        "a hot path must accept any value its type allows: {tag_valued:?}"
+    );
 }

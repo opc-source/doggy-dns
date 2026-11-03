@@ -77,6 +77,12 @@ pub fn validate_config(config: &DoggyDnsConfig) -> anyhow::Result<()> {
             !config.remote_config.data_id.is_empty(),
             "remote_config.data_id is required when remote_config is enabled"
         );
+        // The SDK rejects a blank group when the listener registers, so an
+        // enabled trigger without one would never deliver a push.
+        anyhow::ensure!(
+            !config.remote_config.group.is_empty(),
+            "remote_config.group is required when remote_config is enabled"
+        );
     }
     validate_plugins(&config.plugins)?;
     validate_observability(&config.observability)?;
