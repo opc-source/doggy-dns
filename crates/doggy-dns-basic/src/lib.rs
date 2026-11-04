@@ -18,10 +18,10 @@ pub mod time;
 pub mod validate;
 pub mod xdp;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 pub use control::{CONTROL_ENDPOINTS, ControlConfig};
-pub use load::load_config;
+pub use load::{load_config, parse_config};
 pub use middleware::MiddlewareConfig;
 pub use observability::{
     BasicAuthConfig, LogsConfig, MetricsConfig, MetricsTemporality, ObservabilityBackend,
@@ -33,7 +33,7 @@ pub use server::{HttpsConfig, ServerConfig, TlsConfig};
 pub use validate::validate_config;
 pub use xdp::XdpConfig;
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct DoggyDnsConfig {
     pub server: ServerConfig,
     #[serde(default)]

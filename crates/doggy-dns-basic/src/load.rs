@@ -18,7 +18,10 @@ pub fn load_config(path: &str) -> anyhow::Result<(DoggyDnsConfig, String)> {
 }
 
 /// Parse, expand `${ENV_VAR}` references, and validate TOML content.
-fn parse_config(content: &str) -> anyhow::Result<DoggyDnsConfig> {
+///
+/// Public so the reload pipeline validates a pushed or re-read config with
+/// exactly the rules startup uses.
+pub fn parse_config(content: &str) -> anyhow::Result<DoggyDnsConfig> {
     let mut document: toml::Value = toml::from_str(content)?;
     crate::env::expand_env_in_value(&mut document, &|name| std::env::var(name).ok())?;
     let config: DoggyDnsConfig = document.try_into()?;

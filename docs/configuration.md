@@ -65,6 +65,7 @@ enabled = false       # CPU only, Linux/macOS, OTLP Profiles Alpha
 [[plugins]]
 kind = "nacos"
 enabled = false
+# An enabled nacos plugin needs all four of these; nothing fills in a default.
 server_addr = "127.0.0.1:8848"
 namespace = "public"
 group = "DEFAULT_GROUP"
@@ -86,7 +87,8 @@ cache_size = 1024
 min_ttl = 30
 max_ttl = 600
 
-# Optional: hot-reload config from Nacos config service
+# Optional: reload from a Nacos config data id; see "Hot reload" for what a
+# push changes at runtime and how long it takes to land
 [remote_config]
 enabled = false
 server_addr = "127.0.0.1:8848"
@@ -180,6 +182,80 @@ apex `SOA`. With the XDP fast path enabled the kernel answers a cache hit
 without consulting userspace again, so a hit replays the order that was captured
 when the entry was written until its TTL expires; startup logs one `warn` when
 both settings are on. See [xdp.md](xdp.md#limitations--notes).
+
+## Hot reload
+
+`[remote_config]` takes a whole configuration published to a Nacos config data
+id, and that push is the only trigger. `SIGHUP` is caught and ignored: it
+re-reads nothing and cannot take the resolver down.
+
+Applied without a restart: `[[plugins]]` (order, kind, every field),
+`middleware.logging` and `server.rotate_answers`. Anything else that differs —
+`listen_addr`, `port`, `worker_threads`, TLS/HTTPS, `[remote_config]` itself,
+`[control]`, `[observability]`, `[xdp]` — cannot take effect on a live socket, so
+the reload still applies the hot fields and logs the other paths at `warn`:
+`these configuration changes need a restart to take effect`. Content identical to
+the configuration in force is skipped, and in-flight queries finish on the chain
+they entered with.
+
+What a reload guarantees, and what it costs:
+
+- **An unusable push changes nothing.** Unparsable TOML, a config that fails
+  validation, or a plugin that cannot be built is rejected at `error`; the running
+  chain, the process and the trigger all stay as they were.
+- **Unchanged entries keep their connections.** A `[[plugins]]` entry equal to the
+  one in force *at the same position* is reused with its handler, its
+  subscriptions and its warm instance cache. A nacos entry that differs only in
+  `dns_zone` or `ttl` keeps the naming *connection* as well: those two shape the
+  answers, not the connection, so a TTL push costs a new authority above the same
+  cache instead of a reconnect and a refill. Any other plugin change rebuilds the
+  entry — and a rebuilt nacos authority serves its zone only after its new
+  subscription reports the instances (about half a second in our runs), while the
+  connection it replaces is unsubscribed. Moving an entry rebuilds the entries
+  after it, but a connection is matched by `server_addr` + `namespace` + `group`
+  wherever it sits.
+- **A burst is one reload.** Requests arriving within 500 ms of each other fold
+  into the newest one, because a multi-line edit reaches Nacos as several pushes.
+  Each applied reload advances a generation, which the `config reload applied`
+  line carries.
+- **A restart-required field keeps being reported.** The baseline a reload records
+  is what is actually in force: only the hot paths move into it, so the next
+  reload names `server.port` again instead of quietly absorbing an edit the
+  running socket never took.
+- **What is in force is recorded beside the config.** After startup, and after
+  every applied reload, the text in force is written to
+  `<config-stem>.online.toml` next to the file the process was started from, and
+  the version it replaces moves to `<config-stem>.online.toml.bak.<epoch
+  seconds>` — ten generations kept, the rest pruned. It is the pushed text,
+  restart-required fields included, so the next boot applies the whole of it;
+  `${VAR}` references stay unexpanded, as on disk. It is a record and never an
+  input: startup reads only the file named on the command line, so a bad remote
+  configuration cannot become what the process boots into, and a record that
+  cannot be written logs a `warn` without touching the reload.
+- **A pushed configuration lands on a poll, not instantly.** Measured against a
+  standalone Nacos 2.5.4 with nacos-sdk 0.8.3: the SDK notices the change on its
+  60-second list-watch round, so plan for up to a minute of propagation. The same
+  round fires once for a brand-new subscription, so a pushed configuration also
+  reaches a process that just started within that minute. See
+  `tests/nacos_e2e_test.rs`.
+- **Retired naming clients are unsubscribed, not closed.** nacos-sdk 0.8.3 has no
+  client shutdown, so a reload stops instance pushes for the old watcher but its
+  gRPC connection lives until the process exits.
+- **A Nacos that is not up yet costs neither the resolver nor a client.** The
+  naming client behind a `nacos` plugin and the `[remote_config]` trigger both
+  start in emergency mode (`load_cache_at_start`), so an unanswered health check
+  is a `warn` from the SDK instead of a startup failure: the process builds its
+  chain, binds, and the trigger subscribes once. When the server answers the SDK
+  re-sends what was subscribed — naming on the reconnect, config on the 60 s
+  round above — so the first push and the first instances arrive without a
+  restart. The wait is at boot, not at the socket: an unreachable address costs
+  ~11 s of SDK retries before `doggy-dns is ready`.
+- **The same flag warm-starts instances from `$HOME/nacos/naming`.** Each
+  subscription reads its instance list back after registering the listener, so a
+  restart answers from that snapshot — which is as old as the file. That read is
+  also what keeps the snapshot honest: nacos-sdk only notifies a listener about a
+  list that *differs* from its cache, so without it a service whose instances did
+  not change would be pushed, deduplicated and never served.
 
 ## Endpoint formats
 

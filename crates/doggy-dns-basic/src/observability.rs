@@ -1,10 +1,10 @@
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fmt;
 
 /// OTLP export configuration. A single target is supported; fan-out should be
 /// handled by an OTel Collector or Vector in front of the final backend.
-#[derive(Clone, Deserialize)]
+#[derive(Clone, Deserialize, Serialize)]
 pub struct ObservabilityConfig {
     #[serde(default)]
     pub enabled: bool,
@@ -89,7 +89,7 @@ impl Default for ObservabilityConfig {
     }
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
 pub enum ObservabilityBackend {
     #[default]
     #[serde(rename = "openobserve")]
@@ -118,14 +118,14 @@ impl ObservabilityBackend {
     }
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
 pub enum ObservabilityProtocol {
     #[default]
     #[serde(rename = "http/protobuf")]
     HttpProtobuf,
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum MetricsTemporality {
     #[default]
@@ -133,7 +133,7 @@ pub enum MetricsTemporality {
     Delta,
 }
 
-#[derive(Clone, Deserialize)]
+#[derive(Clone, Deserialize, Serialize)]
 pub struct BasicAuthConfig {
     pub username: String,
     pub password: String,
@@ -148,7 +148,7 @@ impl fmt::Debug for BasicAuthConfig {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct LogsConfig {
     #[serde(default = "default_true")]
     pub enabled: bool,
@@ -173,7 +173,7 @@ impl Default for LogsConfig {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct MetricsConfig {
     #[serde(default = "default_true")]
     pub enabled: bool,
@@ -197,7 +197,7 @@ impl Default for MetricsConfig {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct TracesConfig {
     #[serde(default = "default_true")]
     pub enabled: bool,
@@ -227,7 +227,7 @@ impl Default for TracesConfig {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ProfilesConfig {
     #[serde(default)]
     pub enabled: bool,

@@ -76,6 +76,51 @@ impl CachedInstance {
     }
 }
 
+/// Replace one service's cached instances, the whole update for that key.
+///
+/// One path for both writers: a push event and the read that follows a
+/// subscription. Healthy and enabled filter here, an unparsable address is
+/// dropped here, and the key is replaced rather than edited, so neither writer
+/// can leave the other's half-update behind.
+fn apply_instances(
+    cache: &DashMap<ServiceKey, Vec<CachedInstance>>,
+    group: &str,
+    namespace: &str,
+    service_name: &str,
+    instances: Option<&[ServiceInstance]>,
+) {
+    if !parts_are_separable([service_name, group, namespace]) {
+        tracing::warn!(
+            service_name = %service_name,
+            group = %group,
+            namespace = %namespace,
+            "nacos identifiers contain the cache key separator; skipping this update"
+        );
+        return;
+    }
+
+    let key = ServiceKey::new(
+        &service_name.to_lowercase(),
+        &group.to_lowercase(),
+        &namespace.to_lowercase(),
+    );
+
+    match instances {
+        Some(instances) => {
+            let cached: Vec<CachedInstance> = instances
+                .iter()
+                .filter(|i| i.healthy && i.enabled)
+                .filter_map(CachedInstance::from_service_instance)
+                .collect();
+            // Immutable replacement: insert replaces the entire value
+            cache.insert(key, cached);
+        }
+        None => {
+            cache.remove(&key);
+        }
+    }
+}
+
 pub struct InstanceChangeListener {
     pub cache: Arc<DashMap<ServiceKey, Vec<CachedInstance>>>,
     pub group: String,
@@ -90,36 +135,13 @@ impl NamingEventListener for InstanceChangeListener {
         tracing::info!("nacos service changed: {}", service_name);
         self.last_push.store(unix_now_secs(), Ordering::Relaxed);
 
-        if !parts_are_separable([&service_name, &self.group, &self.namespace]) {
-            tracing::warn!(
-                service_name = %service_name,
-                group = %self.group,
-                namespace = %self.namespace,
-                "nacos identifiers contain the cache key separator; skipping this update"
-            );
-            return;
-        }
-
-        let key = ServiceKey::new(
-            &service_name.to_lowercase(),
-            &self.group.to_lowercase(),
-            &self.namespace.to_lowercase(),
+        apply_instances(
+            &self.cache,
+            &self.group,
+            &self.namespace,
+            &service_name,
+            event.instances.as_deref(),
         );
-
-        match &event.instances {
-            Some(instances) => {
-                let cached: Vec<CachedInstance> = instances
-                    .iter()
-                    .filter(|i| i.healthy && i.enabled)
-                    .filter_map(CachedInstance::from_service_instance)
-                    .collect();
-                // Immutable replacement: insert replaces the entire value
-                self.cache.insert(key, cached);
-            }
-            None => {
-                self.cache.remove(&key);
-            }
-        }
     }
 }
 
@@ -130,14 +152,23 @@ pub struct NacosServiceWatcher {
     namespace: String,
     group: String,
     last_push: Arc<AtomicI64>,
+    /// Service name -> the exact [`Arc`] handed to the SDK at subscribe time.
+    /// [`Self::unsubscribe_all`] must present that same `Arc`, because the SDK
+    /// matches listeners by pointer, not by content.
+    subscriptions: DashMap<String, Arc<InstanceChangeListener>>,
 }
 
 impl NacosServiceWatcher {
     pub async fn new(server_addr: &str, namespace: &str, group: &str) -> anyhow::Result<Self> {
+        // Emergency start: `build()` health-checks the connection and would otherwise
+        // fail a resolver whose Nacos is not up yet. The SDK re-sends each registered
+        // subscription when the connection comes back, so the instance cache fills
+        // itself once the server answers.
         let props = ClientProps::new()
             .server_addr(server_addr)
             .namespace(namespace)
-            .app_name(doggy_dns_plugin::APP_NAME);
+            .app_name(doggy_dns_plugin::APP_NAME)
+            .naming_load_cache_at_start(true);
 
         let naming_service = NamingServiceBuilder::new(props).build().await?;
 
@@ -147,29 +178,108 @@ impl NacosServiceWatcher {
             namespace: namespace.to_string(),
             group: group.to_string(),
             last_push: Arc::new(AtomicI64::new(0)),
+            subscriptions: DashMap::new(),
         })
     }
 
-    /// Subscribe to a specific service for push updates.
+    /// Subscribe to a specific service, then read its instances back.
+    ///
+    /// The read is not redundant: the SDK only notifies a listener about a
+    /// service list that differs from its own cache, and with
+    /// `naming_load_cache_at_start` that cache can be the disk snapshot this
+    /// process loaded at boot. A service whose instances did not change would
+    /// therefore never be pushed to us, so the subscription takes the list here
+    /// instead of waiting for a change that may never come.
     pub async fn subscribe(&self, service_name: &str) -> anyhow::Result<()> {
-        let listener = InstanceChangeListener {
+        let listener = Arc::new(InstanceChangeListener {
             cache: Arc::clone(&self.cache),
             group: self.group.clone(),
             namespace: self.namespace.clone(),
             last_push: Arc::clone(&self.last_push),
-        };
+        });
 
         self.naming_service
             .subscribe(
                 service_name.to_string(),
                 Some(self.group.clone()),
                 vec![],
-                Arc::new(listener),
+                Arc::clone(&listener) as Arc<dyn NamingEventListener>,
             )
             .await?;
 
+        self.subscriptions
+            .insert(service_name.to_string(), listener);
+
+        match self
+            .naming_service
+            .get_all_instances(
+                service_name.to_string(),
+                Some(self.group.clone()),
+                vec![],
+                true,
+            )
+            .await
+        {
+            Ok(instances) => apply_instances(
+                &self.cache,
+                &self.group,
+                &self.namespace,
+                service_name,
+                Some(&instances),
+            ),
+            Err(e) => {
+                tracing::warn!(
+                    "failed to read nacos instances for '{}': {}",
+                    service_name,
+                    e
+                )
+            }
+        }
+
         tracing::info!("subscribed to nacos service: {}", service_name);
         Ok(())
+    }
+
+    /// Remove every subscription this watcher registered, best-effort.
+    ///
+    /// Used when a config reload retires a watcher whose plugin changed or
+    /// went away. Unsubscribe failures are logged and skipped: teardown must
+    /// never fail the reload that performs it. The SDK's connection itself
+    /// lives until process exit (nacos-sdk 0.8.3 has no naming-client
+    /// shutdown); what this removes are the server-side subscriptions, so a
+    /// retired watcher stops being pushed instance updates.
+    pub async fn unsubscribe_all(&self) {
+        let entries: Vec<(String, Arc<dyn NamingEventListener>)> = self
+            .subscriptions
+            .iter()
+            .map(|e| {
+                (
+                    e.key().clone(),
+                    Arc::clone(e.value()) as Arc<dyn NamingEventListener>,
+                )
+            })
+            .collect();
+
+        for (service_name, listener) in entries {
+            if let Err(e) = self
+                .naming_service
+                .unsubscribe(
+                    service_name.clone(),
+                    Some(self.group.clone()),
+                    vec![],
+                    listener,
+                )
+                .await
+            {
+                tracing::warn!(
+                    "failed to unsubscribe from service '{}': {}",
+                    service_name,
+                    e
+                );
+            }
+        }
+        self.subscriptions.clear();
+        tracing::info!("unsubscribed from all nacos services");
     }
 
     /// Get cached instances for a service.

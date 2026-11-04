@@ -88,8 +88,8 @@ impl DoggyMcpServer {
         )
     )]
     pub async fn list_plugins(&self) -> Result<CallToolResult, ErrorData> {
-        let plugins: Vec<Value> = self
-            .state
+        let runtime = self.state.runtime();
+        let plugins: Vec<Value> = runtime
             .plugins
             .iter()
             .map(|p| serde_json::to_value(p).expect("PluginSnapshot is serializable"))
@@ -113,7 +113,8 @@ impl DoggyMcpServer {
         )
     )]
     pub async fn get_config(&self) -> Result<CallToolResult, ErrorData> {
-        let json = match &self.state.config {
+        let runtime = self.state.runtime();
+        let json = match &runtime.config {
             ConfigSnapshot::Redacted {
                 content,
                 redacted_keys,

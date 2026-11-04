@@ -32,6 +32,8 @@ hickory-server = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 anyhow = { workspace = true }
+# src/reload.rs diffs two serialised configs to report restart-required paths.
+toml = { workspace = true }
 core_affinity = "0.8"
 
 [dev-dependencies]
@@ -50,6 +52,7 @@ serde = { version = "1", features = ["derive"] }
 toml = "1.1"
 dashmap = "6"
 tracing = "0.1"
+arc-swap = "1.9"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 anyhow = "1"
 async-trait = "0.1"

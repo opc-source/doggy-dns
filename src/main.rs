@@ -1,19 +1,14 @@
 use anyhow::{Context, Result};
+use doggy_dns::reload::{self, Applied, ReloadCoordinator};
 use doggy_dns_control::live::LiveState;
-use doggy_dns_core::config::{DoggyDnsConfig, PluginKind, load_config};
-use doggy_dns_core::handler::{AnswerRotation, DoggyDnsHandler};
-use doggy_dns_core::middleware::logging::LoggingMiddleware;
+use doggy_dns_core::config::{DoggyDnsConfig, load_config};
+use doggy_dns_core::handler::{AnswerRotation, DoggyDnsHandler, SharedHandler};
 use doggy_dns_core::server::build_server;
-use doggy_dns_nacos::authority::NacosAuthority;
-use doggy_dns_nacos::watcher::NacosServiceWatcher;
+use doggy_dns_nacos::config_watcher::spawn_config_pushes;
 use doggy_dns_observability::Observability;
 use doggy_dns_plugin::Middleware;
-use doggy_dns_plugin::authority_chain::AuthorityChain;
-use doggy_dns_plugin::builtin::forward::ForwardAuthority;
-use doggy_dns_plugin::builtin::native::NativeAuthority;
-use hickory_server::zone_handler::ZoneHandler;
+use std::path::Path;
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
 use std::time::Duration;
 use tokio::signal;
 
@@ -84,7 +79,12 @@ fn main() -> Result<()> {
         "tokio runtime built"
     );
 
-    runtime.block_on(async_main(config, &config_content, &mut telemetry))?;
+    runtime.block_on(async_main(
+        config,
+        Path::new(&config_path),
+        &config_content,
+        &mut telemetry,
+    ))?;
 
     telemetry.shutdown();
     Ok(())
@@ -92,25 +92,24 @@ fn main() -> Result<()> {
 
 async fn async_main(
     config: DoggyDnsConfig,
+    config_path: &Path,
     config_content: &str,
     telemetry: &mut Observability,
 ) -> Result<()> {
     // Profiles need a Tokio runtime for their HTTP exporter.
     telemetry.spawn_profiles();
 
-    // Build middleware chain
-    let mut middlewares: Vec<Arc<dyn Middleware>> = Vec::new();
-    if config.middleware.logging {
-        middlewares.push(Arc::new(LoggingMiddleware));
-    }
+    // The middlewares a reload cannot rebuild: metrics, then the XDP
+    // middleware. Logging is hot, so it is composed onto these per reload.
+    let mut base_middlewares: Vec<Arc<dyn Middleware>> = Vec::new();
     if let Some(metrics) = telemetry.metrics_middleware() {
-        middlewares.push(metrics);
+        base_middlewares.push(metrics);
     }
 
     // Initialize the XDP fast path (Linux + `xdp` feature; a stub elsewhere).
     // The handle owns the manager, which must stay alive for the server
     // lifetime — dropping it detaches the XDP program from the interface.
-    let mut xdp = xdp::init(&config, &mut middlewares);
+    let mut xdp = xdp::init(&config, &mut base_middlewares);
 
     let xdp_task = xdp::start_stats(
         &mut xdp,
@@ -118,17 +117,20 @@ async fn async_main(
         Duration::from_secs(config.observability.metrics.interval_secs.max(1)),
     );
 
-    // Build authority chain from plugins (watchers kept alive for subscriptions
-    // and for the control plane's live cache signals).
-    let (watchers, authority_chain) = build_authority_chain(&config).await?;
+    // Build the plugin chain; startup and reload share one builder, so the
+    // slots the coordinator adopts are the same objects a reload may reuse.
+    let mut no_previous: Vec<reload::PluginSlot> = Vec::new();
+    let slots = reload::build_chain(&config, &mut no_previous).await?;
+    tracing::info!(chain_length = slots.len(), "authority chain built");
 
-    // Create handler
-    let handler = DoggyDnsHandler::new(
-        middlewares,
-        Arc::new(authority_chain),
+    // Create the handler behind an Arc: the server and the reload coordinator
+    // share it, and the swap lives inside the handler.
+    let handler = Arc::new(DoggyDnsHandler::new(
+        reload::middlewares_for(config.middleware.logging, &base_middlewares),
+        Arc::new(reload::authority_chain_from(&slots)),
         xdp.enabled(),
         AnswerRotation::new(config.server.rotate_answers),
-    );
+    ));
 
     // The kernel answers a cache hit without asking userspace again, so the
     // record order frozen into the cached reply is the one every hit replays
@@ -142,21 +144,49 @@ async fn async_main(
     }
 
     // Build and start server
-    let mut server = build_server(&config, handler).await?;
+    let mut server = build_server(&config, SharedHandler(Arc::clone(&handler))).await?;
 
     tracing::info!("doggy-dns is ready");
 
     // Start the control plane if enabled (non-fatal on failure). The XDP
     // attach flag is fixed after startup — the manager lives as long as this
     // function and dropping it detaches the program.
-    let live = build_live_state(&watchers, xdp.enabled());
-    let mcp_handle = start_control_plane(&config, config_content, live).await;
+    let live = build_live_state(&slots, xdp.enabled());
+    let mcp_handle = start_control_plane(&config, config_content, live.clone()).await;
+
+    // The reload pipeline: the remote trigger hands pushed content to one
+    // channel, one task applies it in order, and a burst inside
+    // [`reload::RELOAD_DEBOUNCE`] folds into the newest push. The coordinator
+    // owns the in-force chain.
+    let coordinator = Arc::new(ReloadCoordinator::new(
+        config_path.to_path_buf(),
+        Applied {
+            raw: config_content.to_string(),
+            config: config.clone(),
+            slots,
+            generation: 0,
+        },
+        Arc::clone(&handler),
+        base_middlewares,
+        mcp_handle.as_ref().map(|handle| handle.state.clone()),
+        live,
+    ));
+
+    // The startup configuration is the record until a push replaces it.
+    reload::write_online_record(config_path, config_content);
+
+    let (reload_tx, reload_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+    tokio::spawn(reload::run_reload_loop(Arc::clone(&coordinator), reload_rx));
+
+    spawn_config_pushes(config.remote_config.clone(), reload_tx);
+    ignore_sighup();
 
     // Run server until shutdown signal
     let shutdown_timeout = Duration::from_secs(config.server.shutdown_timeout);
     let shutdown_token = server.shutdown_token().clone();
 
-    // Wait for SIGINT or SIGTERM, then cancel the server
+    // Wait for SIGINT or SIGTERM, then cancel the server. SIGHUP is caught by
+    // `ignore_sighup` above: it never shuts the resolver down.
     let mut sigterm = signal::unix::signal(signal::unix::SignalKind::terminate())
         .expect("failed to register SIGTERM handler");
 
@@ -249,103 +279,34 @@ where
     }
 }
 
-async fn build_authority_chain(
-    config: &DoggyDnsConfig,
-) -> Result<(Vec<(String, NacosServiceWatcher)>, AuthorityChain)> {
-    let mut handlers: Vec<(String, Arc<dyn ZoneHandler>)> = Vec::new();
-    let mut watchers: Vec<(String, NacosServiceWatcher)> = Vec::new();
-
-    if config.plugins.is_empty() {
-        // Default: forward to 8.8.8.8 and 1.1.1.1
-        tracing::info!("no plugins configured, defaulting to forward");
-        let forward = ForwardAuthority::new(
-            vec!["8.8.8.8:53".to_string(), "1.1.1.1:53".to_string()],
-            1024,
-            Duration::from_secs(30),
-            Duration::from_secs(600),
-        )
-        .await?;
-        handlers.push(("forward[default]".to_string(), Arc::new(forward)));
-        return Ok((watchers, AuthorityChain::new(handlers)));
-    }
-
-    for (i, plugin) in config.plugins.iter().enumerate() {
-        if !plugin.enabled {
-            tracing::info!(index = i, kind = ?plugin.kind, "skipping disabled plugin");
-            continue;
-        }
-
-        match plugin.kind {
-            PluginKind::Nacos => {
-                let addr = plugin.server_addr.as_deref().unwrap_or("127.0.0.1:8848");
-                let ns = plugin.namespace.as_deref().unwrap_or("public");
-                let grp = plugin.group.as_deref().unwrap_or("DEFAULT_GROUP");
-                let zone = plugin.dns_zone.as_deref().unwrap_or("nacos.local");
-
-                let watcher = NacosServiceWatcher::new(addr, ns, grp).await?;
-                watcher.subscribe_all().await;
-                let cache = watcher.cache();
-
-                let name = format!("nacos[{}]", zone);
-                let authority = NacosAuthority::new(cache, zone, plugin.ttl);
-                handlers.push((name.clone(), Arc::new(authority)));
-                watchers.push((zone.to_string(), watcher));
-                tracing::info!(plugin = %name, zone = zone, addr = addr, "loaded plugin");
-            }
-            PluginKind::Native => {
-                let authority = NativeAuthority::new(
-                    plugin.cache_size as u64,
-                    Duration::from_secs(plugin.min_ttl as u64),
-                    Duration::from_secs(plugin.max_ttl as u64),
-                )
-                .await?;
-                let name = "native".to_string();
-                handlers.push((name.clone(), Arc::new(authority)));
-                tracing::info!(plugin = %name, "loaded plugin");
-            }
-            PluginKind::Forward => {
-                let addrs = plugin
-                    .upstream
-                    .clone()
-                    .unwrap_or_else(|| vec!["8.8.8.8:53".to_string(), "1.1.1.1:53".to_string()]);
-                let name = format!("forward[{}]", addrs.join(","));
-                let authority = ForwardAuthority::new(
-                    addrs,
-                    plugin.cache_size as u64,
-                    Duration::from_secs(plugin.min_ttl as u64),
-                    Duration::from_secs(plugin.max_ttl as u64),
-                )
-                .await?;
-                handlers.push((name.clone(), Arc::new(authority)));
-                tracing::info!(plugin = %name, "loaded plugin");
-            }
-        }
-    }
-
-    tracing::info!(chain_length = handlers.len(), "authority chain built");
-    Ok((watchers, AuthorityChain::new(handlers)))
-}
-
-/// Register the live runtime signals the control plane reports: one per
-/// Nacos zone (cache occupancy + push freshness) plus the XDP attach state.
-/// Forward/native upstream health is deliberately not probed here — active
-/// upstream checks are a separate concern.
-fn build_live_state(
-    watchers: &[(String, NacosServiceWatcher)],
-    xdp_attached: bool,
-) -> Arc<LiveState> {
-    let mut live = LiveState::new();
-    for (zone, watcher) in watchers {
-        let cache = watcher.cache();
-        let last_push = watcher.last_push();
-        live.register_nacos_zone(
-            zone,
-            move || cache.len() as u64,
-            move || last_push.load(Ordering::Relaxed),
-        );
-    }
+/// Register the live runtime signals the control plane reports: one per Nacos
+/// zone the startup chain owns (cache occupancy + push freshness) plus the XDP
+/// attach state. Forward/native upstream health is deliberately not probed
+/// here — active upstream checks are a separate concern. After a reload the
+/// coordinator replaces the zone signals from the surviving slots.
+fn build_live_state(slots: &[reload::PluginSlot], xdp_attached: bool) -> Arc<LiveState> {
+    let live = LiveState::new();
+    live.replace_nacos_zones(reload::nacos_zone_signals(slots));
     live.register_xdp(move || xdp_attached);
     Arc::new(live)
+}
+
+/// SIGHUP: caught so it cannot kill the process, and ignored.
+///
+/// Without a handler the default disposition terminates the process, and an
+/// operator reaching for `kill -HUP` out of bind/unbound habit would take the
+/// resolver down without a drain. Keeping the signal registered is what makes
+/// that impossible; reloads themselves come from `[remote_config]` pushes.
+fn ignore_sighup() {
+    tokio::spawn(async move {
+        let Ok(mut sighup) = signal::unix::signal(signal::unix::SignalKind::hangup()) else {
+            tracing::warn!("cannot register SIGHUP; kill -HUP will terminate this process");
+            return;
+        };
+        while sighup.recv().await.is_some() {
+            tracing::info!("SIGHUP ignored: configuration changes are pushed by the remote config");
+        }
+    });
 }
 
 async fn start_control_plane(
