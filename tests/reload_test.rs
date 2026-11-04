@@ -577,12 +577,9 @@ ttl = 6
     assert_eq!(previous.len(), 2);
 }
 
-/// What emergency start bought: a nacos server that is not answering is a
-/// degraded zone, not a rejected configuration. The slot builds, owns its zone,
-/// and the reload that carried it is not reported as a failure.
-#[tokio::test]
-async fn an_unreachable_nacos_still_builds_its_slot() {
-    let unreachable = r#"
+/// One enabled nacos plugin pointed at an address where nothing listens, so a
+/// build costs the SDK's health-check wait and no live server.
+const NACOS_ON_A_DEAD_ADDRESS: &str = r#"
 [server]
 listen_addr = "127.0.0.1"
 port = 15354
@@ -597,10 +594,16 @@ group = "DEFAULT_GROUP"
 dns_zone = "nacos.local"
 ttl = 6
 "#;
+
+/// What emergency start bought: a nacos server that is not answering is a
+/// degraded zone, not a rejected configuration. The slot builds, owns its zone,
+/// and the reload that carried it is not reported as a failure.
+#[tokio::test]
+async fn an_unreachable_nacos_still_builds_its_slot() {
     let mut previous: Vec<PluginSlot> = Vec::new();
     // The health check the SDK retries before it gives up and warns, so this
     // case costs a few seconds; the same wait is what an operator sees at boot.
-    let slots = build_chain(&config_of(unreachable), &mut previous)
+    let slots = build_chain(&config_of(NACOS_ON_A_DEAD_ADDRESS), &mut previous)
         .await
         .expect("an unreachable nacos builds its client in emergency mode");
 
@@ -613,6 +616,46 @@ ttl = 6
         nacos_zone_signals(&slots).len(),
         1,
         "and the slot is a live nacos zone the control plane can report"
+    );
+}
+
+/// A nacos entry that cannot name its server is a build failure that says which
+/// field, not a plugin built on an address nobody wrote.
+#[tokio::test]
+async fn a_nacos_entry_without_its_server_addr_fails_the_build_by_name() {
+    let mut config = config_of(NACOS_ON_A_DEAD_ADDRESS);
+    config.plugins[0].server_addr = None;
+    let mut previous: Vec<PluginSlot> = Vec::new();
+    let error = match build_chain(&config, &mut previous).await {
+        Ok(slots) => panic!(
+            "no server address was configured, yet {} slots were built",
+            slots.len()
+        ),
+        Err(error) => error,
+    };
+    assert!(
+        error.to_string().contains("server_addr"),
+        "the failure has to name the field the operator forgot: {error}"
+    );
+}
+
+/// The zone is the other half of what a nacos entry cannot do without: an
+/// authority with no zone owns nothing.
+#[tokio::test]
+async fn a_nacos_entry_without_its_zone_fails_the_build_by_name() {
+    let mut config = config_of(NACOS_ON_A_DEAD_ADDRESS);
+    config.plugins[0].dns_zone = None;
+    let mut previous: Vec<PluginSlot> = Vec::new();
+    let error = match build_chain(&config, &mut previous).await {
+        Ok(slots) => panic!(
+            "no dns_zone was configured, yet {} slots were built",
+            slots.len()
+        ),
+        Err(error) => error,
+    };
+    assert!(
+        error.to_string().contains("dns_zone"),
+        "the failure has to name the field the operator forgot: {error}"
     );
 }
 
@@ -641,6 +684,24 @@ fn pooled(plugin: PluginConfig) -> PreviousEntry {
         plugin,
         has_connection: true,
     }
+}
+
+/// A connection is claimed by identity, and an entry that states no identity
+/// states no claim: substituting defaults here would let an entry that never
+/// named a namespace borrow the pooled connection of the one that did.
+#[tokio::test]
+async fn an_entry_without_an_identity_claims_no_pooled_connection() {
+    let mut want = nacos_plugin("127.0.0.1:8848", "a.local", 6);
+    want.namespace = None;
+    let plans = plan_slots(
+        &[want],
+        &[pooled(nacos_plugin("127.0.0.1:8848", "a.local", 3))],
+    );
+    assert_eq!(
+        plans,
+        vec![SlotPlan::Build],
+        "no configured namespace, so nothing to match against"
+    );
 }
 
 #[tokio::test]
@@ -695,28 +756,6 @@ async fn a_connection_change_builds_and_leaves_the_old_slot_to_retire() {
             "server addr, namespace and group are the identity; anything else is not"
         );
     }
-}
-
-#[tokio::test]
-async fn unset_fields_are_the_same_identity_as_the_documented_defaults() {
-    let unset = PluginConfig {
-        kind: PluginKind::Nacos,
-        enabled: true,
-        server_addr: None,
-        namespace: None,
-        group: None,
-        dns_zone: Some("a.local".to_string()),
-        ttl: 3,
-        cache_size: 1024,
-        min_ttl: 30,
-        max_ttl: 600,
-        upstream: None,
-    };
-    let plans = plan_slots(
-        &[unset],
-        &[pooled(nacos_plugin("127.0.0.1:8848", "a.local", 6))],
-    );
-    assert_eq!(plans, vec![SlotPlan::ReuseConnection(0)]);
 }
 
 #[tokio::test]

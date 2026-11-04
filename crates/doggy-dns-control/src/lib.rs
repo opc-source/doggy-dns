@@ -57,7 +57,8 @@ impl ConfigSnapshot {
 }
 
 /// Build tool-ready snapshots from the configured plugin chain, preserving
-/// evaluation order and applying per-kind display defaults.
+/// evaluation order. A field the config never set reports nothing rather than a
+/// default nobody wrote.
 pub fn snapshots_from(plugins: &[PluginConfig]) -> Vec<PluginSnapshot> {
     plugins
         .iter()
@@ -74,26 +75,23 @@ impl PluginSnapshot {
             Value::String(s.to_string())
         }
 
+        fn insert(map: &mut serde_json::Map<String, Value>, key: &str, value: Option<&str>) {
+            if let Some(value) = value {
+                map.insert(key.into(), str_val(value));
+            }
+        }
+
         let kind = format!("{:?}", p.kind).to_ascii_lowercase();
         let details = match p.kind {
             PluginKind::Nacos => {
                 let mut map = serde_json::Map::new();
-                map.insert(
-                    "serverAddr".into(),
-                    str_val(p.server_addr.as_deref().unwrap_or("127.0.0.1:8848")),
-                );
-                map.insert(
-                    "namespace".into(),
-                    str_val(p.namespace.as_deref().unwrap_or("public")),
-                );
-                map.insert(
-                    "group".into(),
-                    str_val(p.group.as_deref().unwrap_or("DEFAULT_GROUP")),
-                );
-                map.insert(
-                    "dnsZone".into(),
-                    str_val(p.dns_zone.as_deref().unwrap_or("nacos.local")),
-                );
+                // `validate_config` requires all four of these for an *enabled*
+                // nacos plugin, so a gap here is a plugin that is switched off —
+                // and the tool reads "not configured", not a plausible address.
+                insert(&mut map, "serverAddr", p.server_addr.as_deref());
+                insert(&mut map, "namespace", p.namespace.as_deref());
+                insert(&mut map, "group", p.group.as_deref());
+                insert(&mut map, "dnsZone", p.dns_zone.as_deref());
                 map.insert("ttl".into(), Value::from(p.ttl));
                 Value::Object(map)
             }

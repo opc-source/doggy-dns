@@ -11,6 +11,12 @@ pub enum PluginKind {
 /// Flat plugin config. Each field is optional; only the fields relevant
 /// to the plugin's `kind` are used. Unknown fields for a given kind
 /// are simply ignored at runtime.
+///
+/// `validate_config` makes the four nacos coordinates mandatory for an
+/// **enabled** nacos plugin, and nothing downstream substitutes a value for a
+/// field left out: the build names the missing field and the control plane
+/// reports it as unconfigured. `forward.upstream` is the one string field that
+/// genuinely may be omitted, which means the default upstream servers.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct PluginConfig {
     pub kind: PluginKind,

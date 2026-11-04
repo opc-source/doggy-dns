@@ -65,6 +65,7 @@ enabled = false       # CPU only, Linux/macOS, OTLP Profiles Alpha
 [[plugins]]
 kind = "nacos"
 enabled = false
+# An enabled nacos plugin needs all four of these; nothing fills in a default.
 server_addr = "127.0.0.1:8848"
 namespace = "public"
 group = "DEFAULT_GROUP"

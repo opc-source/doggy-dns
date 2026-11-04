@@ -109,12 +109,6 @@ pub fn nacos_zone_signals(slots: &[PluginSlot]) -> Vec<LiveProbe> {
         .collect()
 }
 
-/// The values a nacos plugin falls back to when the config leaves them unset.
-const DEFAULT_SERVER_ADDR: &str = "127.0.0.1:8848";
-const DEFAULT_NAMESPACE: &str = "public";
-const DEFAULT_GROUP: &str = "DEFAULT_GROUP";
-const DEFAULT_ZONE: &str = "nacos.local";
-
 /// The upstream addrs used when no plugins are configured at all.
 const DEFAULT_UPSTREAM: [&str; 2] = ["8.8.8.8:53", "1.1.1.1:53"];
 
@@ -123,29 +117,34 @@ const DEFAULT_UPSTREAM: [&str; 2] = ["8.8.8.8:53", "1.1.1.1:53"];
 /// Zone and TTL are deliberately absent: they shape the answers built on top of
 /// a cache, not the connection feeding it. Changing either one therefore keeps
 /// the connection — and every instance already pushed into its cache.
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct NacosIdentity {
-    server_addr: String,
-    namespace: String,
-    group: String,
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct NacosIdentity<'a> {
+    server_addr: &'a str,
+    namespace: &'a str,
+    group: &'a str,
 }
 
-/// The connection coordinates of a nacos plugin, defaults applied.
-fn nacos_identity(plugin: &PluginConfig) -> NacosIdentity {
-    NacosIdentity {
-        server_addr: plugin
-            .server_addr
-            .clone()
-            .unwrap_or_else(|| DEFAULT_SERVER_ADDR.to_string()),
-        namespace: plugin
-            .namespace
-            .clone()
-            .unwrap_or_else(|| DEFAULT_NAMESPACE.to_string()),
-        group: plugin
-            .group
-            .clone()
-            .unwrap_or_else(|| DEFAULT_GROUP.to_string()),
-    }
+/// The connection coordinates a nacos plugin states, or `None` if it leaves any
+/// of them unset.
+///
+/// An enabled nacos plugin has to state all three: `validate_config` says so
+/// before a chain is ever built. Absence is therefore a hole in the config, not
+/// a signal to use a default, and nothing here invents a value: an entry without
+/// an identity claims no pooled connection, and building it fails by field name.
+fn nacos_identity(plugin: &PluginConfig) -> Option<NacosIdentity<'_>> {
+    Some(NacosIdentity {
+        server_addr: plugin.server_addr.as_deref()?,
+        namespace: plugin.namespace.as_deref()?,
+        group: plugin.group.as_deref()?,
+    })
+}
+
+/// One of the nacos fields a slot cannot be built without, or an error that
+/// names the field the operator left out.
+fn stated<'a>(field: &str, value: &'a Option<String>) -> Result<&'a str> {
+    value.as_deref().ok_or_else(|| {
+        anyhow::anyhow!("nacos `plugins[].{field}` is required; no default is substituted")
+    })
 }
 
 /// The [`PluginConfig`] that describes the implicit default forward plugin.
@@ -247,7 +246,15 @@ pub fn plan_slots(desired: &[PluginConfig], previous: &[PreviousEntry]) -> Vec<S
         if plans[index] != SlotPlan::Build || !plugin.enabled || plugin.kind != PluginKind::Nacos {
             continue;
         }
-        let want = nacos_identity(plugin);
+        // Reuse means rebuilding the authority above the connection, so an entry
+        // that states no zone or no identity has nothing to rebuild: it claims no
+        // connection, and the build fails by field name instead.
+        if plugin.dns_zone.is_none() {
+            continue;
+        }
+        let Some(want) = nacos_identity(plugin) else {
+            continue;
+        };
         // The first free connection that matches, not the first free connection:
         // two plugins on one server reorder, and a `find` followed by a `filter`
         // would let the second entry's connection go unclaimed.
@@ -255,7 +262,9 @@ pub fn plan_slots(desired: &[PluginConfig], previous: &[PreviousEntry]) -> Vec<S
             .iter()
             .enumerate()
             .find(|(other, entry)| {
-                !taken[*other] && entry.has_connection && nacos_identity(&entry.plugin) == want
+                !taken[*other]
+                    && entry.has_connection
+                    && nacos_identity(&entry.plugin) == Some(want)
             })
             .map(|(other, _)| other);
         if let Some(other) = free {
@@ -339,21 +348,21 @@ pub async fn build_chain(
             SlotPlan::ReuseConnection(old) => {
                 let previous = &mut previous[old];
                 // `plan_slots` only plans a reuse for a slot that owns a
-                // watcher, and step 1 never touched this one.
+                // watcher, states a zone, and states its whole identity.
                 let watcher = previous
                     .watcher
                     .take()
                     .expect("a planned reuse owns a watcher");
+                let identity = nacos_identity(plugin).expect("a planned reuse states its identity");
                 let zone = plugin
                     .dns_zone
-                    .as_deref()
-                    .unwrap_or(DEFAULT_ZONE)
-                    .to_string();
+                    .clone()
+                    .expect("a planned reuse states its zone");
                 let authority = NacosAuthority::new(watcher.cache(), &zone, plugin.ttl);
                 let name = format!("nacos[{zone}]");
                 tracing::info!(
                     plugin = %name,
-                    addr = %nacos_identity(plugin).server_addr,
+                    addr = identity.server_addr,
                     "nacos connection reused"
                 );
                 // The old slot's handler was built on the same cache but with
@@ -406,6 +415,9 @@ async fn build_default_slot() -> Result<PluginSlot> {
 }
 
 /// Build the handler (and watcher) for one configured plugin.
+///
+/// A nacos entry that leaves out a required coordinate is an error naming that
+/// field; nothing here builds on a value the config never stated.
 async fn build_slot(plugin: &PluginConfig) -> Result<PluginSlot> {
     if !plugin.enabled {
         return Ok(PluginSlot {
@@ -419,15 +431,12 @@ async fn build_slot(plugin: &PluginConfig) -> Result<PluginSlot> {
 
     match plugin.kind {
         PluginKind::Nacos => {
-            let identity = nacos_identity(plugin);
-            let zone = plugin.dns_zone.as_deref().unwrap_or(DEFAULT_ZONE);
+            let server_addr = stated("server_addr", &plugin.server_addr)?;
+            let namespace = stated("namespace", &plugin.namespace)?;
+            let group = stated("group", &plugin.group)?;
+            let zone = stated("dns_zone", &plugin.dns_zone)?;
 
-            let watcher = NacosServiceWatcher::new(
-                &identity.server_addr,
-                &identity.namespace,
-                &identity.group,
-            )
-            .await?;
+            let watcher = NacosServiceWatcher::new(server_addr, namespace, group).await?;
             watcher.subscribe_all().await;
             let cache = watcher.cache();
 

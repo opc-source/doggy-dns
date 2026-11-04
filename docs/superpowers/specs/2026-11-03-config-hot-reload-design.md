@@ -963,3 +963,63 @@ passers being the ones that need no live instances. With the read-back, that
 directory untouched and the same snapshots in it: `test result: ok. 10 passed;
 0 failed` in 65.18 s — the suite also got shorter, because answers now arrive at
 subscribe time rather than on the first change.
+
+## 17. Sixth round: a required field stops carrying a value of its own
+
+`validate_config` has required `server_addr`, `namespace`, `group` and `dns_zone` of
+every *enabled* nacos plugin since the first round of this branch, yet three consumers
+still kept an `unwrap_or` beside each of them:
+
+- `nacos_identity()` filled the three connection coordinates from
+  `DEFAULT_SERVER_ADDR` / `DEFAULT_NAMESPACE` / `DEFAULT_GROUP`. The reuse plan is the
+  one place where that is a behaviour, not cosmetics: an entry that named no namespace
+  could claim the pooled connection of one that did.
+- `build_slot()` and the reuse arm of `build_chain()` built on `DEFAULT_ZONE`, so an
+  authority owned `nacos.local` — a zone no operator ever wrote.
+- `PluginSnapshot::from_config` reported all four as "display defaults", so `list_plugins`
+  described a config that was not the config in force.
+
+The constants and every substitution are gone. `Option` stays in `PluginConfig`: the
+struct is flat and shared by all three kinds, so serde cannot express "required for
+`kind = nacos`" and a plain `String` would make `server_addr` a parse error for every
+native and forward entry too. Presence is the right shape for a field one kind needs and
+the others must not supply; what was wrong is that absence then produced a value.
+
+**What replaces each substitution.**
+
+- `nacos_identity() -> Option<NacosIdentity<'_>>`, borrowed rather than cloned, and
+  presence-only: it does not re-judge blankness, because `validate_config` is the one
+  place that decides what counts as stated. An entry with a hole has no identity, so it
+  claims no connection.
+- `plan_slots()` additionally refuses a reuse to an entry that states no zone. Reuse
+  *is* rebuilding the authority above the connection, so an entry that cannot name its
+  zone has nothing to rebuild — and that is what keeps step 2 of `build_chain` infallible,
+  which the arm already relied on for the watcher. The two `.expect(...)` there are the
+  plan's own guarantees, restated in its comment.
+- `build_slot()` returns ``nacos `plugins[].server_addr` is required; no default is
+  substituted`` — the field name, before any connection is attempted.
+- The control snapshot inserts a key only when the config states it. `ttl`, `cacheSize`,
+  `minTtl` and `maxTtl` keep their serde defaults, which are real and documented; the
+  four coordinates now report the hole.
+
+**Reachability, stated honestly.** `parse_config` validates on both the boot path and
+the push path, so no operator's config reaches these three consumers with a hole in an
+enabled nacos entry. The change is about what the functions do at their own boundary:
+refusing to invent, rather than inventing and letting the operator find out from the
+answers. `forward.upstream` keeps `DEFAULT_UPSTREAM` for the same reason it is a
+different case — validation says *omit it to use the default servers*, so that default
+is a promise, while the nacos four never were.
+
+**Red, then green.** Three new cases and one renamed, each failing for its own reason
+before the change: `an_entry_without_an_identity_claims_no_pooled_connection` got
+`left: [ReuseConnection(0)]` where the rule says `Build`;
+`a_nacos_entry_without_its_server_addr_fails_the_build_by_name` and
+`a_nacos_entry_without_its_zone_fails_the_build_by_name` both panicked with
+`… was configured, yet 1 slots were built`; and
+`snapshots_report_configured_fields_only_and_order` — renamed from
+`snapshots_from_applies_kind_defaults_and_order`, which was the old promise in a name —
+failed on the fabricated `127.0.0.1:8848`. One case was deleted:
+`unset_fields_are_the_same_identity_as_the_documented_defaults` asserted exactly the
+hazard above, and the new no-identity case is its replacement.
+`tests/reload_test.rs` goes 35 → 37 (three added, one deleted); the control crate stays
+at 31.

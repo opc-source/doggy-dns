@@ -40,7 +40,7 @@ fn state_preserves_protocols_and_listen_addr() {
 }
 
 #[test]
-fn snapshots_from_applies_kind_defaults_and_order() {
+fn snapshots_report_configured_fields_only_and_order() {
     let toml_str = r#"
 [[plugins]]
 kind = "nacos"
@@ -65,8 +65,15 @@ kind = "native"
     assert_eq!(snapshots[0].order, 0);
     assert_eq!(snapshots[0].kind, "nacos");
     assert!(!snapshots[0].enabled);
-    assert_eq!(snapshots[0].details["serverAddr"], "127.0.0.1:8848");
-    assert_eq!(snapshots[0].details["dnsZone"], "nacos.local");
+    assert!(
+        snapshots[0].details.get("serverAddr").is_none(),
+        "an entry that configured no server reports no server, not a default nobody wrote"
+    );
+    assert!(
+        snapshots[0].details.get("dnsZone").is_none(),
+        "the same for the zone: {:?}",
+        snapshots[0].details
+    );
     assert_eq!(snapshots[0].details["ttl"], 6);
 
     assert_eq!(snapshots[1].kind, "forward");
