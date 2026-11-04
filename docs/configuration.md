@@ -184,9 +184,9 @@ both settings are on. See [xdp.md](xdp.md#limitations--notes).
 
 ## Hot reload
 
-Two triggers feed one pipeline: `SIGHUP` (POSIX) re-reads the file the process
-started with, and `[remote_config]` takes a whole configuration published to a
-Nacos config data id. Whichever arrives, the same checks and the same swap run.
+`[remote_config]` takes a whole configuration published to a Nacos config data
+id, and that push is the only trigger. `SIGHUP` is caught and ignored: it
+re-reads nothing and cannot take the resolver down.
 
 Applied without a restart: `[[plugins]]` (order, kind, every field),
 `middleware.logging` and `server.rotate_answers`. Anything else that differs —
@@ -221,10 +221,22 @@ What a reload guarantees, and what it costs:
   is what is actually in force: only the hot paths move into it, so the next
   reload names `server.port` again instead of quietly absorbing an edit the
   running socket never took.
+- **What is in force is recorded beside the config.** After startup, and after
+  every applied reload, the text in force is written to
+  `<config-stem>.online.toml` next to the file the process was started from, and
+  the version it replaces moves to `<config-stem>.online.toml.bak.<epoch
+  seconds>` — ten generations kept, the rest pruned. It is the pushed text,
+  restart-required fields included, so the next boot applies the whole of it;
+  `${VAR}` references stay unexpanded, as on disk. It is a record and never an
+  input: startup reads only the file named on the command line, so a bad remote
+  configuration cannot become what the process boots into, and a record that
+  cannot be written logs a `warn` without touching the reload.
 - **A pushed configuration lands on a poll, not instantly.** Measured against a
   standalone Nacos 2.5.4 with nacos-sdk 0.8.3: the SDK notices the change on its
-  60-second list-watch round, so plan for up to a minute of propagation; `SIGHUP`
-  is immediate. See `tests/nacos_e2e_test.rs`.
+  60-second list-watch round, so plan for up to a minute of propagation. The same
+  round fires once for a brand-new subscription, so a pushed configuration also
+  reaches a process that just started within that minute. See
+  `tests/nacos_e2e_test.rs`.
 - **Retired naming clients are unsubscribed, not closed.** nacos-sdk 0.8.3 has no
   client shutdown, so a reload stops instance pushes for the old watcher but its
   gRPC connection lives until the process exits.

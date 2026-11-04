@@ -154,9 +154,10 @@ async fn async_main(
     let live = build_live_state(&slots, xdp.enabled());
     let mcp_handle = start_control_plane(&config, config_content, live.clone()).await;
 
-    // The reload pipeline: both triggers hand requests to one channel, one task
-    // applies them in order, and a burst inside [`reload::RELOAD_DEBOUNCE`]
-    // folds into the newest request. The coordinator owns the in-force chain.
+    // The reload pipeline: the remote trigger hands pushed content to one
+    // channel, one task applies it in order, and a burst inside
+    // [`reload::RELOAD_DEBOUNCE`] folds into the newest push. The coordinator
+    // owns the in-force chain.
     let coordinator = Arc::new(ReloadCoordinator::new(
         config_path.to_path_buf(),
         Applied {
@@ -171,18 +172,21 @@ async fn async_main(
         live,
     ));
 
-    let (reload_tx, reload_rx) = tokio::sync::mpsc::unbounded_channel::<reload::ReloadRequest>();
+    // The startup configuration is the record until a push replaces it.
+    reload::write_online_record(config_path, config_content);
+
+    let (reload_tx, reload_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
     tokio::spawn(reload::run_reload_loop(Arc::clone(&coordinator), reload_rx));
 
-    spawn_sighup_trigger(reload_tx.clone());
     spawn_remote_config_trigger(reload_tx, config.remote_config.clone());
+    ignore_sighup();
 
     // Run server until shutdown signal
     let shutdown_timeout = Duration::from_secs(config.server.shutdown_timeout);
     let shutdown_token = server.shutdown_token().clone();
 
-    // Wait for SIGINT or SIGTERM, then cancel the server. SIGHUP is handled by
-    // the reload trigger above: it never shuts the resolver down.
+    // Wait for SIGINT or SIGTERM, then cancel the server. SIGHUP is caught by
+    // `ignore_sighup` above: it never shuts the resolver down.
     let mut sigterm = signal::unix::signal(signal::unix::SignalKind::terminate())
         .expect("failed to register SIGTERM handler");
 
@@ -287,27 +291,20 @@ fn build_live_state(slots: &[reload::PluginSlot], xdp_attached: bool) -> Arc<Liv
     Arc::new(live)
 }
 
-/// SIGHUP: ask for a re-read of the startup config file.
+/// SIGHUP: caught so it cannot kill the process, and ignored.
 ///
-/// The signal task only queues the request, so a reload already in progress
-/// cannot make the handler miss the next signal; the pipeline applies the two
-/// one after the other, and a rejected file leaves the running config untouched,
-/// so an editor that writes a half-saved file cannot take the resolver down.
-fn spawn_sighup_trigger(requests: tokio::sync::mpsc::UnboundedSender<reload::ReloadRequest>) {
+/// Without a handler the default disposition terminates the process, and an
+/// operator reaching for `kill -HUP` out of bind/unbound habit would take the
+/// resolver down without a drain. Keeping the signal registered is what makes
+/// that impossible; reloads themselves come from `[remote_config]` pushes.
+fn ignore_sighup() {
     tokio::spawn(async move {
-        let mut sighup = match signal::unix::signal(signal::unix::SignalKind::hangup()) {
-            Ok(sighup) => sighup,
-            Err(error) => {
-                tracing::error!(%error, "cannot register SIGHUP; file-triggered reload is disabled");
-                return;
-            }
+        let Ok(mut sighup) = signal::unix::signal(signal::unix::SignalKind::hangup()) else {
+            tracing::warn!("cannot register SIGHUP; kill -HUP will terminate this process");
+            return;
         };
-        tracing::info!("config reload listening on SIGHUP");
         while sighup.recv().await.is_some() {
-            if requests.send(reload::ReloadRequest::sighup()).is_err() {
-                tracing::warn!("reload queue is closed; file-triggered reload is disabled");
-                return;
-            }
+            tracing::info!("SIGHUP ignored: configuration changes are pushed by the remote config");
         }
     });
 }
@@ -315,14 +312,14 @@ fn spawn_sighup_trigger(requests: tokio::sync::mpsc::UnboundedSender<reload::Rel
 /// `[remote_config]`: one Nacos config watcher for the life of the process.
 ///
 /// The SDK hands pushed content to a synchronous callback, which is exactly what
-/// an unbounded channel send needs: the callback queues the request and returns,
+/// an unbounded channel send needs: the callback queues the text and returns,
 /// and [`reload::RELOAD_DEBOUNCE`] folds a multi-line edit into one reload.
 ///
 /// Connection failure is non-fatal and retried every 30 s, following the
 /// control-plane precedent: the resolver keeps serving DNS without its remote
 /// trigger.
 fn spawn_remote_config_trigger(
-    requests: tokio::sync::mpsc::UnboundedSender<reload::ReloadRequest>,
+    requests: tokio::sync::mpsc::UnboundedSender<String>,
     remote: RemoteConfig,
 ) {
     if !remote.enabled {
@@ -357,7 +354,7 @@ fn spawn_remote_config_trigger(
 
 async fn connect_remote_config(
     remote: &RemoteConfig,
-    requests: &tokio::sync::mpsc::UnboundedSender<reload::ReloadRequest>,
+    requests: &tokio::sync::mpsc::UnboundedSender<String>,
 ) -> Result<NacosConfigWatcher> {
     let watcher = NacosConfigWatcher::new(
         &remote.server_addr,
@@ -371,7 +368,7 @@ async fn connect_remote_config(
     let requests = requests.clone();
     watcher
         .start_watching(move |content| {
-            let _ = requests.send(reload::ReloadRequest::nacos(content));
+            let _ = requests.send(content);
         })
         .await
         .context("failed to subscribe to the remote config data id")?;

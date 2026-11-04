@@ -136,7 +136,7 @@ Points worth knowing before reading a failure:
   in `CARGO_TARGET_TMPDIR`, because what they assert — a push rejected, a
   connection reused (`nacos connection reused`, and no `unsubscribed from all
   nacos services` line), a connection retired (that same line, where the identity
-  did change), a reload that named `source=sighup` — is only visible there.
+  did change), the generation a reload reports — is only visible there.
   `--nocapture` therefore shows the other
   cases' process output only, and a failed wait on a log line panics with the tail
   of that file. The reads strip ANSI escapes before matching: the resolver only
@@ -183,8 +183,8 @@ Points worth knowing before reading a failure:
 | `crates/doggy-dns-xdp/tests/*` | 22 + 6 ignored | Userspace cache/interface/middleware/stats; XDP attach tests need root + Linux |
 | `crates/doggy-dns-control/tests/*` | 31 | Control plane: HTTP contract, endpoint selection, token scoping, live signals (including the per-reload zone handoff), state snapshots, redaction |
 | `tests/integration_test.rs` | 3 | End-to-end chain: Nacos hit, outside-zone fallthrough, in-zone miss stays authoritative |
-| `tests/reload_test.rs` | 30 | The reload pipeline itself: applied / rejected / skipped, restart-required differences kept out of the baseline (changed values and sections that exist on one side only), the reuse plan (carry by position, keep the connection by `server_addr`+`namespace`+`group`, consume-on-match, identity picks its own connection when entries reorder, disabled claims nothing), retire and default-chain paths, generation counting, burst coalescing |
-| `tests/nacos_e2e_test.rs` | 9 ignored + 1 | Live Nacos: boot-time instances, push after start-up, in-zone NXDOMAIN, IPv4-only NODATA, and the reload triggers — a pushed TTL reusing the naming connection with no sample left unserved, a push that changes the server address retiring the old connection and reporting the restart-required field, a rejected push changing nothing, a push that touches no plugin reusing the warm cache, and `SIGHUP` applying a hot field within seconds. The one case that runs without a server checks the log reads those triggers depend on |
+| `tests/reload_test.rs` | 34 | The reload pipeline itself: applied / rejected / skipped, restart-required differences kept out of the baseline (changed values and sections that exist on one side only), the reuse plan (carry by position, keep the connection by `server_addr`+`namespace`+`group`, consume-on-match, identity picks its own connection when entries reorder, disabled claims nothing), retire and default-chain paths, generation counting, burst coalescing, and the `*.online.toml` record (pushed text in place, the version it replaced in a timestamped backup, two pushes in one second keeping two, ten generations kept, nothing written for a rejected or skipped push, and a record that cannot be written leaving the reload in force) |
+| `tests/nacos_e2e_test.rs` | 9 ignored + 1 | Live Nacos: boot-time instances, push after start-up, in-zone NXDOMAIN, IPv4-only NODATA, and the reload trigger — a pushed TTL reusing the naming connection with no sample left unserved, a push that changes the server address retiring the old connection and reporting the restart-required field, a rejected push changing nothing, a push that touches no plugin reusing the warm cache, and the pushed configuration recorded beside the case config with the startup text kept as its backup while a stray `kill -HUP` changes nothing. The one case that runs without a server checks the log reads that trigger depends on |
 
 Forward tests run against a local mock upstream, native tests make real
 network calls, and the Nacos unit tests use mock DashMap caches (no Nacos

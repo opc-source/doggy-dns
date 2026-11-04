@@ -1,19 +1,20 @@
 #![allow(clippy::disallowed_methods)]
 
-//! The reload pipeline as the two triggers see it: one entry point, the same
-//! guarantees whichever source arrives. These drive the real coordinator, so
-//! what a rejected push leaves behind is the production code path, not a mock.
+//! The reload pipeline as its trigger sees it: one entry point, the same
+//! guarantees for every pushed configuration. These drive the real coordinator,
+//! so what a rejected push leaves behind is the production code path, not a
+//! mock.
 
 use doggy_dns::reload::{
-    Applied, PluginSlot, PreviousEntry, ReloadCoordinator, ReloadOutcome, ReloadRequest,
-    ReloadSource, SlotPlan, authority_chain_from, build_chain, middlewares_for, nacos_zone_signals,
-    plan_slots, restart_required, run_reload_loop,
+    Applied, PluginSlot, PreviousEntry, ReloadCoordinator, ReloadOutcome, SlotPlan,
+    authority_chain_from, build_chain, middlewares_for, nacos_zone_signals, online_record_path,
+    plan_slots, restart_required, run_reload_loop, write_online_record,
 };
 use doggy_dns_control::live::LiveState;
 use doggy_dns_core::config::{DoggyDnsConfig, PluginConfig, PluginKind, parse_config};
 use doggy_dns_core::handler::{AnswerRotation, DoggyDnsHandler};
 use doggy_dns_plugin::Middleware;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 const STARTUP: &str = r#"
@@ -112,10 +113,32 @@ min_ttl = 30
 max_ttl = 600
 "#;
 
+/// A config path the record writer can write to: one file per call under
+/// `target/tmp/reload-<pid>`, so runs do not collide and a test can count the
+/// backups of its own record.
+fn scratch_config_path(label: &str) -> PathBuf {
+    static SEQ: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("target/tmp")
+        .join(format!("reload-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("scratch directory for the online record");
+    let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    dir.join(format!("{label}-{seq}.toml"))
+}
+
 /// The startup sequence from `main.rs`: build the chain, hand it to the
 /// handler, adopt both in the coordinator.
 async fn coordinator_for(
     content: &str,
+) -> (ReloadCoordinator, Arc<DoggyDnsHandler>, Arc<LiveState>) {
+    coordinator_at(content, scratch_config_path("cfg")).await
+}
+
+/// The same, at a config path the caller keeps — for the tests that read back
+/// the record the pipeline writes.
+async fn coordinator_at(
+    content: &str,
+    config_path: PathBuf,
 ) -> (ReloadCoordinator, Arc<DoggyDnsHandler>, Arc<LiveState>) {
     let config = parse_config(content).expect("startup config parses");
     let mut previous: Vec<PluginSlot> = Vec::new();
@@ -135,7 +158,7 @@ async fn coordinator_for(
     live.replace_nacos_zones(nacos_zone_signals(&slots));
 
     let coordinator = ReloadCoordinator::new(
-        PathBuf::from("/unused/in/these/tests.toml"),
+        config_path,
         Applied {
             raw: content.to_string(),
             config,
@@ -160,6 +183,28 @@ fn config_of(content: &str) -> DoggyDnsConfig {
     parse_config(content).expect("test config parses")
 }
 
+/// The backups of `record`, oldest first. Their names end in the epoch seconds
+/// they were taken at, all the same width, so the file names sort as their
+/// stamps do.
+fn online_backups(record: &Path) -> Vec<PathBuf> {
+    let dir = record.parent().expect("the record sits in a directory");
+    let prefix = format!(
+        "{}.bak.",
+        record
+            .file_name()
+            .expect("the record has a name")
+            .to_string_lossy()
+    );
+    let mut names: Vec<String> = std::fs::read_dir(dir)
+        .expect("the record's directory is readable")
+        .flatten()
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .filter(|name| name.starts_with(&prefix))
+        .collect();
+    names.sort();
+    names.into_iter().map(|name| dir.join(name)).collect()
+}
+
 // --- the coordinator ---
 
 #[tokio::test]
@@ -168,9 +213,7 @@ async fn hot_fields_are_applied_without_a_restart() {
     assert!(handler.rotation_enabled());
     assert_eq!(handler.middlewares().len(), 1, "logging is on at startup");
 
-    let outcome = coordinator
-        .apply_reload(ReloadSource::Nacos, Some(HOT_CHANGES.to_string()))
-        .await;
+    let outcome = coordinator.apply_reload(HOT_CHANGES).await;
 
     assert_eq!(outcome, ReloadOutcome::Applied { generation: 1 });
     assert!(
@@ -191,9 +234,7 @@ async fn hot_fields_are_applied_without_a_restart() {
 async fn invalid_toml_is_rejected_and_leaves_the_running_config_in_force() {
     let (coordinator, handler, _live) = coordinator_for(STARTUP).await;
 
-    let outcome = coordinator
-        .apply_reload(ReloadSource::Sighup, Some("this = = not toml".to_string()))
-        .await;
+    let outcome = coordinator.apply_reload("this = = not toml").await;
 
     assert_eq!(outcome, ReloadOutcome::Rejected);
     // Nothing observable changed: still the startup config, still rotation on.
@@ -212,9 +253,7 @@ async fn validation_failure_is_rejected_too() {
     let (coordinator, handler, _live) = coordinator_for(STARTUP).await;
     let broken = STARTUP.replace("worker_threads = 1", "worker_threads = 0");
 
-    let outcome = coordinator
-        .apply_reload(ReloadSource::Nacos, Some(broken))
-        .await;
+    let outcome = coordinator.apply_reload(&broken).await;
 
     assert_eq!(outcome, ReloadOutcome::Rejected);
     assert!(
@@ -232,9 +271,7 @@ async fn validation_failure_is_rejected_too() {
 async fn identical_content_is_skipped() {
     let (coordinator, _handler, _live) = coordinator_for(STARTUP).await;
 
-    let outcome = coordinator
-        .apply_reload(ReloadSource::Nacos, Some(STARTUP.to_string()))
-        .await;
+    let outcome = coordinator.apply_reload(STARTUP).await;
 
     assert_eq!(
         outcome,
@@ -244,22 +281,10 @@ async fn identical_content_is_skipped() {
 }
 
 #[tokio::test]
-async fn unreadable_file_is_rejected() {
-    let (coordinator, handler, _live) = coordinator_for(STARTUP).await;
-
-    let outcome = coordinator.apply_reload(ReloadSource::Sighup, None).await;
-
-    assert_eq!(outcome, ReloadOutcome::Rejected);
-    assert!(handler.rotation_enabled());
-}
-
-#[tokio::test]
 async fn a_restart_required_change_is_reported_and_kept_out_of_the_baseline() {
     let (coordinator, handler, _live) = coordinator_for(STARTUP).await;
 
-    let outcome = coordinator
-        .apply_reload(ReloadSource::Nacos, Some(RESTART_ONLY.to_string()))
-        .await;
+    let outcome = coordinator.apply_reload(RESTART_ONLY).await;
 
     // The reload succeeds: the hot set is unchanged, the text is recorded so the
     // same push is not re-diffed, and the warning is what the operator gets.
@@ -319,9 +344,7 @@ async fn a_section_the_process_never_opened_stays_out_of_the_baseline() {
 
     let (coordinator, _handler, _live) = coordinator_for(STARTUP).await;
     assert_eq!(
-        coordinator
-            .apply_reload(ReloadSource::Nacos, Some(with_tls.clone()))
-            .await,
+        coordinator.apply_reload(&with_tls).await,
         ReloadOutcome::Applied { generation: 1 },
         "a restart-required-only push still applies the hot set, which here is nothing"
     );
@@ -350,9 +373,7 @@ async fn the_first_plugins_entry_moves_into_the_baseline() {
 
     let (coordinator, _handler, _live) = coordinator_for(&no_plugins).await;
     assert_eq!(
-        coordinator
-            .apply_reload(ReloadSource::Nacos, Some(STARTUP.to_string()))
-            .await,
+        coordinator.apply_reload(STARTUP).await,
         ReloadOutcome::Applied { generation: 1 }
     );
 
@@ -740,53 +761,45 @@ async fn reloads_are_counted_by_generation() {
     let (coordinator, _handler, _live) = coordinator_for(STARTUP).await;
     assert_eq!(coordinator.generation().await, 0);
 
-    let outcome = coordinator
-        .apply_reload(ReloadSource::Nacos, Some(HOT_CHANGES.to_string()))
-        .await;
+    let outcome = coordinator.apply_reload(HOT_CHANGES).await;
     assert_eq!(outcome, ReloadOutcome::Applied { generation: 1 });
 
     // Neither a skip nor a rejection moves the count: it counts reloads that
     // actually replaced the query path.
     assert_eq!(
-        coordinator
-            .apply_reload(ReloadSource::Nacos, Some(HOT_CHANGES.to_string()))
-            .await,
+        coordinator.apply_reload(HOT_CHANGES).await,
         ReloadOutcome::Skipped
     );
     assert_eq!(
-        coordinator
-            .apply_reload(ReloadSource::Nacos, Some("this = = not toml".to_string()))
-            .await,
+        coordinator.apply_reload("this = = not toml").await,
         ReloadOutcome::Rejected
     );
     assert_eq!(coordinator.generation().await, 1);
 
     assert_eq!(
-        coordinator
-            .apply_reload(ReloadSource::Sighup, Some(RESTART_ONLY.to_string()))
-            .await,
+        coordinator.apply_reload(RESTART_ONLY).await,
         ReloadOutcome::Applied { generation: 2 },
-        "the source of a request does not change how it is counted"
+        "a change that needs a restart still counts as a reload"
     );
     assert_eq!(coordinator.generation().await, 2);
 }
 
 #[tokio::test]
-async fn a_burst_of_requests_folds_into_the_newest() {
+async fn a_burst_of_pushes_folds_into_the_newest() {
     let (coordinator, handler, _live) = coordinator_for(STARTUP).await;
     let coordinator = Arc::new(coordinator);
-    let (requests, queue) = tokio::sync::mpsc::unbounded_channel();
+    let (pushes, queue) = tokio::sync::mpsc::unbounded_channel();
     tokio::spawn(run_reload_loop(Arc::clone(&coordinator), queue));
 
     // Both are queued before the loop can look at either, so the burst is one
     // reload of the newest content: rotation and logging stay as the startup
-    // config has them, which is what the second request asks for and what the
+    // config has them, which is what the second push asks for and what the
     // first would have turned off.
-    requests
-        .send(ReloadRequest::nacos(HOT_CHANGES.to_string()))
+    pushes
+        .send(HOT_CHANGES.to_string())
         .expect("the reload loop is listening");
-    requests
-        .send(ReloadRequest::nacos(RESTART_ONLY.to_string()))
+    pushes
+        .send(RESTART_ONLY.to_string())
         .expect("the reload loop is listening");
 
     for _ in 0..100 {
@@ -799,15 +812,151 @@ async fn a_burst_of_requests_folds_into_the_newest() {
     assert_eq!(
         coordinator.generation().await,
         1,
-        "two queued requests, one reload"
+        "two queued pushes, one reload"
     );
     assert!(
         handler.rotation_enabled(),
-        "the newest request is the one that was applied"
+        "the newest push is the one that was applied"
     );
     assert_eq!(
         handler.middlewares().len(),
         1,
-        "and the newest request kept the logging middleware"
+        "and the newest push kept the logging middleware"
+    );
+}
+
+// --- the record of what is in force ---
+
+#[tokio::test]
+async fn the_pushed_text_lands_in_the_record_and_the_old_version_in_a_backup() {
+    let config_path = scratch_config_path("record");
+    let record = online_record_path(&config_path);
+    // What startup writes for itself, so this case starts the way a real
+    // process does: a record already in place.
+    write_online_record(&config_path, STARTUP);
+
+    let (coordinator, _handler, _live) = coordinator_at(STARTUP, config_path.clone()).await;
+    assert_eq!(
+        coordinator.apply_reload(HOT_CHANGES).await,
+        ReloadOutcome::Applied { generation: 1 }
+    );
+
+    assert_eq!(
+        std::fs::read_to_string(&record).expect("the record was written"),
+        HOT_CHANGES,
+        "the record is the pushed text, restart-required fields and all, so the next boot applies them"
+    );
+    let backups = online_backups(&record);
+    assert_eq!(backups.len(), 1, "the version it replaced was kept");
+    assert_eq!(
+        std::fs::read_to_string(&backups[0]).expect("the backup was written"),
+        STARTUP,
+        "and it is the version that was in force before this push"
+    );
+}
+
+#[tokio::test]
+async fn two_pushes_in_one_second_keep_two_backups() {
+    let config_path = scratch_config_path("record");
+    let record = online_record_path(&config_path);
+    write_online_record(&config_path, STARTUP);
+    let (coordinator, _handler, _live) = coordinator_at(STARTUP, config_path.clone()).await;
+
+    assert_eq!(
+        coordinator.apply_reload(HOT_CHANGES).await,
+        ReloadOutcome::Applied { generation: 1 }
+    );
+    assert_eq!(
+        coordinator.apply_reload(RESTART_ONLY).await,
+        ReloadOutcome::Applied { generation: 2 }
+    );
+
+    let backups = online_backups(&record);
+    assert_eq!(
+        backups.len(),
+        2,
+        "one stamp per push: a burst folded at the reload level still leaves two generations"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&record).expect("the record was written"),
+        RESTART_ONLY
+    );
+    assert_eq!(
+        std::fs::read_to_string(&backups[1]).expect("the newer backup was written"),
+        HOT_CHANGES,
+        "the newest backup is the one this push replaced"
+    );
+}
+
+#[tokio::test]
+async fn only_the_ten_newest_backups_are_kept() {
+    let config_path = scratch_config_path("record");
+    let record = online_record_path(&config_path);
+    write_online_record(&config_path, STARTUP);
+    let (coordinator, _handler, _live) = coordinator_at(STARTUP, config_path).await;
+
+    // Twelve pushes that differ only in a restart-required field: each is new
+    // text, so each is applied and each replaces the record.
+    for generation in 1..=12u64 {
+        let push = STARTUP.replace("tcp_timeout = 10", &format!("tcp_timeout = {generation}"));
+        assert_eq!(
+            coordinator.apply_reload(&push).await,
+            ReloadOutcome::Applied { generation },
+            "the push differs from the one in force, so it is applied"
+        );
+    }
+
+    assert_eq!(
+        online_backups(&record).len(),
+        10,
+        "the record keeps a window of versions, not every version it ever had"
+    );
+}
+
+#[tokio::test]
+async fn a_rejected_or_skipped_push_leaves_the_record_alone() {
+    let config_path = scratch_config_path("record");
+    let record = online_record_path(&config_path);
+    write_online_record(&config_path, STARTUP);
+    let (coordinator, _handler, _live) = coordinator_at(STARTUP, config_path.clone()).await;
+
+    assert_eq!(
+        coordinator.apply_reload("this = = not toml").await,
+        ReloadOutcome::Rejected
+    );
+    assert_eq!(
+        coordinator.apply_reload(STARTUP).await,
+        ReloadOutcome::Skipped
+    );
+
+    assert_eq!(
+        std::fs::read_to_string(&record).expect("the record was written"),
+        STARTUP,
+        "nothing came into force, so nothing was recorded"
+    );
+    assert!(
+        online_backups(&record).is_empty(),
+        "and the versions it did not replace stay single"
+    );
+}
+
+#[tokio::test]
+async fn an_unwritable_record_leaves_the_reload_in_force() {
+    // A directory that does not exist: the record cannot be written, and the
+    // reload it describes has already happened.
+    let config_path = PathBuf::from("/unused/in/these/tests.toml");
+    let (coordinator, handler, _live) = coordinator_at(STARTUP, config_path.clone()).await;
+
+    assert_eq!(
+        coordinator.apply_reload(HOT_CHANGES).await,
+        ReloadOutcome::Applied { generation: 1 }
+    );
+    assert!(
+        !handler.rotation_enabled(),
+        "the swap stands even though its record failed"
+    );
+    assert!(
+        !online_record_path(&config_path).exists(),
+        "and the failed write left no file behind"
     );
 }

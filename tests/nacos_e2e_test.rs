@@ -3,12 +3,11 @@
 //! End-to-end tests for the live Nacos path: `NacosServiceWatcher` -> instance
 //! cache -> `NacosAuthority` -> DNS answer.
 //!
-//! Four more cases drive the hot-reload trigger: a configuration published
+//! Five more cases drive the hot-reload trigger: a configuration published
 //! through the config service replaces what the resolver serves (changed, and
-//! for an unparsable one not at all) and reuses what did not change, while a
-//! `SIGHUP` does the same through the file. The three push cases wait on
-//! [`PUSH_DEADLINE`], because nacos-sdk notices config changes on a poll; the
-//! signal case proves by waiting on [`SIGHUP_DEADLINE`] that it is not the poll.
+//! for an unparsable one not at all), reuses what did not change, and is
+//! recorded on disk beside the startup file. They all wait on
+//! [`PUSH_DEADLINE`], because nacos-sdk notices config changes on a poll.
 //!
 //! Every case needs a running Nacos server, so they are `#[ignore]`d and never
 //! join `cargo test --workspace`. CI runs them in `.github/workflows/nacos-ci.yml`.
@@ -30,6 +29,7 @@
 //! test process: ephemeral instances disappear once the client connection is
 //! dropped, so the `NacosClient` handle must outlive the queries below.
 
+use doggy_dns::reload::online_record_path;
 use hickory_proto::op::{Message, MessageType, OpCode, Query, ResponseCode};
 use hickory_proto::rr::{Name, RData, RecordType};
 use nacos_sdk::api::config::{ConfigService, ConfigServiceBuilder};
@@ -37,7 +37,7 @@ use nacos_sdk::api::naming::{NamingService, NamingServiceBuilder, ServiceInstanc
 use nacos_sdk::api::props::ClientProps;
 use std::collections::HashSet;
 use std::net::{Ipv4Addr, SocketAddr};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
 use tokio::net::UdpSocket;
@@ -63,16 +63,9 @@ const POLL: Duration = Duration::from_millis(300);
 /// nacos-sdk 0.8.3 notices config changes on its `list_ensure_cache_data_newest`
 /// poll, which runs every 60 s: the `ConfigChangeNotifyRequest` the server is
 /// supposed to send on publish never reached the client in our runs (naming
-/// pushes over the same connection do). So a push is a minute, not a millisecond,
-/// and SIGHUP stays the immediate trigger.
+/// pushes over the same connection do). So a push is a minute, not a
+/// millisecond, and it is the only trigger the pipeline has.
 const PUSH_DEADLINE: Duration = Duration::from_secs(120);
-
-/// How long a `SIGHUP` reload may take to show up in an answer.
-///
-/// Tight on purpose: one SDK config poll is 60 s, so a flip that lands inside
-/// this window can only have come from the signal. That is what makes the case
-/// about `SIGHUP` rather than about the push path again.
-const SIGHUP_DEADLINE: Duration = Duration::from_secs(10);
 
 /// Sampling interval for the gap check that proves a watcher was reused.
 ///
@@ -289,8 +282,8 @@ impl DoggyDns {
 
     /// `content` with its `key = …` line replaced by `key = value`.
     ///
-    /// Both triggers take a whole configuration, so every variant a case needs
-    /// is the same file with one line rewritten.
+    /// A push carries a whole configuration, so every variant a case needs is
+    /// the same file with one line rewritten.
     fn patch_line(content: &str, key: &str, value: &str) -> String {
         let needle = format!("{key} = ");
         content
@@ -320,14 +313,8 @@ impl DoggyDns {
         Self::patch_line(content, "logging", &logging.to_string())
     }
 
-    /// `content` with `[server] worker_threads` set to `threads` — a field a
-    /// reload reports as needing a restart instead of applying it.
-    fn with_worker_threads(content: &str, threads: usize) -> String {
-        Self::patch_line(content, "worker_threads", &threads.to_string())
-    }
-
-    /// The file the resolver on `port` was started from, which is what a
-    /// `SIGHUP` reload re-reads.
+    /// The file the resolver on `port` was started from — the case config, whose
+    /// sibling is where the record of what is in force lands.
     fn config_path(port: u16) -> PathBuf {
         PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("nacos-e2e-{port}.toml"))
     }
@@ -406,10 +393,7 @@ impl DoggyDns {
     /// Wait until this process' log contains `needle`.
     ///
     /// Waits on [`PUSH_DEADLINE`] because the lines a case waits for are written
-    /// when a pushed configuration arrives — and that is on the SDK's poll. A
-    /// `SIGHUP` writes its line at once, so for those the deadline is only an
-    /// upper bound; immediacy is proven by what a query sees
-    /// ([`SIGHUP_DEADLINE`]), not by how fast the line appears here.
+    /// when a pushed configuration arrives — and that is on the SDK's poll.
     async fn await_log_line(&self, needle: &str) {
         let until = tokio::time::Instant::now() + PUSH_DEADLINE;
         loop {
@@ -432,8 +416,8 @@ impl DoggyDns {
         }
     }
 
-    /// `kill -HUP` the resolver: the file trigger, driven through the real
-    /// process the way an operator would.
+    /// `kill -HUP` the resolver: the signal an operator used to reload with,
+    /// sent to the real process the way it would be sent in anger.
     async fn send_sighup(&self) {
         let pid = self
             .child
@@ -579,23 +563,66 @@ fn matches_a_with_ttl(message: &Message, want: usize, ttl: u32) -> bool {
         && message.answers.iter().all(|record| record.ttl == ttl)
 }
 
+/// The record the resolver on this case's port keeps beside its config file, and
+/// the panicking read every assertion here goes through: a missing record is
+/// this case's failure, not a `None` to unwrap.
+fn read_online_record(record: &Path) -> String {
+    std::fs::read_to_string(record).expect("the resolver wrote no config online record")
+}
+
+/// The backups of `record`, oldest first. Their names end in the epoch seconds
+/// they were taken at, all the same width, so the file names sort as their
+/// stamps do.
+fn online_backups(record: &Path) -> Vec<PathBuf> {
+    let dir = record
+        .parent()
+        .expect("the record sits beside the case config");
+    let prefix = format!(
+        "{}.bak.",
+        record
+            .file_name()
+            .expect("the record has a name")
+            .to_string_lossy()
+    );
+    let mut paths: Vec<PathBuf> = std::fs::read_dir(dir)
+        .expect("the case directory is readable")
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.file_name()
+                .is_some_and(|name| name.to_string_lossy().starts_with(&prefix))
+        })
+        .collect();
+    paths.sort();
+    paths
+}
+
+/// Remove a record and its backups left over from an earlier run, so a case that
+/// counts them starts from a known state.
+fn clear_online_record(record: &Path) {
+    let _ = std::fs::remove_file(record);
+    for backup in online_backups(record) {
+        let _ = std::fs::remove_file(backup);
+    }
+}
+
 /// A live line from a redirected case log, escapes and all.
 const COLOURISED_RELOAD_LINE: &str = concat!(
     "\u{1b}[2m2026-11-03T03:56:44.297316Z\u{1b}[0m \u{1b}[32m INFO\u{1b}[0m ",
     "\u{1b}[2mdoggy_dns::reload\u{1b}[0m\u{1b}[2m:\u{1b}[0m config reload applied ",
-    "\u{1b}[3msource\u{1b}[0m\u{1b}[2m=\u{1b}[0msighup ",
+    "\u{1b}[3mgeneration\u{1b}[0m\u{1b}[2m=\u{1b}[0m1 ",
     "\u{1b}[3mplugins\u{1b}[0m\u{1b}[2m=\u{1b}[0m1 ",
     "\u{1b}[3mlogging\u{1b}[0m\u{1b}[2m=\u{1b}[0mtrue",
 );
 
-/// The log reads are what make the two new cases possible, so the collapse that
+/// The log reads are what make the push cases possible, so the collapse that
 /// lets them match is checked without a Nacos server.
 #[test]
 fn strip_ansi_leaves_field_pairs_searchable() {
     let clean = strip_ansi(COLOURISED_RELOAD_LINE);
     assert!(
-        clean.contains("config reload applied source=sighup"),
-        "the source a reload reports must be findable, got {clean}"
+        clean.contains("config reload applied generation=1"),
+        "the generation a reload reports must be findable, got {clean}"
     );
     assert!(
         clean.contains("logging=true"),
@@ -823,56 +850,97 @@ async fn e2e_invalid_config_push_keeps_the_running_config() {
     server.await_a_with_ttl(&qname, 2, PUSHED_TTL).await;
 }
 
-/// `SIGHUP` is the immediate trigger: editing the file the process started from
-/// and signalling it applies a hot field well inside one SDK poll, while the
-/// field no live process can apply is reported instead of silently kept.
+/// What a push leaves on disk, and what a signal no longer does: the pushed text
+/// is recorded beside the startup file, the text it replaces is kept as one
+/// timestamped backup, and `kill -HUP` — no longer a trigger — neither re-reads
+/// the file nor takes the process down.
 #[tokio::test]
 #[ignore]
-async fn e2e_sighup_reloads_the_config_immediately() {
+async fn e2e_pushed_config_is_recorded_and_sighup_changes_nothing() {
     let port = 15417;
     let nacos = NacosClient::connect().await;
-    nacos.register("e2e-sighup", &[("10.0.0.71", 8080)]).await;
+    nacos.register("e2e-record", &[("10.0.0.71", 8080)]).await;
 
-    // No `[remote_config]`: the signal is the only thing that can change this
-    // process's configuration, so nothing else can be credited with the flip.
-    let startup = DoggyDns::patched_config(port);
-    let mut server = DoggyDns::start_logged(port, &startup).await;
-    let qname = service_qname("e2e-sighup");
+    let record = online_record_path(&DoggyDns::config_path(port));
+    // The record and its backups live in `target/tmp`, so they outlive a run; a
+    // case that counts them has to start from none.
+    clear_online_record(&record);
+
+    let (startup, mut server) = start_with_remote_config(&nacos, port).await;
+    let qname = service_qname("e2e-record");
     server.await_a_with_ttl(&qname, 1, RECORD_TTL).await;
 
-    // One hot field and one that needs a restart, changed together.
-    let edited = DoggyDns::with_worker_threads(&DoggyDns::with_ttl(&startup, PUSHED_TTL), 2);
-    std::fs::write(DoggyDns::config_path(port), &edited)
-        .expect("failed to rewrite the config the process loads on SIGHUP");
-    server.send_sighup().await;
-
-    // Named source, so what follows is credited to the signal and not to some
-    // other path reaching the same pipeline.
-    server
-        .await_log_line("config reload applied source=sighup")
-        .await;
-
-    let message = server
-        .poll_until(
-            &qname,
-            RecordType::A,
-            SIGHUP_DEADLINE,
-            &format!("1 answer with ttl {PUSHED_TTL}"),
-            |message| matches_a_with_ttl(message, 1, PUSHED_TTL),
-        )
-        .await;
     assert_eq!(
-        answer_ips(&message),
-        HashSet::from(["10.0.0.71".to_string()]),
-        "the chain a SIGHUP rebuilt must still serve the service"
+        record
+            .file_name()
+            .expect("the record has a name")
+            .to_string_lossy(),
+        format!("nacos-e2e-{port}.online.toml"),
+        "the file an operator reads is named after the config it records"
+    );
+    // Written at start-up, before any push could arrive: what the process booted
+    // with is in force, and it is worth recording even if nothing ever changes.
+    assert_eq!(
+        read_online_record(&record),
+        startup,
+        "start-up records the configuration it loaded"
+    );
+    assert!(
+        online_backups(&record).is_empty(),
+        "recording for the first time replaces nothing, so it keeps nothing"
     );
 
-    // `worker_threads` builds the tokio runtime, so no reload can swap it: the
-    // pipeline says which paths it left for the restart rather than pretending.
-    server
-        .await_log_line("these configuration changes need a restart")
-        .await;
+    let pushed = DoggyDns::with_ttl(&startup, PUSHED_TTL);
+    server.publish(&nacos, &pushed).await;
+    server.await_log_line("config reload applied").await;
+    server.await_a_with_ttl(&qname, 1, PUSHED_TTL).await;
+
+    // The pushed text, restart-required fields and all, so the next boot applies
+    // the whole of it — and the startup file untouched, because the record is a
+    // record and never a startup input.
+    assert_eq!(read_online_record(&record), pushed);
+    assert_eq!(
+        std::fs::read_to_string(DoggyDns::config_path(port)).expect("the case config"),
+        startup,
+        "the file the next boot reads is still the one this boot read"
+    );
+    let backups = online_backups(&record);
+    assert_eq!(
+        backups.len(),
+        1,
+        "the version the push replaced is kept, with the stamp it was replaced at"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&backups[0]).expect("the backup was written"),
+        startup
+    );
+
+    // The trigger this pipeline dropped: an operator who still reaches for it
+    // finds the process alive and the pushed configuration still in force.
+    server.send_sighup().await;
+    server.await_log_line("SIGHUP ignored").await;
     server.assert_alive();
+    // Long enough that a file re-read would have landed and the answer reverted
+    // to the startup TTL; the push has to survive it.
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    let message = server
+        .send(&qname, RecordType::A)
+        .await
+        .expect("the resolver stopped answering after SIGHUP");
+    assert!(
+        matches_a_with_ttl(&message, 1, PUSHED_TTL),
+        "a stray kill -HUP must not re-read the startup file, got ttls {:?}",
+        message
+            .answers
+            .iter()
+            .map(|record| record.ttl)
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        online_backups(&record).len(),
+        1,
+        "and it must not record anything either"
+    );
 }
 
 /// A push that changes nothing in `[[plugins]]` reuses the watcher: the zone

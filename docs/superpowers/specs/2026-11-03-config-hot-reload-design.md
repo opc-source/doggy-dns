@@ -700,3 +700,88 @@ The four per-case process logs are what those claims rest on:
   line, no reuse line, `paths=["remote_config.server_addr"]` reported, and the new
   `localhost:8848` subscription reporting the instances 507 ms later — §12's gap,
   now confined to the reload that actually moves the connection.
+
+## 14. Third round: `SIGHUP` dropped, and what a push leaves on disk
+
+The two triggers became one. `SIGHUP`'s re-read of the startup file is gone —
+`ReloadSource`, `ReloadRequest` and the `std::fs::read_to_string` branch inside
+`apply_reload` with them — so `[remote_config]` is the only way a running process
+changes its configuration, the channel carries a `String`, and `apply_reload(&str)`
+has one path. Two reasons behind the call: a container that takes its configuration
+from Nacos has no operator to signal it, and the file trigger re-read a file the
+push path never updated, so the two could disagree about what is in force.
+
+**`SIGHUP` is still registered — to be ignored.** With no handler the signal gets
+its default disposition, and `kill -HUP` is what an operator reaches for out of
+bind/unbound/logrotate habit; it would end a DNS resolver with no drain.
+`ignore_sighup` (`src/main.rs`) keeps it caught and logs `SIGHUP ignored`.
+
+**What is in force is now recorded.** Until this round the pipeline kept a
+truthful baseline in memory and nothing on disk: a process that booted from an old
+file and took twelve pushes would boot from the old file again.
+`write_online_record` (`src/reload.rs`) closes that as a record, not an input.
+
+- **Which text.** The pushed text verbatim, restart-required fields and all, so the
+  next boot applies the whole of it rather than only what a live socket could take.
+  `${VAR}` references stay unexpanded — that is the text the pipeline holds, the
+  same text the identical-content guard compares. Startup's record is the
+  unexpanded file text `load_config` returned, written once from `async_main`.
+- **Where.** `<config-stem>.online.toml`, beside the file the process was started
+  from, and never read at startup: the path on the command line stays the only
+  input, so a bad remote push cannot become what the process boots into.
+- **How.** Three renames, never one write — text to `<record>.tmp` with `sync_all`,
+  the previous record to `<record>.bak.<epoch secs>`, then the temp into place — so
+  an interrupted run leaves either the old record or the new one. The temp takes the
+  old record's permission bits where the platform allows, and if the last rename
+  fails the backup is moved back before the `error` is logged.
+- **How many.** Ten generations (`ONLINE_BACKUPS_KEPT`), pruned by the stamp in the
+  name. The stamp comes from `unix_now_secs` (`doggy_dns_basic::time`, reached here
+  as `doggy_dns_core::config::time`): no chrono in the binary for a filename
+  suffix. A second push inside the same second advances the stamp, so two reloads
+  keep two files rather than one clobbering the other.
+- **When it does not happen.** Only `Applied` records. A `Skipped` push is the text
+  already in force and a `Rejected` one never became anything, so both leave the
+  record and its backups alone. A write failure is a `warn`: the reload it describes
+  already swapped the chain, and a read-only directory is not a reason to undo it.
+
+Both the record's status (a record, not the new startup file) and the timestamped
+multi-generation backup came from review.
+
+`tests/reload_test.rs` is at 34 cases. Five are the record: pushed text in place
+with the previous version in exactly one backup; two pushes in one second keeping
+two backups; twelve pushes leaving ten; a rejected push and a skipped push leaving
+both the text and the backup count alone; and a record whose directory does not
+exist still returning `Applied` with no file left behind. Each was red-checked
+against a mutated writer — a no-op `write_online_record` fails the first, second,
+third and fifth, removing the prune fails the ten case at 12, skipping the move
+aside fails the three that count backups, and recording before the parse fails the
+rejected/skipped case.
+
+`tests/nacos_e2e_test.rs` keeps nine ignored cases; the `SIGHUP` one is now
+`e2e_pushed_config_is_recorded_and_sighup_changes_nothing` (15417). It reads the
+boot record back (equal to the case config, no backup yet), publishes a TTL push,
+then asserts the record holds the pushed text while the case config still holds the
+startup text — the record never overwrites its input — with that startup text in
+exactly one backup. Then `kill -HUP`: the log line, a live process, the pushed TTL
+still the answer, and the same one backup.
+
+Verification after this round: `cargo fmt --all -- --check`, `cargo clippy
+--all-features --all-targets -- -D warnings`, `cargo test --workspace` (350 passed,
+0 failed over 54 result lines) and `cargo bench --no-run --workspace` exit 0; live
+against the same Podman `nacos-server:v2.5.4`, 9 of 9 ignored cases pass in 123.12 s.
+
+The 15417 process log is the witness for both halves:
+
+```text
+02:55:41.850  INFO doggy_dns: config reload listening on nacos push data_id=doggy-dns-e2e-15417.toml
+02:56:42.361  INFO doggy_dns::reload: config reload applied generation=1 plugins=1 logging=false rotate_answers=true
+02:56:42.484  INFO doggy_dns: SIGHUP ignored: configuration changes are pushed by the remote config
+```
+
+The applied line arrives 60.5 s after the trigger subscribed — §12's poll, now the
+only path into the pipeline, with no `source=` field to distinguish it from a file
+re-read because there is no file re-read. On disk in `target/tmp` beside the case
+config: `nacos-e2e-15417.online.toml` holding the pushed text and
+`nacos-e2e-15417.online.toml.bak.1793761002` holding the startup text. The same run
+left a record for every other case's process too (15411–15419), which is the
+startup write happening in the real binary rather than in a test.

@@ -1,11 +1,13 @@
-//! Hot config reload: one pipeline, two triggers.
+//! Hot config reload: one pipeline, one trigger.
 //!
-//! A SIGHUP re-reads the local file and a Nacos config push delivers content
-//! straight from the server; both end up in
+//! A Nacos config push delivers content straight from the server into
 //! [`ReloadCoordinator::apply_reload`], which validates the new text with the
 //! exact rules startup uses ([`doggy_dns_core::config::parse_config`]), swaps the
 //! authority chain and the middleware set inside [`DoggyDnsHandler`], and
-//! reports whatever it deliberately did **not** apply.
+//! reports whatever it deliberately did **not** apply. What the pipeline applies
+//! is also recorded on disk next to the startup file ([`write_online_record`]),
+//! so the last configuration in force survives a restart as a record — the
+//! startup file itself stays the only input.
 //!
 //! A reload rebuilds what can be rebuilt and keeps the rest: an unchanged
 //! `[[plugins]]` entry is carried over with its handler, and a nacos entry whose
@@ -23,6 +25,7 @@
 use anyhow::Result;
 use doggy_dns_control::live::{LiveProbe, LiveState, nacos_zone_signal};
 use doggy_dns_control::state::McpState;
+use doggy_dns_core::config::time::unix_now_secs;
 use doggy_dns_core::config::{DoggyDnsConfig, PluginConfig, PluginKind, parse_config};
 use doggy_dns_core::handler::DoggyDnsHandler;
 use doggy_dns_core::middleware::logging::LoggingMiddleware;
@@ -34,28 +37,12 @@ use doggy_dns_plugin::builtin::forward::ForwardAuthority;
 use doggy_dns_plugin::builtin::native::NativeAuthority;
 use hickory_server::zone_handler::ZoneHandler;
 use std::collections::BTreeSet;
-use std::path::PathBuf;
+use std::io::Write;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 use tokio::sync::Mutex;
-
-/// What asked for the reload; carried into every log line so a bad push and a
-/// bad edit to the local file are not confused.
-#[derive(Debug, Clone, Copy)]
-pub enum ReloadSource {
-    Sighup,
-    Nacos,
-}
-
-impl std::fmt::Display for ReloadSource {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Sighup => f.write_str("sighup"),
-            Self::Nacos => f.write_str("nacos"),
-        }
-    }
-}
 
 /// One configured plugin plus whatever was built for it.
 ///
@@ -675,70 +662,45 @@ pub enum ReloadOutcome {
     Applied { generation: u64 },
     /// Identical to what is already in force.
     Skipped,
-    /// Rejected: unreadable, invalid, or unbuildable. The old config stays.
+    /// Rejected: invalid, or unbuildable. The old config stays.
     Rejected,
 }
 
-/// A reload request, from whichever trigger.
-#[derive(Debug, Clone)]
-pub struct ReloadRequest {
-    pub source: ReloadSource,
-    /// Pushed content; `None` means re-read the startup file.
-    pub raw: Option<String>,
-}
-
-impl ReloadRequest {
-    /// `kill -HUP`: re-read the file the process started with.
-    pub fn sighup() -> Self {
-        Self {
-            source: ReloadSource::Sighup,
-            raw: None,
-        }
-    }
-
-    /// Content pushed by the remote config service.
-    pub fn nacos(content: String) -> Self {
-        Self {
-            source: ReloadSource::Nacos,
-            raw: Some(content),
-        }
-    }
-}
-
-/// How long a burst of reload requests is folded into one.
+/// How long a burst of pushes is folded into one reload.
 ///
 /// The window exists for the remote trigger: an edit that changes several lines
 /// arrives as several pushes, and each reload would rebuild the chain again.
-/// A burst therefore costs one reload — the newest request, because it carries
-/// the newest intent. Folding stops as soon as the channel is quiet for the
-/// window, so a steady stream of pushes still gets served, one reload per
-/// window.
+/// A burst therefore costs one reload — the newest push, because it carries the
+/// newest intent. Folding stops as soon as the channel is quiet for the window,
+/// so a steady stream of pushes still gets served, one reload per window.
 pub const RELOAD_DEBOUNCE: Duration = Duration::from_millis(500);
 
-/// Apply reload requests as they arrive, one at a time, coalescing bursts.
+/// Apply pushed configurations as they arrive, one at a time, coalescing bursts.
 ///
-/// Both triggers hand their requests over and return, which keeps a signal
-/// handler from awaiting a rebuild it cannot cancel; the channel closing (every
-/// sender dropped, i.e. shutdown) ends the task.
+/// The trigger hands its content over and returns, which keeps a config
+/// callback from awaiting a rebuild it cannot cancel; the channel closing (the
+/// last sender dropped, i.e. shutdown) ends the task.
 pub async fn run_reload_loop(
     coordinator: Arc<ReloadCoordinator>,
-    mut requests: tokio::sync::mpsc::UnboundedReceiver<ReloadRequest>,
+    mut pushes: tokio::sync::mpsc::UnboundedReceiver<String>,
 ) {
-    while let Some(first) = requests.recv().await {
+    while let Some(first) = pushes.recv().await {
         let mut newest = first;
-        while let Ok(Some(request)) = tokio::time::timeout(RELOAD_DEBOUNCE, requests.recv()).await {
-            newest = request;
+        while let Ok(Some(push)) = tokio::time::timeout(RELOAD_DEBOUNCE, pushes.recv()).await {
+            newest = push;
         }
-        coordinator.apply_reload(newest.source, newest.raw).await;
+        coordinator.apply_reload(&newest).await;
     }
 }
 
 /// Owns the in-force chain and applies reloads to it.
 ///
-/// One mutex guards the whole sequence: two triggers firing at once (a push
-/// and a `kill -HUP`) reload one after the other, never interleaved, and the
-/// query path never takes this lock.
+/// One mutex guards the whole sequence: pushes that arrive while a reload is
+/// running are applied one after the other, never interleaved, and the query
+/// path never takes this lock.
 pub struct ReloadCoordinator {
+    /// The startup file; its sibling holds the record of what is in force
+    /// ([`online_record_path`]).
     config_path: PathBuf,
     handler: Arc<DoggyDnsHandler>,
     /// Everything but the logging middleware, captured at startup; a reload
@@ -782,45 +744,22 @@ impl ReloadCoordinator {
         self.applied.lock().await.generation
     }
 
-    /// Apply a new config, or keep the old one. Never fails the caller: a
-    /// rejected reload is logged and otherwise does nothing, because a bad
-    /// push must not take the resolver down.
-    ///
-    /// `raw` is the pushed content for [`ReloadSource::Nacos`]; `None` means
-    /// re-read the startup file ([`ReloadSource::Sighup`]).
-    pub async fn apply_reload(&self, source: ReloadSource, raw: Option<String>) -> ReloadOutcome {
-        let raw = match raw {
-            Some(raw) => raw,
-            None => match std::fs::read_to_string(&self.config_path) {
-                Ok(raw) => raw,
-                Err(e) => {
-                    tracing::error!(
-                        source = %source,
-                        path = %self.config_path.display(),
-                        error = %e,
-                        "config reload rejected: cannot read the config file"
-                    );
-                    return ReloadOutcome::Rejected;
-                }
-            },
-        };
-
+    /// Apply a pushed configuration, or keep the one in force. Never fails the
+    /// caller: a rejected push is logged and otherwise does nothing, because a
+    /// bad push must not take the resolver down.
+    pub async fn apply_reload(&self, raw: &str) -> ReloadOutcome {
         let mut applied = self.applied.lock().await;
 
         if raw == applied.raw {
-            tracing::info!(
-                source = %source,
-                "config reload skipped: content identical to the one in force"
-            );
+            tracing::info!("config reload skipped: content identical to the one in force");
             return ReloadOutcome::Skipped;
         }
 
-        let config = match parse_config(&raw) {
+        let config = match parse_config(raw) {
             Ok(config) => config,
-            Err(e) => {
+            Err(error) => {
                 tracing::error!(
-                    source = %source,
-                    error = %e,
+                    %error,
                     "config reload rejected: invalid configuration, keeping the one in force"
                 );
                 return ReloadOutcome::Rejected;
@@ -830,10 +769,9 @@ impl ReloadCoordinator {
         let mut previous = std::mem::take(&mut applied.slots);
         let slots = match build_chain(&config, &mut previous).await {
             Ok(slots) => slots,
-            Err(e) => {
+            Err(error) => {
                 tracing::error!(
-                    source = %source,
-                    error = %e,
+                    %error,
                     "config reload rejected: authority chain could not be built, keeping the one in force"
                 );
                 // Nothing was consumed on the failure path, but put the chain
@@ -851,18 +789,17 @@ impl ReloadCoordinator {
         self.handler.set_rotation(config.server.rotate_answers);
         self.live.replace_nacos_zones(nacos_zone_signals(&slots));
         if let Some(state) = &self.control_state {
-            state.update_runtime(&raw, &config.plugins);
+            state.update_runtime(raw, &config.plugins);
         }
 
         let plugin_count = slots.len();
-        applied.raw = raw;
+        applied.raw = raw.to_string();
         applied.config = adopt_hot_paths_only(&applied.config, &config);
         applied.slots = slots;
         applied.generation += 1;
         let generation = applied.generation;
 
         tracing::info!(
-            source = %source,
             generation,
             plugins = plugin_count,
             logging = applied.config.middleware.logging,
@@ -871,12 +808,143 @@ impl ReloadCoordinator {
         );
         if !deferred.is_empty() {
             tracing::warn!(
-                source = %source,
                 generation,
                 paths = ?deferred,
                 "these configuration changes need a restart to take effect"
             );
         }
+        write_online_record(&self.config_path, raw);
         ReloadOutcome::Applied { generation }
+    }
+}
+
+/// How many timestamped copies of the in-force record a machine keeps.
+const ONLINE_BACKUPS_KEPT: usize = 10;
+
+/// The file that records the configuration currently in force: a sibling of the
+/// startup file, named `<stem>.online.toml`.
+///
+/// A record, not an input: startup reads `config_path` and only `config_path`,
+/// so a bad remote configuration can never become the thing the process boots
+/// into.
+pub fn online_record_path(config_path: &Path) -> PathBuf {
+    let stem = config_path
+        .file_stem()
+        .map(|stem| stem.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "config".to_string());
+    config_path.with_file_name(format!("{stem}.online.toml"))
+}
+
+/// Record `raw` as the configuration in force, moving the version it replaces
+/// to a timestamped backup first.
+///
+/// The text written is what was pushed, restart-required fields and all, so the
+/// next boot applies the whole of it; `${VAR}` references stay unexpanded
+/// because that is the text the pipeline holds. Three renames rather than one
+/// write, so an interrupted run leaves either the old record or the new one and
+/// never a half-written file: the text lands in a `.tmp` sibling and is synced,
+/// the previous record moves aside under `<record>.bak.<epoch secs>`, and only
+/// then does the temp file take its place.
+///
+/// Failures are reported and otherwise dropped. The reload this records already
+/// happened, and a read-only directory is not a reason to undo it.
+pub fn write_online_record(config_path: &Path, raw: &str) {
+    let record = online_record_path(config_path);
+    let temp = appended(&record, ".tmp");
+
+    if let Err(error) = write_pending(&temp, raw, &record) {
+        tracing::warn!(%error, path = %record.display(), "config online record not written");
+        return;
+    }
+
+    let backup = next_backup_path(&record);
+    match std::fs::rename(&record, &backup) {
+        Ok(()) => {}
+        // The first record has no previous version to keep.
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            let _ = std::fs::remove_file(&temp);
+            tracing::warn!(%error, path = %record.display(), "config online record not written");
+            return;
+        }
+    }
+
+    if let Err(error) = std::fs::rename(&temp, &record) {
+        // Put back what was there when this started, so the file on disk stays
+        // the one the operator last read.
+        let _ = std::fs::rename(&backup, &record);
+        let _ = std::fs::remove_file(&temp);
+        tracing::error!(%error, path = %record.display(), "config online record could not be put in place");
+        return;
+    }
+
+    prune_online_backups(&record);
+}
+
+/// `path` with `suffix` appended to its file name.
+fn appended(path: &Path, suffix: &str) -> PathBuf {
+    let mut name = path.as_os_str().to_os_string();
+    name.push(suffix);
+    PathBuf::from(name)
+}
+
+/// The next backup name: `<record>.bak.<epoch secs>`, moved past any name
+/// already taken so two reloads inside one second keep two generations.
+fn next_backup_path(record: &Path) -> PathBuf {
+    let mut stamp = unix_now_secs();
+    loop {
+        let candidate = appended(record, &format!(".bak.{stamp}"));
+        if !candidate.exists() {
+            return candidate;
+        }
+        stamp += 1;
+    }
+}
+
+/// Get `raw` onto disk at `temp`, wearing whatever permissions the record had.
+fn write_pending(temp: &Path, raw: &str, record: &Path) -> std::io::Result<()> {
+    let mut file = std::fs::File::create(temp)?;
+    if let Ok(metadata) = std::fs::metadata(record) {
+        // A platform that refuses the copy is not worth losing the record over.
+        let _ = file.set_permissions(metadata.permissions());
+    }
+    file.write_all(raw.as_bytes())?;
+    file.flush()?;
+    file.sync_all()
+}
+
+/// Drop all but the newest [`ONLINE_BACKUPS_KEPT`] backups of `record`.
+fn prune_online_backups(record: &Path) {
+    let (Some(prefix), Some(dir)) = (
+        record
+            .file_name()
+            .map(|name| format!("{}.bak.", name.to_string_lossy())),
+        record.parent(),
+    ) else {
+        return;
+    };
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let mut backups: Vec<(i64, PathBuf)> = entries
+        .flatten()
+        .filter_map(|entry| {
+            let stamp: i64 = entry
+                .file_name()
+                .to_string_lossy()
+                .strip_prefix(&prefix)?
+                .parse()
+                .ok()?;
+            Some((stamp, entry.path()))
+        })
+        .collect();
+    if backups.len() <= ONLINE_BACKUPS_KEPT {
+        return;
+    }
+    backups.sort_unstable_by(|(_, a), (_, b)| b.cmp(a));
+    for (_, path) in backups.iter().skip(ONLINE_BACKUPS_KEPT) {
+        if let Err(error) = std::fs::remove_file(path) {
+            tracing::warn!(%error, path = %path.display(), "old config online backup could not be removed");
+        }
     }
 }
