@@ -118,7 +118,9 @@ python3 -m unittest scripts.test_image_smoke                          # the scri
 ### Running the Nacos end-to-end tests locally
 
 The cases in `tests/nacos_e2e_test.rs` drive a real `doggy-dns` process against
-a live Nacos server, so they are `#[ignore]`d and only run when asked for:
+a live Nacos server (all but one; `e2e_unreachable_nacos_still_boots_and_subscribes_once`
+deliberately dials a dead address), so they are `#[ignore]`d and only run when
+asked for:
 
 ```bash
 podman run -d --name doggy-nacos \
@@ -150,11 +152,25 @@ Points worth knowing before reading a failure:
   re-subscribed: re-subscribing on every reload would add a listener per service
   each time. There is no periodic rescan and no subscribe-on-miss, so a service
   created in Nacos after that moment is picked up when its plugin entry changes
-  enough to need a new connection, or on restart.
+  enough to need a new connection, or on restart. Each subscription also reads
+  its instance list back immediately, because nacos-sdk only notifies a listener
+  about a list that differs from the cache it holds — see the next bullet.
+- **The SDK keeps an instance snapshot in `$HOME/nacos/naming`, and the cases
+  inherit it between runs.** `load_cache_at_start` is on, so a process starts with
+  the previous run's lists in memory, and an emit equal to that snapshot is
+  deduplicated instead of delivered (`service_info_observable.rs`). Deleting the
+  directory does not make the suite more deterministic — it only hides the path
+  the read-back after `subscribe` exists to cover.
 - **Ephemeral instances live and die with the registering client's connection.**
   The test keeps its `NamingService` handle alive for exactly this reason.
 - **A batch registration replaces the service's instance list** rather than
   appending to it, so adding an instance means re-registering the whole list.
+- **The unreachable-server case needs port 18848 free.** It points both the
+  naming client and the `[remote_config]` trigger at `127.0.0.1:18848` (the SDK
+  dials gRPC at that port plus 1000), so a listener there would silently turn the
+  case into a normal boot. Against a refused address the resolver is ready ~11 s
+  after start — the SDK retries with backoff before it gives up and warns — and
+  the case itself finishes in about 25 s.
 - `namespaceId=public` and the empty namespace are the same namespace on the
   server, so the config's `namespace = "public"` needs no special handling.
 
@@ -183,8 +199,8 @@ Points worth knowing before reading a failure:
 | `crates/doggy-dns-xdp/tests/*` | 22 + 6 ignored | Userspace cache/interface/middleware/stats; XDP attach tests need root + Linux |
 | `crates/doggy-dns-control/tests/*` | 31 | Control plane: HTTP contract, endpoint selection, token scoping, live signals (including the per-reload zone handoff), state snapshots, redaction |
 | `tests/integration_test.rs` | 3 | End-to-end chain: Nacos hit, outside-zone fallthrough, in-zone miss stays authoritative |
-| `tests/reload_test.rs` | 34 | The reload pipeline itself: applied / rejected / skipped, restart-required differences kept out of the baseline (changed values and sections that exist on one side only), the reuse plan (carry by position, keep the connection by `server_addr`+`namespace`+`group`, consume-on-match, identity picks its own connection when entries reorder, disabled claims nothing), retire and default-chain paths, generation counting, burst coalescing, and the `*.online.toml` record (pushed text in place, the version it replaced in a timestamped backup, two pushes in one second keeping two, ten generations kept, nothing written for a rejected or skipped push, and a record that cannot be written leaving the reload in force) |
-| `tests/nacos_e2e_test.rs` | 9 ignored + 1 | Live Nacos: boot-time instances, push after start-up, in-zone NXDOMAIN, IPv4-only NODATA, and the reload trigger — a pushed TTL reusing the naming connection with no sample left unserved, a push that changes the server address retiring the old connection and reporting the restart-required field, a rejected push changing nothing, a push that touches no plugin reusing the warm cache, and the pushed configuration recorded beside the case config with the startup text kept as its backup while a stray `kill -HUP` changes nothing. The one case that runs without a server checks the log reads that trigger depends on |
+| `tests/reload_test.rs` | 35 | The reload pipeline itself: applied / rejected / skipped, restart-required differences kept out of the baseline (changed values and sections that exist on one side only), the reuse plan (carry by position, keep the connection by `server_addr`+`namespace`+`group`, consume-on-match, identity picks its own connection when entries reorder, disabled claims nothing), retire and default-chain paths, generation counting, burst coalescing, and the `*.online.toml` record (pushed text in place, the version it replaced in a timestamped backup, two pushes in one second keeping two, ten generations kept, nothing written for a rejected or skipped push, and a record that cannot be written leaving the reload in force). A nacos server that is not answering builds its slot in emergency mode, while an address the SDK cannot turn into a server list stays a build failure that leaves the caller's chain untouched |
+| `tests/nacos_e2e_test.rs` | 10 ignored + 1 | Live Nacos: boot-time instances, push after start-up, in-zone NXDOMAIN, IPv4-only NODATA, and the reload trigger — a pushed TTL reusing the naming connection with no sample left unserved, a push that changes the server address retiring the old connection and reporting the restart-required field, a rejected push changing nothing, a push that touches no plugin reusing the warm cache, the pushed configuration recorded beside the case config with the startup text kept as its backup while a stray `kill -HUP` changes nothing, and a boot against an address where nothing listens — the chain builds, the zone answers, and the trigger subscribes exactly once. Two cases run without a server: the one that checks the log reads that trigger depends on, and the unreachable-address one |
 
 Forward tests run against a local mock upstream, native tests make real
 network calls, and the Nacos unit tests use mock DashMap caches (no Nacos

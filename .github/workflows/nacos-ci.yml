@@ -8,6 +8,9 @@ name: Nacos CI
 # five also reads back the `*.online.toml` record the applied push leaves beside
 # the case config, and checks that a stray `kill -HUP` changes nothing. The
 # cases are #[ignore]d, so plain `cargo test --workspace` never needs a server.
+# One further case needs no server on purpose: it boots the resolver against an
+# address nothing answers on, which is what the SDK's emergency start is for —
+# the chain still builds, the zone still answers, and the trigger subscribes once.
 #
 # Image choice: Nacos 2.x, the protocol line nacos-sdk 0.8 speaks (v1/v2 HTTP
 # plus the 9848 gRPC channel). The `latest` tag now points at Nacos 3.x, which

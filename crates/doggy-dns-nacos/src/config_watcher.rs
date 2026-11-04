@@ -5,7 +5,6 @@ use nacos_sdk::api::config::{
 };
 use nacos_sdk::api::props::ClientProps;
 use std::sync::Arc;
-use std::time::Duration;
 use tokio::sync::mpsc;
 
 /// Watches Nacos config service for changes and triggers a callback.
@@ -37,10 +36,15 @@ impl NacosConfigWatcher {
         group: &str,
         data_id: &str,
     ) -> anyhow::Result<Self> {
+        // `build()` health-checks the connection and would fail a Nacos that is not
+        // reachable yet. Emergency start lets the client come up anyway; the SDK's
+        // reconnect plus its 60 s listen re-send deliver the first push once the
+        // server answers, so one watcher serves the life of the process.
         let props = ClientProps::new()
             .server_addr(server_addr)
             .namespace(namespace)
-            .app_name(doggy_dns_plugin::APP_NAME);
+            .app_name(doggy_dns_plugin::APP_NAME)
+            .config_load_cache_at_start(true);
 
         let config_service = ConfigServiceBuilder::new(props).build().await?;
 
@@ -72,6 +76,11 @@ impl NacosConfigWatcher {
     }
 
     /// Get current config content.
+    ///
+    /// With `config_load_cache_at_start` the SDK returns a populated cache entry
+    /// without validating it against the server, so this can read back the disk
+    /// snapshot rather than what Nacos holds now. The reload path never calls it:
+    /// a push is the only input.
     pub async fn get_current_config(&self) -> anyhow::Result<String> {
         let resp = self
             .config_service
@@ -87,24 +96,26 @@ impl NacosConfigWatcher {
 /// an unbounded channel send needs: the callback queues the text and returns, so
 /// a multi-line edit costs the reload loop one fold, not several.
 ///
-/// Connection failure is non-fatal and retried every 30 s: the resolver keeps
-/// serving DNS without its remote trigger.
+/// A Nacos that is not reachable yet does not cost the watcher: the client starts
+/// in emergency mode, so it is built once and the trigger arrives when the server
+/// answers.
 pub fn spawn_config_pushes(remote: RemoteConfig, pushes: mpsc::UnboundedSender<String>) {
     if !remote.enabled {
         return;
     }
     tokio::spawn(async move {
-        let _watcher = loop {
-            match connect(&remote, &pushes).await {
-                Ok(watcher) => break watcher,
-                Err(error) => {
-                    tracing::warn!(
-                        %error,
-                        data_id = %remote.data_id,
-                        "remote config watcher unavailable, retrying in 30s"
-                    );
-                    tokio::time::sleep(Duration::from_secs(30)).await;
-                }
+        let _watcher = match connect(&remote, &pushes).await {
+            Ok(watcher) => watcher,
+            Err(error) => {
+                // Not a retry: a failed build here is a broken configuration, and
+                // reconstructing the SDK client would leak its worker tasks, which
+                // have no shutdown. The resolver keeps serving DNS without a trigger.
+                tracing::warn!(
+                    %error,
+                    data_id = %remote.data_id,
+                    "remote config watcher unavailable; this process has no reload trigger"
+                );
+                return;
             }
         };
 

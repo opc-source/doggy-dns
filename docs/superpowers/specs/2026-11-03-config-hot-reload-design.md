@@ -831,3 +831,135 @@ The applied line still arrives 60.5 s after the trigger subscribed, and the reco
 still lands beside the case config (`nacos-e2e-15417.online.toml`, one backup
 `…bak.1793770503`): the pipeline and its record are untouched by where the
 subscription lives.
+
+## 16. Fifth round: an unreachable Nacos costs neither the resolver nor a client
+
+The objection was about ownership: `NacosConfigWatcher` holds a `ConfigService`,
+which *is* a long-lived gRPC client, so `spawn_config_pushes` constructing a new
+one on every failed attempt was wrong. Reading nacos-sdk 0.8.3 said the retry loop
+was worse than churn. `FailoverConnection::new` spawns its work task and its health
+check before the health check gets to fail (`nacos_grpc_connection.rs:701-720`,
+then `nacos_grpc_client.rs:353-375`), and `ConfigWorker::new` spawns
+`notify_change_to_cache_data` and `list_ensure_cache_data_newest`
+(`config/worker.rs:79-89`) with nothing to stop them. Dropping the client stops the
+health check (`FailoverConnection`'s `Drop`, `nacos_grpc_connection.rs:819-826`)
+and not those two loops: every failed 30 s attempt left SDK tasks behind.
+
+**The fix is the SDK's own switch, not a retry policy.**
+`config_load_cache_at_start` / `naming_load_cache_at_start`
+(`api/props.rs:23-25`, setters 260/266, each also overridable through
+`ENV_NACOS_CLIENT_{CONFIG,NAMING}_LOAD_CACHE_AT_START`, `props.rs:109-128`) feed
+`emergency_start` on the gRPC client (`config/worker.rs:73`, `naming/mod.rs:150`):
+when the health check inside `build()` fails, the client logs at `warn` and comes
+up anyway. An unreachable Nacos therefore stops being a construction failure —
+which was the loop's only reason to exist. Both clients here now set the flag for
+the service they build: `config_watcher.rs` for the trigger, `watcher.rs` for
+naming. `spawn_config_pushes` does one connect, one subscribe, then parks; a
+failure at that point is a broken configuration rather than a missing server, and
+the `warn` says `remote config watcher unavailable; this process has no reload
+trigger` instead of retrying.
+
+**What changes on the paths that bite.**
+
+- Boot with Nacos down: `build_chain`'s error no longer propagates out of
+  `async_main` (`src/main.rs:123` — this boot was fatal), `subscribe_all` keeps its
+  existing soft failure (`failed to list nacos services… will rely on dynamic
+  subscriptions`), and the zone is served from an empty cache. The wait moves to
+  the SDK's backoff, not the socket: refused address, `doggy-dns is ready` 11 s
+  after the first health check.
+- Recovery is the SDK's: naming re-sends every `SubscribeServiceRequest` through
+  its redo task, which is registered *before* the first request
+  (`naming/mod.rs:514-520`), runs on a 3 s scheduler (`redo/mod.rs:37-65`) and is
+  also fired by the connected listener (`mod.rs:133-138`); config recovers on the
+  60 s `list_ensure_cache_data_newest` round (`config/worker.rs:360-407`), whose
+  listen contexts come from the cache — and `add_listener` inserts the `CacheData`
+  whether or not the server answered (`worker.rs:291-333`), so a subscription that
+  started against a dead address is in the very next round.
+- Reload with a nacos server that is not answering: `build_chain` succeeds, so the
+  push is applied rather than rejected. `an_unreachable_nacos_still_builds_its_slot`
+  pins that; `a_plugin_that_cannot_be_built_leaves_the_previous_slots_untouched`
+  keeps the partial-consumption invariant on what is left of that door — an address
+  every field of which is non-blank, so the config validates, and which the SDK
+  still cannot turn into a server list (`server_addr = ","`, rejected by
+  `parse_server_list` before any connection is attempted).
+
+**What the cache half of the flag means here**, because the switch is
+`load_cache_at_start` and not merely "tolerate a failed health check": the same
+flag loads a disk snapshot from `{cache_dir | $HOME/nacos}/…`
+(`config/worker.rs:35-39`, `common/cache/mod.rs:26-35`).
+
+- A disk-loaded `CacheData` carries its persisted fields only — `initializing`,
+  `listeners` and `config_filters` are not among them (`config/cache.rs:23-30`), so
+  an encrypted data id would be delivered undecrypted after a reload-from-disk. We
+  register no filter and set no `cache_dir`; noted as a premise, not a bug.
+- `get_config` prefers a non-empty cache entry and does not validate it against the
+  server (`config/worker.rs:111-121`), so with the flag on a disk snapshot can be
+  read back as current. Nothing on the reload path calls it — the push is the only
+  input — but `NacosConfigWatcher::get_current_config` stays as the API's reader,
+  with this as what a caller has to know about it.
+- Naming's snapshot is the one that bites, and it bit during this round's own live
+  run: eight of the ten cases timed out with *no answers at all*. The reason is that
+  the flag is not only a boot switch — `disk_store` is always on
+  (`common/cache/mod.rs:221-233`, defaulting to `$HOME/nacos/<module>/<namespace>`) and
+  `load_cache_at_start` fills the in-memory cache from it
+  (`naming/mod.rs:95-98`, `cache/mod.rs:26-40`). Every emit then compares against
+  that snapshot: `ServiceInfoEmitter::process_service_info` notifies a listener only
+  when `is_changed_service_info` says the hosts differ
+  (`service_info_observable.rs:169-194`). A resolver that restarts against instances
+  nobody touched gets a subscription, a push, and no event — the DNS-facing `DashMap`
+  (written only by `InstanceChangeListener::event`) stays empty and the zone answers
+  nothing until an instance actually changes. The observable does not replay a cache
+  entry to a listener at subscribe time either
+  (`service_info_observable.rs:97-112`).
+
+**The subscription therefore reads what it subscribed to.** `NacosServiceWatcher::subscribe`
+calls `get_all_instances(service, group, [], subscribe = true)` right after registering
+the listener (`watcher.rs`) and writes the result through the same function a push uses,
+so one code path owns the healthy/enabled filter, the address parse and the whole-value
+replacement. The read is local whenever the SDK holds the service — cache hit, no round
+trip — and otherwise sends a `SubscribeServiceRequest` itself
+(`naming/mod.rs:346-373`), so the first answers arrive at subscribe time rather than on
+the first change. Calling `subscribe_async` a second time is bounded: the redo executor
+is a map keyed by `task_key` and `add_task` inserts
+(`naming/redo/mod.rs:68-72`), so the task is replaced, not accumulated. `last_push` stays
+push-only — a read-back is not contact with the server — so `/readyz` still reports
+`lastPushSecondsAgo: null` for a resolver answering purely from a disk snapshot.
+
+Two consequences are worth keeping in the open: a restart with Nacos unreachable now
+answers from the snapshot on disk instead of serving an empty zone, and what it answers
+is as old as that file. The live suite is the proof of both directions — the same
+`$HOME/nacos/naming/public` entries that produced eight `timed out waiting for N
+answers` failures on the pre-fix tree pass with the read-back, against those very stale
+files, without clearing the directory first.
+
+**Two §6 rows are retired by this round**: `chain rebuild fails (e.g. Nacos
+unreachable) → reject whole reload` (unreachable is no longer a rebuild failure; the
+remaining rebuild failures are malformed addresses, as above) and `watcher connect
+fails at startup → non-fatal; retry every 30 s` (the client starts in emergency
+mode and the watcher is built once, so there is nothing to retry). The two `SIGHUP`
+rows are §14's.
+
+**Test.** `e2e_unreachable_nacos_still_boots_and_subscribes_once` (port 15420,
+`#[ignore]`d, the only case in the suite that needs no server): every
+`server_addr` line points at `127.0.0.1:18848`, and the case waits for the SDK's
+emergency `warn`, for the naming soft failure, for
+`config reload listening on nacos push` exactly once, asserts no
+`remote config watcher unavailable`, and asserts the process is alive and its zone
+answers. Red checks, both against the live Podman `nacos-server:v2.5.4`: with both
+flags off the resolver dies before the naming line can appear (the wait fails at
+120 s with `Connection initialization failed after 1 attempts` as the last line);
+with only the config flag off the boot survives, the config client's own health
+check fails, and `remote config watcher unavailable; this process has no reload
+trigger` is logged 11 s after that emergency `warn` while the push line never
+appears. Green: the same run reaches `doggy-dns is ready` 11 s in, subscribes once
+at +22 s, and answers NXDOMAIN inside the zone.
+
+**Full suite, both directions.** The pre-fix tree (the flags on, no read-back) ran
+`test result: FAILED. 2 passed; 8 failed` in 121.35 s, every failure a
+`timed out after 60s/120s waiting for N answers` on a service whose stale entry was
+sitting in `$HOME/nacos/naming/public` — `e2e-basic`, `e2e-v4only`, `e2e-known`,
+`e2e-record`, `e2e-bad-push`, `e2e-reconnect`, `e2e-warm`, `e2e-reload`, the two
+passers being the ones that need no live instances. With the read-back, that
+directory untouched and the same snapshots in it: `test result: ok. 10 passed;
+0 failed` in 65.18 s — the suite also got shorter, because answers now arrive at
+subscribe time rather than on the first change.

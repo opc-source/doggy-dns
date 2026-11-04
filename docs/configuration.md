@@ -200,7 +200,7 @@ they entered with.
 What a reload guarantees, and what it costs:
 
 - **An unusable push changes nothing.** Unparsable TOML, a config that fails
-  validation, or a plugin that cannot connect is rejected at `error`; the running
+  validation, or a plugin that cannot be built is rejected at `error`; the running
   chain, the process and the trigger all stay as they were.
 - **Unchanged entries keep their connections.** A `[[plugins]]` entry equal to the
   one in force *at the same position* is reused with its handler, its
@@ -240,6 +240,21 @@ What a reload guarantees, and what it costs:
 - **Retired naming clients are unsubscribed, not closed.** nacos-sdk 0.8.3 has no
   client shutdown, so a reload stops instance pushes for the old watcher but its
   gRPC connection lives until the process exits.
+- **A Nacos that is not up yet costs neither the resolver nor a client.** The
+  naming client behind a `nacos` plugin and the `[remote_config]` trigger both
+  start in emergency mode (`load_cache_at_start`), so an unanswered health check
+  is a `warn` from the SDK instead of a startup failure: the process builds its
+  chain, binds, and the trigger subscribes once. When the server answers the SDK
+  re-sends what was subscribed — naming on the reconnect, config on the 60 s
+  round above — so the first push and the first instances arrive without a
+  restart. The wait is at boot, not at the socket: an unreachable address costs
+  ~11 s of SDK retries before `doggy-dns is ready`.
+- **The same flag warm-starts instances from `$HOME/nacos/naming`.** Each
+  subscription reads its instance list back after registering the listener, so a
+  restart answers from that snapshot — which is as old as the file. That read is
+  also what keeps the snapshot honest: nacos-sdk only notifies a listener about a
+  list that *differs* from its cache, so without it a service whose instances did
+  not change would be pushed, deduplicated and never served.
 
 ## Endpoint formats
 

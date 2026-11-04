@@ -9,8 +9,11 @@
 //! recorded on disk beside the startup file. They all wait on
 //! [`PUSH_DEADLINE`], because nacos-sdk notices config changes on a poll.
 //!
-//! Every case needs a running Nacos server, so they are `#[ignore]`d and never
-//! join `cargo test --workspace`. CI runs them in `.github/workflows/nacos-ci.yml`.
+//! Every case but one needs a running Nacos server, so they are `#[ignore]`d and
+//! never join `cargo test --workspace`. CI runs them in
+//! `.github/workflows/nacos-ci.yml`.
+//! `e2e_unreachable_nacos_still_boots_and_subscribes_once` is the exception: it
+//! dials a port on which nothing listens, which is the point.
 //!
 //! Locally (Podman; the image comes from a mirror because Docker Hub is not
 //! reachable from this network):
@@ -1049,4 +1052,62 @@ async fn e2e_push_a_different_server_addr_retires_the_old_connection() {
         HashSet::from(["10.0.0.91".to_string(), "10.0.0.92".to_string()]),
         "the rebuilt authority must serve the instances from its own connection"
     );
+}
+
+/// A Nacos that is not up yet costs the resolver nothing.
+///
+/// Both clients — the naming one behind the zone and the `[remote_config]`
+/// trigger — start in emergency mode, so the process boots, binds and serves its
+/// zone (empty, so authoritatively nothing) instead of exiting on a connection
+/// error. And the trigger's watcher is built once, not per attempt: a container
+/// whose Nacos answers a minute later gets one subscription that fires when the
+/// server appears, rather than a client rebuilt every 30 s with its SDK worker
+/// tasks left behind each time.
+///
+/// This case needs no Nacos server; it is `#[ignore]`d because it belongs to the
+/// suite the Nacos CI job runs, and because the port it dials must stay free.
+#[tokio::test]
+#[ignore]
+async fn e2e_unreachable_nacos_still_boots_and_subscribes_once() {
+    let port = 15420;
+
+    let startup = DoggyDns::patched_config(port) + &DoggyDns::remote_config(port);
+    // Every `server_addr` line, so the zone's naming client and the config
+    // trigger are both pointed at an address nothing answers on. The SDK dials
+    // gRPC at this port plus 1000, so neither has a listener.
+    let startup = DoggyDns::patch_line(&startup, "server_addr", "\"127.0.0.1:18848\"");
+    let mut server = DoggyDns::start_logged(port, &startup).await;
+
+    // The naming side reached its soft failure: the client exists, the service
+    // list could not be read, and startup carried on regardless.
+    server.await_log_line("failed to list nacos services").await;
+    // The trigger subscribed even though the server never answered its health
+    // check — and exactly once, which is what the old 30 s rebuild loop did not
+    // give.
+    server
+        .await_log_line("config reload listening on nacos push")
+        .await;
+    assert_eq!(
+        server
+            .log_text()
+            .matches("config reload listening on nacos push")
+            .count(),
+        1,
+        "one watcher for the life of the process, not one per retry"
+    );
+    assert!(
+        !server.log_contains("remote config watcher unavailable"),
+        "an unreachable server is not a lost trigger"
+    );
+
+    server.assert_alive();
+    // Serving the zone from an empty cache is the proof the chain was built: the
+    // alternative was a process that exited before it bound.
+    server
+        .await_code(
+            &service_qname("e2e-not-yet"),
+            RecordType::A,
+            ResponseCode::NXDomain,
+        )
+        .await;
 }

@@ -538,10 +538,54 @@ async fn a_chain_of_native_and_forward_has_no_nacos_zone_signal() {
 async fn a_plugin_that_cannot_be_built_leaves_the_previous_slots_untouched() {
     // `build_chain` consumes `previous` only once every fallible step
     // succeeded, so a failed build cannot empty the caller's chain.
-    let unreachable = r#"
+    //
+    // A comma-only address is what is left of that door: every field is
+    // non-blank, so the config validates, and the SDK still cannot make a server
+    // list out of it. A *refused* address is no longer a build failure — see
+    // `an_unreachable_nacos_still_builds_its_slot`.
+    let unbuilt = r#"
 [server]
 listen_addr = "127.0.0.1"
 port = 15353
+worker_threads = 1
+
+[[plugins]]
+kind = "nacos"
+enabled = true
+server_addr = ","
+namespace = "public"
+group = "DEFAULT_GROUP"
+dns_zone = "nacos.local"
+ttl = 6
+"#;
+    let mut previous: Vec<PluginSlot> = Vec::new();
+    let first = slots_for(TWO_PLUGINS, &mut previous).await;
+    let native = Arc::clone(first[0].handler().unwrap());
+
+    let mut previous = first;
+    let error = match build_chain(&config_of(unbuilt), &mut previous).await {
+        Ok(slots) => panic!(
+            "a comma is not a server address, yet {} slots were built",
+            slots.len()
+        ),
+        Err(error) => error,
+    };
+    assert!(
+        Arc::ptr_eq(&native, previous[0].handler().unwrap()),
+        "the caller still owns the running chain after a build failure: {error}"
+    );
+    assert_eq!(previous.len(), 2);
+}
+
+/// What emergency start bought: a nacos server that is not answering is a
+/// degraded zone, not a rejected configuration. The slot builds, owns its zone,
+/// and the reload that carried it is not reported as a failure.
+#[tokio::test]
+async fn an_unreachable_nacos_still_builds_its_slot() {
+    let unreachable = r#"
+[server]
+listen_addr = "127.0.0.1"
+port = 15354
 worker_threads = 1
 
 [[plugins]]
@@ -554,22 +598,22 @@ dns_zone = "nacos.local"
 ttl = 6
 "#;
     let mut previous: Vec<PluginSlot> = Vec::new();
-    let first = slots_for(TWO_PLUGINS, &mut previous).await;
-    let native = Arc::clone(first[0].handler().unwrap());
+    // The health check the SDK retries before it gives up and warns, so this
+    // case costs a few seconds; the same wait is what an operator sees at boot.
+    let slots = build_chain(&config_of(unreachable), &mut previous)
+        .await
+        .expect("an unreachable nacos builds its client in emergency mode");
 
-    let mut previous = first;
-    let error = match build_chain(&config_of(unreachable), &mut previous).await {
-        Ok(slots) => panic!(
-            "nothing listens on 127.0.0.1:1, yet {} slots were built",
-            slots.len()
-        ),
-        Err(error) => error,
-    };
+    assert_eq!(slots.len(), 1);
     assert!(
-        Arc::ptr_eq(&native, previous[0].handler().unwrap()),
-        "the caller still owns the running chain after a build failure: {error}"
+        slots[0].handler().is_some(),
+        "the zone is owned by the authority, which answers from an empty cache"
     );
-    assert_eq!(previous.len(), 2);
+    assert_eq!(
+        nacos_zone_signals(&slots).len(),
+        1,
+        "and the slot is a live nacos zone the control plane can report"
+    );
 }
 
 // --- reuse planning ---
