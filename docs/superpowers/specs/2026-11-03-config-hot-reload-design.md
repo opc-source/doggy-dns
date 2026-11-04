@@ -574,6 +574,9 @@ and one validation rule.
   log file or shipper should inherit escape codes. `strip_ansi` stays in the test
   as a guard, with `strip_ansi_leaves_field_pairs_searchable` (not `#[ignore]`d)
   checking the collapse against a captured colourised line.
+  **Superseded in §18:** that `install_subscriber` change is not hot-reload work,
+  and the branch rolled it back on request — `strip_ansi` is what the reload cases
+  actually depend on, and it is load-bearing on its own.
 - **Case helpers collapse onto two functions.** Every configuration variant a
   reload case needs is one line of the committed file rewritten
   (`patch_line`), and every push is a publish on the case's own data id
@@ -1023,3 +1026,29 @@ failed on the fabricated `127.0.0.1:8848`. One case was deleted:
 hazard above, and the new no-identity case is its replacement.
 `tests/reload_test.rs` goes 35 → 37 (three added, one deleted); the control crate stays
 at 31.
+
+## 18. Rollback: log colour was never reload work
+
+The first round added `with_ansi(stdout().is_terminal())` to
+`observability::install_subscriber`, on the reasoning that a production log should
+not carry escape codes into a file. The user judged the change unclean and
+unrelated to this branch — and the case for keeping it here is weaker than it
+looked, because the reload cases were already saved by their own reader.
+`strip_ansi` sits on the single function in `tests/nacos_e2e_test.rs` that reads a
+process log (the file's other four `read_to_string` calls read TOML), and
+`strip_ansi_leaves_field_pairs_searchable` checks the collapse without a server.
+
+So `crates/doggy-dns-observability/src/lib.rs` and `docs/observability.md` are back
+to `main` byte for byte — `git diff main` on those two paths is empty — and the
+test's own comment now says what the function is: the mechanism, not a guard. What
+an operator gets is `main`'s behaviour restored: a redirected log keeps its colours,
+and anything parsing it strips them.
+
+**Proof the stripping is load-bearing, from the run right after the rollback.**
+`target/tmp/nacos-e2e-15415.log` holds 212 colourised lines, `grep -c 'ttl=3'` on
+that raw file is **0**, and the case waiting for `ttl=3` passed — the needle only
+matches after the collapse. Gates at the same tree: `cargo fmt --all -- --check` 0,
+`cargo clippy --all-features --all-targets -- -D warnings` 0,
+`cargo test --workspace` 353 passed / 0 failed, and
+`DOGGY_NACOS_ADDR=127.0.0.1:8848 cargo test --test nacos_e2e_test -- --ignored`
+`test result: ok. 10 passed; 0 failed` in 63.78 s.

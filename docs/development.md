@@ -141,10 +141,10 @@ Points worth knowing before reading a failure:
   did change), the generation a reload reports — is only visible there.
   `--nocapture` therefore shows the other
   cases' process output only, and a failed wait on a log line panics with the tail
-  of that file. The reads strip ANSI escapes before matching: the resolver only
-  colourises a real terminal, so a redirected log is plain text, and the stripping
-  is a guard against a regression silently un-covering the reload cases
-  (`strip_ansi_leaves_field_pairs_searchable` checks it without a server).
+  of that file. The reads strip ANSI escapes before matching, because the resolver
+  colourises its stdout even into a redirected file: without the stripping a field
+  pair lands as `\x1b[3mttl\x1b[0m\x1b[2m=\x1b[0m3` and no needle matches
+  (`strip_ansi_leaves_field_pairs_searchable` checks the collapse without a server).
 - **Subscriptions are established when a plugin is built** — `subscribe_all()`
   runs in `reload::build_chain`, at startup and again for every `[[plugins]]`
   entry whose naming connection a reload has to open. An entry that keeps its

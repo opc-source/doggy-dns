@@ -91,11 +91,12 @@ fn nacos_addr() -> String {
 
 /// Remove ANSI colour escapes so a log line can be searched as it reads.
 ///
-/// The resolver colourises only when its stdout is a terminal, which a case's
-/// redirected log never is — so this is a guard, not the mechanism: a field pair
-/// would otherwise reach the file as `\x1b[3mttl\x1b[0m\x1b[2m=\x1b[0m3` and a
-/// substring search for `ttl=3` could never match. Keeping the read robust costs
-/// one function; a colour regression silently un-covering four cases does not.
+/// This is the mechanism, not a guard: the fmt layer colourises whatever its
+/// stdout is, a redirected file included, so a field pair reaches the file as
+/// `\x1b[3mttl\x1b[0m\x1b[2m=\x1b[0m3` and a substring search for `ttl=3` could
+/// never match. Every log read goes through here, and
+/// `strip_ansi_leaves_field_pairs_searchable` checks the collapse against a
+/// captured colourised line.
 fn strip_ansi(raw: &str) -> String {
     let mut clean = String::with_capacity(raw.len());
     let mut rest = raw;

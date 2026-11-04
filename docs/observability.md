@@ -304,9 +304,6 @@ Requirements and caveats:
 - OTLP logs default to `warn` because the existing per-query `info` logs are
   very chatty at DNS QPS. Set `level = "info"` if you need them, and consider
   `middleware.logging = false`.
-- Stdout logs carry ANSI colours only when stdout really is a terminal. Redirected
-  to a file or a pipe they are plain text, so `grep`, a log shipper, and the
-  reload cases in `tests/nacos_e2e_test.rs` read the record as written.
 - On shutdown, providers are flushed with `timeout_secs`; the profile task is
   aborted.
 - Secrets in `basic_auth` are redacted from `Debug`; headers are never logged.
