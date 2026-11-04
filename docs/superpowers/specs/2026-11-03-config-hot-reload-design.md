@@ -1049,6 +1049,9 @@ and anything parsing it strips them.
 that raw file is **0**, and the case waiting for `ttl=3` passed — the needle only
 matches after the collapse. Gates at the same tree: `cargo fmt --all -- --check` 0,
 `cargo clippy --all-features --all-targets -- -D warnings` 0,
-`cargo test --workspace` 353 passed / 0 failed, and
+`cargo test --workspace` 353 passed / 0 failed, `cargo bench --no-run --workspace`
+0, and
 `DOGGY_NACOS_ADDR=127.0.0.1:8848 cargo test --test nacos_e2e_test -- --ignored`
-`test result: ok. 10 passed; 0 failed` in 63.78 s.
+`test result: ok. 10 passed; 0 failed` in 164.97 s. The runner covers the same
+ground — its `Nacos End-to-End Tests` job logs `running 10 tests` with every
+`e2e_push_*` case ok — so the push path is tested on CI, not only on this host.
