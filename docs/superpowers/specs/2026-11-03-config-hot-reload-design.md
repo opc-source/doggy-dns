@@ -785,3 +785,49 @@ config: `nacos-e2e-15417.online.toml` holding the pushed text and
 `nacos-e2e-15417.online.toml.bak.1793761002` holding the startup text. The same run
 left a record for every other case's process too (15411–15419), which is the
 startup write happening in the real binary rather than in a test.
+
+## 15. Fourth round: the trigger moves to the crate that speaks the protocol
+
+`spawn_remote_config_trigger` and `connect_remote_config` left `src/main.rs` for
+`spawn_config_pushes` and `connect` in `crates/doggy-dns-nacos/src/config_watcher.rs`.
+The binary now holds one line of wiring — build the reload channel, hand it and
+`[remote_config]` to the backend, `spawn_config_pushes(config.remote_config.clone(),
+reload_tx)` — and the connect/retry/park sequence lives beside the SDK types it
+calls. Behaviour is unchanged: same 30 s retry, same watcher parked for the life of
+the process, same two log lines.
+
+The move costs no dependency: `doggy-dns-nacos` already declares basic, tokio,
+anyhow and tracing. It does cost a `RemoteConfig` clone, because `tokio::spawn`
+needs `'static` — the borrowed form fails E0521, and the binary was cloning the
+same value before the move.
+
+**Not a trait.** The question was whether the remote-config *abstraction* belongs
+in `doggy-dns-plugin`; the answer for now is the code move only. The contract is
+already as small as it can be (`NacosConfigWatcher`'s listener takes
+`Fn(String) + Send + Sync`), there is one backend, and the plugin crate's own
+`AuthorityPlugin`/`registry` still has no implementation — a second axis of
+unimplemented abstraction would be debt, not reach. A `ConfigSource` trait earns
+its keep when a second backend exists, and `doggy-dns-plugin` is the right host
+for it then (`Middleware` already shows the crate holds non-DNS contracts).
+
+One visible consequence: the two nacos-side lines — `config reload listening on
+nacos push`, `received config update from nacos` — now carry the
+`doggy_dns_nacos::config_watcher` target. §14's transcript is the run before the
+move. The e2e cases match on message text, so they never noticed.
+
+Verification after the move: `cargo fmt --all -- --check`, `cargo clippy
+--all-features --all-targets -- -D warnings` (no warning lines), `cargo test
+--workspace` (350 passed, 0 failed over 54 result lines) and `cargo bench --no-run
+--workspace` exit 0; live against the same Podman `nacos-server:v2.5.4`, 9 of 9
+ignored cases pass in 123.03 s, with the listening line read back from a case log:
+
+```text
+05:34:02.724  INFO doggy_dns_nacos::config_watcher: config reload listening on nacos push data_id=doggy-dns-e2e-15417.toml group=DEFAULT_GROUP
+05:35:02.724  INFO doggy_dns_nacos::config_watcher: received config update from nacos data_id=doggy-dns-e2e-15417.toml
+05:35:03.226  INFO doggy_dns::reload: config reload applied generation=1 plugins=1 logging=false rotate_answers=true
+```
+
+The applied line still arrives 60.5 s after the trigger subscribed, and the record
+still lands beside the case config (`nacos-e2e-15417.online.toml`, one backup
+`…bak.1793770503`): the pipeline and its record are untouched by where the
+subscription lives.

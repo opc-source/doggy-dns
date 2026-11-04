@@ -1,10 +1,10 @@
 use anyhow::{Context, Result};
 use doggy_dns::reload::{self, Applied, ReloadCoordinator};
 use doggy_dns_control::live::LiveState;
-use doggy_dns_core::config::{DoggyDnsConfig, RemoteConfig, load_config};
+use doggy_dns_core::config::{DoggyDnsConfig, load_config};
 use doggy_dns_core::handler::{AnswerRotation, DoggyDnsHandler, SharedHandler};
 use doggy_dns_core::server::build_server;
-use doggy_dns_nacos::config_watcher::NacosConfigWatcher;
+use doggy_dns_nacos::config_watcher::spawn_config_pushes;
 use doggy_dns_observability::Observability;
 use doggy_dns_plugin::Middleware;
 use std::path::Path;
@@ -178,7 +178,7 @@ async fn async_main(
     let (reload_tx, reload_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
     tokio::spawn(reload::run_reload_loop(Arc::clone(&coordinator), reload_rx));
 
-    spawn_remote_config_trigger(reload_tx, config.remote_config.clone());
+    spawn_config_pushes(config.remote_config.clone(), reload_tx);
     ignore_sighup();
 
     // Run server until shutdown signal
@@ -307,73 +307,6 @@ fn ignore_sighup() {
             tracing::info!("SIGHUP ignored: configuration changes are pushed by the remote config");
         }
     });
-}
-
-/// `[remote_config]`: one Nacos config watcher for the life of the process.
-///
-/// The SDK hands pushed content to a synchronous callback, which is exactly what
-/// an unbounded channel send needs: the callback queues the text and returns,
-/// and [`reload::RELOAD_DEBOUNCE`] folds a multi-line edit into one reload.
-///
-/// Connection failure is non-fatal and retried every 30 s, following the
-/// control-plane precedent: the resolver keeps serving DNS without its remote
-/// trigger.
-fn spawn_remote_config_trigger(
-    requests: tokio::sync::mpsc::UnboundedSender<String>,
-    remote: RemoteConfig,
-) {
-    if !remote.enabled {
-        return;
-    }
-    tokio::spawn(async move {
-        let _watcher = loop {
-            match connect_remote_config(&remote, &requests).await {
-                Ok(watcher) => break watcher,
-                Err(error) => {
-                    tracing::warn!(
-                        %error,
-                        data_id = %remote.data_id,
-                        "remote config watcher unavailable, retrying in 30s"
-                    );
-                    tokio::time::sleep(Duration::from_secs(30)).await;
-                }
-            }
-        };
-
-        tracing::info!(
-            data_id = %remote.data_id,
-            group = %remote.group,
-            "config reload listening on nacos push"
-        );
-        // Park holding the watcher: the SDK pushes to the listener registered on
-        // this watcher's config service, so dropping it would end the trigger.
-        // Shutdown cancels this task, and that is when it goes.
-        std::future::pending::<()>().await;
-    });
-}
-
-async fn connect_remote_config(
-    remote: &RemoteConfig,
-    requests: &tokio::sync::mpsc::UnboundedSender<String>,
-) -> Result<NacosConfigWatcher> {
-    let watcher = NacosConfigWatcher::new(
-        &remote.server_addr,
-        &remote.namespace,
-        &remote.group,
-        &remote.data_id,
-    )
-    .await
-    .context("failed to connect the remote config watcher")?;
-
-    let requests = requests.clone();
-    watcher
-        .start_watching(move |content| {
-            let _ = requests.send(content);
-        })
-        .await
-        .context("failed to subscribe to the remote config data id")?;
-
-    Ok(watcher)
 }
 
 async fn start_control_plane(

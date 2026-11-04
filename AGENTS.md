@@ -41,7 +41,7 @@ doggy-dns (binary)
   ├── doggy-dns-core            (server, handler, middleware; config re-exported from basic)
   │     ├── doggy-dns-basic
   │     └── doggy-dns-plugin
-  ├── doggy-dns-nacos           (Nacos service discovery backend)
+  ├── doggy-dns-nacos           (Nacos service discovery and remote-config push backend)
   │     ├── doggy-dns-basic
   │     └── doggy-dns-plugin
   ├── doggy-dns-observability   (OTLP logs/metrics/traces/profiles)

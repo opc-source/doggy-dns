@@ -1,8 +1,12 @@
+use anyhow::Context;
+use doggy_dns_basic::RemoteConfig;
 use nacos_sdk::api::config::{
     ConfigChangeListener, ConfigResponse, ConfigService, ConfigServiceBuilder,
 };
 use nacos_sdk::api::props::ClientProps;
 use std::sync::Arc;
+use std::time::Duration;
+use tokio::sync::mpsc;
 
 /// Watches Nacos config service for changes and triggers a callback.
 pub struct NacosConfigWatcher {
@@ -75,4 +79,68 @@ impl NacosConfigWatcher {
             .await?;
         Ok(resp.content().to_string())
     }
+}
+
+/// `[remote_config]`: one Nacos config watcher for the life of the process.
+///
+/// The SDK hands pushed content to a synchronous callback, which is exactly what
+/// an unbounded channel send needs: the callback queues the text and returns, so
+/// a multi-line edit costs the reload loop one fold, not several.
+///
+/// Connection failure is non-fatal and retried every 30 s: the resolver keeps
+/// serving DNS without its remote trigger.
+pub fn spawn_config_pushes(remote: RemoteConfig, pushes: mpsc::UnboundedSender<String>) {
+    if !remote.enabled {
+        return;
+    }
+    tokio::spawn(async move {
+        let _watcher = loop {
+            match connect(&remote, &pushes).await {
+                Ok(watcher) => break watcher,
+                Err(error) => {
+                    tracing::warn!(
+                        %error,
+                        data_id = %remote.data_id,
+                        "remote config watcher unavailable, retrying in 30s"
+                    );
+                    tokio::time::sleep(Duration::from_secs(30)).await;
+                }
+            }
+        };
+
+        tracing::info!(
+            data_id = %remote.data_id,
+            group = %remote.group,
+            "config reload listening on nacos push"
+        );
+        // Park holding the watcher: the SDK pushes to the listener registered on
+        // this watcher's config service, so dropping it would end the trigger.
+        // Shutdown cancels this task, and that is when it goes.
+        std::future::pending::<()>().await;
+    });
+}
+
+/// Connect, then subscribe so every pushed content lands on `pushes`.
+async fn connect(
+    remote: &RemoteConfig,
+    pushes: &mpsc::UnboundedSender<String>,
+) -> anyhow::Result<NacosConfigWatcher> {
+    let watcher = NacosConfigWatcher::new(
+        &remote.server_addr,
+        &remote.namespace,
+        &remote.group,
+        &remote.data_id,
+    )
+    .await
+    .context("failed to connect the remote config watcher")?;
+
+    let pushes = pushes.clone();
+    watcher
+        .start_watching(move |content| {
+            let _ = pushes.send(content);
+        })
+        .await
+        .context("failed to subscribe to the remote config data id")?;
+
+    Ok(watcher)
 }
