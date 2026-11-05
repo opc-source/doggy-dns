@@ -98,25 +98,19 @@ pub fn start_retrying(
 
     let wait_cancel = cancel.clone();
     let join = tokio::spawn(async move {
-        // The first failure is the interesting one — it says the restart
-        // overlapped its predecessor. After that the same message every
-        // interval is noise, so it drops to debug until something changes.
-        let mut warned = false;
+        // Warned on every attempt, not just the first: the line is the record
+        // that the control plane is still dark, and it stops appearing the
+        // moment the bind lands — so its absence says more than one line would.
         let listener = loop {
             match TcpListener::bind(addr).await {
                 Ok(listener) => break listener,
                 Err(error) => {
-                    if warned {
-                        tracing::debug!(%error, addr = %addr, dns_overlap, "control port still held");
-                    } else {
-                        tracing::warn!(
-                            %error,
-                            addr = %addr,
-                            dns_overlap,
-                            "control port still held; retrying the bind"
-                        );
-                        warned = true;
-                    }
+                    tracing::warn!(
+                        %error,
+                        addr = %addr,
+                        dns_overlap,
+                        "control port still held; retrying the bind"
+                    );
                     tokio::select! {
                         _ = wait_cancel.cancelled() => return,
                         _ = tokio::time::sleep(retry_in) => {}
