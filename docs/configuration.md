@@ -184,14 +184,15 @@ both settings are on. See [xdp.md](xdp.md#limitations--notes).
 
 ## Nacos subscription
 
-The authority keeps no instance cache of its own. Every in-zone query reads the
-Nacos client's naming cache (`get_all_instances`, `subscribe = true`): the SDK
-answers from that cache when it has an entry and asks the server otherwise, so
-DNS always serves the client's current view. A push that removes the last
-instance reaches the answer on the next query, with no second copy to go stale.
-The cost is one clone of the instance list plus address parsing per query; a
-name the client has no cache entry for costs one client round trip, because that
-is how the SDK answers a cache miss.
+The authority keeps no instance cache of its own. A name this process has already
+subscribed is read from the Nacos client's naming cache (`get_all_instances`,
+`subscribe = true`), which each push keeps current, so DNS serves the client's
+current view. A name it has *not* subscribed is first confirmed by the server
+(`subscribe = false`): a cache entry loaded from a previous run — or the absence
+of one — says nothing about a name this process never asked the server about, and
+nacos-sdk 0.8.3 reports a failed fetch on the `subscribe = true` path as an empty
+list rather than an error. The cost of the confirmed path is one list clone plus
+address parsing per query and one round trip per new name.
 
 `service_pattern` selects which names may reach Nacos at all. The pattern is a
 regex wrapped in whole-name anchors (`order-service` therefore cannot match
@@ -204,20 +205,30 @@ return that prefixed form the pattern has to be widened. A name the pattern
 rejects is never subscribed or fetched, and since the authority owns its zone,
 querying it answers `NXDOMAIN` rather than falling through to `native`/`forward`.
 
-The first query for each name subscribes it — once per name, because the SDK
+The first query for each name also subscribes it — once per name, because the SDK
 keeps every listener it is handed. A service registered after doggy-dns started
-needs no scan: its first query subscribes it, and thereafter the client's own
-push/refresh keeps the cache current. `subscribe` reports no failure to us in
-nacos-sdk 0.8.3: it registers the listener and its own retry task, swallows the
-request error and returns `Ok`.
+needs no scan: its first query confirms it and subscribes it, and thereafter the
+client's own push/refresh keeps the cache current. `subscribe` reports no failure
+to us in nacos-sdk 0.8.3: it registers the listener and its own retry task,
+swallows the request error and returns `Ok`.
 
 `naming_load_cache_at_start` makes the client load its naming cache from disk, so
-a restart answers from the previous run's data and the process starts while Nacos
-is unreachable; a first-ever start with Nacos down answers `SERVFAIL`. The wait
-on Nacos is bounded to three seconds; a read that fails or exceeds that bound
-answers `SERVFAIL` rather than `NXDOMAIN`, so the client retries instead of
-caching "this name does not exist" past the end of the outage. Empty-push
-protection is disabled, so a service losing its last instance empties the
+subscribed names keep answering while Nacos is unreachable and the process starts
+even when the server is down. It is not a way to answer a name's first query: that
+still goes to the server.
+
+The wait on Nacos is bounded to three seconds; a call that fails or exceeds that
+bound answers `SERVFAIL` rather than `NXDOMAIN`, so the client retries instead of
+caching "this name does not exist" past the end of the outage. The bound is a
+constant in `crates/doggy-dns-nacos/src/watcher.rs` (`NACOS_LOOKUP_TIMEOUT`), not a
+config knob.
+
+One limit follows from the SDK rather than this design: a confirmed name whose cache
+entry the client has since dropped is re-fetched on the `subscribe = true` path,
+which reports no failure, so during an outage that name answers `NXDOMAIN` rather
+than `SERVFAIL`.
+
+Empty-push protection is disabled, so a service losing its last instance empties the
 client's cache instead of continuing to answer the old address.
 
 A service Nacos knows but with no healthy/enabled instance also answers

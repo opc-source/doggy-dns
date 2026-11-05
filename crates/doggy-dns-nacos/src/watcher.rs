@@ -114,11 +114,17 @@ impl NamingEventListener for NoopListener {
 
 /// Answers from the Nacos client's own naming cache.
 ///
-/// No instance data is kept here. Each query reads `get_all_instances` with
-/// `subscribe = true`, which the SDK answers from its naming cache when it has
-/// an entry and otherwise fetches; because every name is subscribed before it is
-/// read, pushes keep that cache current — including a push that removes the last
-/// instance, which reaches DNS on the next query.
+/// No instance data is kept here. A name this process has already subscribed is
+/// read with `get_all_instances(subscribe = true)`, which the SDK answers from
+/// its naming cache when it has an entry; because the name was subscribed when
+/// it entered the ledger, pushes keep that cache current — including a push that
+/// removes the last instance, which reaches DNS on the next query.
+///
+/// The first query for a name does not read that cache. It asks the server
+/// directly (`subscribe = false`), because a cache entry the client loaded from
+/// disk, or the absence of one, is not evidence about a name this process has
+/// never confirmed — and the SDK's `subscribe = true` path reports a failed
+/// fetch as an empty list, which would be served as authoritative NXDOMAIN.
 ///
 /// One namespace, one group: the namespace is baked into the client's
 /// configuration, and the group travels with every call, so a service name is
@@ -151,9 +157,12 @@ impl NacosServiceWatcher {
             // the SDK's empty-push protection on, that push is dropped and the
             // stale address keeps being served until something else changes.
             .naming_push_empty_protection(false)
-            // Load the client's naming cache from disk at start-up: a restart
-            // answers from the previous run's data, and a Nacos outage at boot no
-            // longer fails the build (the client retries in the background).
+            // Load the client's naming cache from disk at start-up. A name's
+            // first query is still confirmed by the server, so loaded entries
+            // are not served as unconfirmed answers; they are what a subscribed
+            // name reads when the server is already down again by then. It also
+            // keeps a Nacos outage at boot from failing the build (the client
+            // retries in the background).
             .naming_load_cache_at_start(true);
 
         let naming_service = NamingServiceBuilder::new(props).build().await?;
@@ -175,8 +184,8 @@ impl NacosServiceWatcher {
 }
 
 impl ServiceCatalog for NacosServiceWatcher {
-    /// The client cache's answer for `service`, subscribing the name first if
-    /// this process never has.
+    /// The client cache's answer for `service`, or a server confirmation if this
+    /// process has never subscribed the name.
     ///
     /// Bounded three ways: [`ServiceFilter`] has to select the name, the
     /// subscribed set makes the first query for a name the only one that spends a
@@ -209,8 +218,77 @@ impl ServiceCatalog for NacosServiceWatcher {
 
 impl NacosServiceWatcher {
     /// The part of [`ServiceCatalog::instances`] that may reach the network:
-    /// subscribe the name once, then read the client cache.
+    /// confirm an unledgered name with the server, then read the client cache.
     async fn answer_from_nacos(&self, service: &str) -> CatalogAnswer {
+        if self.subscribed.contains(service) {
+            return self.read_client_cache(service).await;
+        }
+
+        let confirmed = match self.confirm_with_server(service).await {
+            Ok(instances) => instances,
+            Err(e) => {
+                tracing::warn!(
+                    "nacos could not confirm service '{}': {}; answering SERVFAIL so a failure is not negative-cached as NXDOMAIN",
+                    service,
+                    e
+                );
+                return CatalogAnswer::Unavailable;
+            }
+        };
+
+        if !self.subscribe_name(service).await {
+            return CatalogAnswer::Unavailable;
+        }
+
+        Self::answer_of(service, &confirmed)
+    }
+
+    /// Ask the server for `service` with no cache read and no subscription.
+    ///
+    /// `subscribe = false` is the only shape nacos-sdk 0.8.3 has that reports a
+    /// failed request: it forwards the error straight out of `request_to_server`.
+    /// With `subscribe = true` the SDK swallows its own fetch failure and returns
+    /// an empty list, which is indistinguishable from a name that does not exist.
+    async fn confirm_with_server(
+        &self,
+        service: &str,
+    ) -> Result<Vec<ServiceInstance>, nacos_sdk::api::error::Error> {
+        self.naming_service
+            .get_all_instances(service.to_string(), Some(self.group.clone()), vec![], false)
+            .await
+    }
+
+    /// The client cache's own answer for a name this process subscribed.
+    async fn read_client_cache(&self, service: &str) -> CatalogAnswer {
+        let instances = match self
+            .naming_service
+            .get_all_instances(
+                service.to_string(),
+                Some(self.group.clone()),
+                vec![],
+                // Reads the client's cache when it has an entry, which is what
+                // keeps the common query local.
+                true,
+            )
+            .await
+        {
+            Ok(instances) => instances,
+            Err(e) => {
+                tracing::warn!(
+                    "failed to read the nacos client cache for service '{}': {}",
+                    service,
+                    e
+                );
+                return CatalogAnswer::Unavailable;
+            }
+        };
+
+        Self::answer_of(service, &instances)
+    }
+
+    /// Put `service` in the ledger and subscribe it, returning false when the
+    /// name has to be asked again.
+    async fn subscribe_name(&self, service: &str) -> bool {
         // `contains` reads the `&str` this already has. Going straight to
         // `insert` would allocate a `String` on every query just to find out the
         // name is already subscribed - which, in steady state, it always is. If
@@ -238,38 +316,19 @@ impl NacosServiceWatcher {
                     service,
                     e
                 );
-                return CatalogAnswer::Unavailable;
+                return false;
             }
             tracing::info!("asked the nacos client to subscribe service '{}'", service);
         }
+        true
+    }
 
-        let instances = match self
-            .naming_service
-            .get_all_instances(
-                service.to_string(),
-                Some(self.group.clone()),
-                vec![],
-                // Reads the client's cache when it has an entry, which is what
-                // keeps the common query local.
-                true,
-            )
-            .await
-        {
-            Ok(instances) => instances,
-            Err(e) => {
-                tracing::warn!(
-                    "failed to read the nacos client cache for service '{}': {}",
-                    service,
-                    e
-                );
-                return CatalogAnswer::Unavailable;
-            }
-        };
-
-        let usable = usable_instances(&instances);
+    /// What a service list implies.
+    fn answer_of(service: &str, instances: &[ServiceInstance]) -> CatalogAnswer {
+        let usable = usable_instances(instances);
         if usable.is_empty() {
             // Either Nacos does not know the name, or it has nothing healthy to
-            // serve; the client cache carries no presence flag, so both answer
+            // serve; the list carries no presence flag, so both answer
             // authoritative NXDOMAIN rather than NODATA.
             tracing::debug!("nacos has no usable instance of '{}'", service);
             return CatalogAnswer::Unknown;

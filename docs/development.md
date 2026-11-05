@@ -170,7 +170,7 @@ Points worth knowing before reading a failure:
 | `crates/doggy-dns-xdp/tests/*` | 22 + 6 ignored | Userspace cache/interface/middleware/stats; XDP attach tests need root + Linux |
 | `crates/doggy-dns-control/tests/*` | 27 | Control plane: HTTP contract, endpoint selection, token scoping, live signals, state snapshots, redaction |
 | `tests/integration_test.rs` | 3 | End-to-end chain: Nacos hit, outside-zone fallthrough, in-zone miss stays authoritative |
-| `tests/nacos_e2e_test.rs` | 7 ignored | Live Nacos: boot-time instances, push after start-up, last-instance deletion, in-zone NXDOMAIN, IPv4-only NODATA, `service_pattern` exclusion, unreachable Nacos answers SERVFAIL |
+| `tests/nacos_e2e_test.rs` | 8 ignored | Live Nacos: boot-time instances, push after start-up, last-instance deletion, in-zone NXDOMAIN, IPv4-only NODATA, `service_pattern` exclusion, unreachable Nacos answers SERVFAIL, a name's first query is confirmed by the server rather than its loaded disk cache |
 
 Forward tests run against a local mock upstream, native tests make real
 network calls, and the Nacos unit tests use a fake catalog or a `DashMap` as

@@ -86,8 +86,8 @@ ttl = 6
 #                                     # may reach Nacos. The default keeps bare
 #                                     # application names, so dotted, non-ASCII
 #                                     # and "group@@service" names stay out.
-#                                     # Rejected names answer NXDOMAIN. Each name
-#                                     # is subscribed by its first query.
+#                                     # Rejected names answer NXDOMAIN. Each name's
+#                                     # first query confirms it with the server.
 
 [[plugins]]
 kind = "native"

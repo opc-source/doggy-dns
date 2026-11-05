@@ -84,18 +84,27 @@ instance data of its own. `NacosAuthority.lookup()` splits the name itself —
 zone membership, then the service name, with the group and namespace labels
 checked against its own config — and calls
 `ServiceCatalog::instances(service)` on every in-zone query; the watcher checks
-`ServiceFilter`, subscribes the name if this
-process never has (a `DashSet<String>` of subscribed names — the SDK offers no
-way to ask, and keeps every listener it is handed), then reads
-`get_all_instances(..., subscribe = true)`. The SDK answers from its naming
-cache when it has an entry and asks the server otherwise, so the answer is
-always the client's current view: a last-instance removal push empties that
-cache and the next query answers `NXDOMAIN`. nacos-sdk 0.8.3 gives `subscribe`
-nothing to report back — it registers the listener and its own retry task,
-swallows the request error and returns `Ok` — so the arm that forgets a failed
-subscribe is defensive, not a live path. A read that fails, or one that takes
-longer than the watcher's three-second bound, answers `SERVFAIL` instead of
-`NXDOMAIN`, so a Nacos outage is not negative-cached downstream.
+`ServiceFilter`, then splits on its ledger of subscribed names (a
+`DashSet<String>` — the SDK offers no way to ask, and keeps every listener it is
+handed). A ledger name reads `get_all_instances(..., subscribe = true)`, which the
+SDK answers from its naming cache, so the answer is the client's current view: a
+last-instance removal push empties that cache and the next query answers
+`NXDOMAIN`. A name that is not in the ledger is first confirmed with
+`get_all_instances(..., subscribe = false)`, which is the only shape in nacos-sdk
+0.8.3 that reports a failed request; the confirmed list is then answered from and
+the name subscribed. Nothing unconfirmed is ever served, including an entry the
+client loaded from a previous run's disk cache.
+
+nacos-sdk 0.8.3 gives `subscribe` nothing to report back — it registers the
+listener and its own retry task, swallows the request error and returns `Ok` — so
+the arm that forgets a failed subscribe is defensive, not a live path. A call that
+fails, or one that takes longer than the watcher's three-second bound
+(`NACOS_LOOKUP_TIMEOUT`), answers `SERVFAIL` instead of `NXDOMAIN`, so a Nacos
+outage is not negative-cached downstream.
+
+Known limit: a ledgered name whose cache entry the SDK dropped is re-fetched on
+the `subscribe = true` path, which fast-fails to an empty list — `NXDOMAIN`, not
+`SERVFAIL`, during an outage.
 
 `ServiceFilter` gates names before any Nacos call (`service_pattern`, a regex
 wrapped in whole-name anchors, default `[A-Za-z0-9_-]+` = bare application
@@ -106,8 +115,9 @@ The subscription carries a no-op listener: instance data stays in the client's
 cache (written before the SDK notifies anyone), so the listener exists only to
 keep the key in the SDK's subscriber registry and silence its "not subscribed"
 warning; the control plane reports the subscribed-name count, no push timestamp.
-The client is built with `naming_load_cache_at_start(true)`
-(a restart answers from the previous run's data) and
+The client is built with `naming_load_cache_at_start(true)` (what a restart reads
+back is the previous run's data — a name's first query is still confirmed by the
+server) and
 `naming_push_empty_protection(false)` (a last-instance disappearance must reach
 the cache). `NXDOMAIN` covers both an unknown name and a known service with no
 usable instance, because `get_all_instances` returns an empty list for both.

@@ -60,12 +60,13 @@ through on lookup failure so a later `forward` plugin can still answer.
 ## Nacos integration
 
 - Connects to Nacos naming service via `nacos-sdk`
-- Subscribes a service name on the first query that needs it (only names the
-  `service_pattern` selects), then receives push updates on instance changes
-- Keeps no instance table of its own: every in-zone query reads the Nacos client's
-  naming cache (`get_all_instances` with `subscribe = true`), which each push
-  replaces wholesale. `CachedInstance.ip` is an `IpAddr`, so a query does its
-  address parsing once per read list.
+- A name's first query confirms it with the server (`get_all_instances` with
+  `subscribe = false`) and subscribes it; only names the `service_pattern`
+  selects get that far. Pushes then keep the client's cache current.
+- Keeps no instance table of its own: a name this process subscribed reads the
+  Nacos client's naming cache (`subscribe = true`), which each push replaces
+  wholesale. `CachedInstance.ip` is an `IpAddr`, so a query does its address
+  parsing once per read list.
 - The catalog is keyed by the bare service name. One plugin serves one
   group/namespace pair and the authority checks those two labels against its own
   config before asking for it, so the key never has to carry them.

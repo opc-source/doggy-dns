@@ -29,7 +29,7 @@ use nacos_sdk::api::naming::{NamingService, NamingServiceBuilder, ServiceInstanc
 use nacos_sdk::api::props::ClientProps;
 use std::collections::HashSet;
 use std::net::{Ipv4Addr, SocketAddr};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 use tokio::net::UdpSocket;
 use tokio::process::{Child, Command};
@@ -101,6 +101,40 @@ impl NacosClient {
             .await
             .expect("failed to deregister an instance with Nacos");
     }
+
+    /// The server's own list for `service`, with no client cache in the way.
+    ///
+    /// `subscribe = false` reads through to the server, so this says what the
+    /// registry actually holds rather than what some client last remembered.
+    async fn server_ips(&self, service: &str) -> HashSet<String> {
+        self.naming
+            .get_all_instances(service.to_string(), Some(GROUP.to_string()), vec![], false)
+            .await
+            .unwrap_or_default()
+            .iter()
+            .map(|instance| instance.ip.clone())
+            .collect()
+    }
+
+    /// Wait until the server's list for `service` is exactly `ips`.
+    ///
+    /// A registration is not queryable the instant the call returns; a case that
+    /// asserts what a *later* process must read from the server has to wait for
+    /// that state, or it measures the propagation instead of the behaviour.
+    async fn await_server_has(&self, service: &str, ips: &[&str]) {
+        let want: HashSet<String> = ips.iter().map(|ip| ip.to_string()).collect();
+        let deadline = tokio::time::Instant::now() + DEADLINE;
+        loop {
+            let seen = self.server_ips(service).await;
+            if seen == want {
+                return;
+            }
+            if tokio::time::Instant::now() >= deadline {
+                panic!("the server never served {service} as {want:?}; it says {seen:?}");
+            }
+            tokio::time::sleep(POLL).await;
+        }
+    }
 }
 
 fn test_instance(ip: &str, port: i32) -> ServiceInstance {
@@ -149,13 +183,31 @@ impl DoggyDns {
     }
 
     async fn start(port: u16) -> Self {
-        Self::start_with_addr(port, &nacos_addr()).await
+        Self::start_with(port, &nacos_addr(), &Self::cache_dir(port)).await
     }
 
     async fn start_with_addr(port: u16, server_addr: &str) -> Self {
+        Self::start_with(port, server_addr, &Self::cache_dir(port)).await
+    }
+
+    /// The Nacos client's naming cache directory for one case.
+    ///
+    /// `NACOS_CLIENT_CACHE_DIR` is read by the SDK (`env_first` is on by
+    /// default), so pointing it under the test's temp dir keeps every case out of
+    /// `~/nacos` — no run inherits another's cache, and a test cannot leave
+    /// entries behind that change what a later start-up loads.
+    fn cache_dir(port: u16) -> PathBuf {
+        PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("nacos-cache-{port}"))
+    }
+
+    /// Start on `port` against `server_addr`, with the SDK's naming cache in
+    /// `cache_dir`. Two processes sharing one `cache_dir` is how a case hands the
+    /// first run's loaded cache to the second.
+    async fn start_with(port: u16, server_addr: &str, cache_dir: &Path) -> Self {
         let mut child = Command::new(env!("CARGO_BIN_EXE_doggy-dns"))
             .arg(Self::case_config(port))
             .env("DOGGY_NACOS_ADDR", server_addr)
+            .env("NACOS_CLIENT_CACHE_DIR", cache_dir)
             // Leave the output attached: `--nocapture` shows it in CI, and the
             // harness captures and replays it for a failing test.
             .kill_on_drop(true)
@@ -170,6 +222,31 @@ impl DoggyDns {
         }
 
         Self { port, child }
+    }
+
+    /// Wait until the SDK has written `service`'s naming cache entry to disk.
+    ///
+    /// The client persists a cache entry when a push lands, not when a query
+    /// reads it, so a case that needs the entry to survive the process has to
+    /// watch for the file rather than assume the answer it just got was stored.
+    async fn await_cached_on_disk(cache_dir: &Path, service: &str) -> PathBuf {
+        // <cache_dir>/naming/<namespace>/<group>@@<service>
+        let dir = cache_dir.join("naming").join(NAMESPACE);
+        let deadline = tokio::time::Instant::now() + DEADLINE;
+        loop {
+            if let Ok(entries) = std::fs::read_dir(&dir) {
+                for entry in entries.flatten() {
+                    let name = entry.file_name();
+                    if name.to_string_lossy().ends_with(&format!("@@{service}")) {
+                        return entry.path();
+                    }
+                }
+            }
+            if tokio::time::Instant::now() >= deadline {
+                panic!("the nacos client never wrote a disk cache entry for '{service}'");
+            }
+            tokio::time::sleep(POLL).await;
+        }
     }
 
     /// Send one A query, returning `None` while the server is not answering yet.
@@ -430,5 +507,46 @@ async fn e2e_unreachable_nacos_answers_servfail() {
     assert!(
         message.answers.is_empty(),
         "SERVFAIL must carry no answer records"
+    );
+}
+
+/// The first query for a name must be confirmed by the server, never answered
+/// from a cache entry this process has not confirmed.
+///
+/// `naming_load_cache_at_start(true)` makes the client load the previous run's
+/// entries, and `get_all_instances(subscribe = true)` answers from that cache
+/// before it asks anything — so a loaded entry is served even when the server's
+/// list has since moved. Registered here by one process and read back by the
+/// next: the disk entry carries the first address, the server the second.
+#[tokio::test]
+#[ignore]
+async fn e2e_first_query_is_confirmed_by_the_server() {
+    let nacos = NacosClient::connect().await;
+    nacos.register("e2e-stalehole", &[("10.9.9.3", 8080)]).await;
+
+    let cache = DoggyDns::cache_dir(15418);
+    let warm = DoggyDns::start_with(15418, &nacos_addr(), &cache).await;
+    let qname = service_qname("e2e-stalehole");
+    warm.await_answers(&qname, RecordType::A, 1).await;
+    let entry = DoggyDns::await_cached_on_disk(&cache, "e2e-stalehole").await;
+
+    // The writer has to go first. A client still subscribed would take the push of
+    // the new list and rewrite its own disk entry, leaving nothing stale to read.
+    drop(warm);
+    nacos.register("e2e-stalehole", &[("10.9.9.4", 8080)]).await;
+    // The address below must be the server's, not this process's memory of the
+    // registration call: a replacement is not queryable the instant it returns.
+    nacos.await_server_has("e2e-stalehole", &["10.9.9.4"]).await;
+
+    let server = DoggyDns::start_with(15419, &nacos_addr(), &cache).await;
+    let message = tokio::time::timeout(Duration::from_secs(20), server.send(&qname, RecordType::A))
+        .await
+        .expect("the first query did not answer within its own bound")
+        .expect("no reply to the first query");
+
+    assert_eq!(
+        answer_ips(&message),
+        HashSet::from(["10.9.9.4".to_string()]),
+        "the first query must be answered by the server, not by the entry loaded at {entry:?}"
     );
 }
