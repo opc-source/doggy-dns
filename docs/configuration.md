@@ -195,19 +195,21 @@ is how the SDK answers a cache miss.
 
 `service_pattern` selects which names may reach Nacos at all. The pattern is a
 regex wrapped in whole-name anchors (`order-service` therefore cannot match
-`legacy-order-service`), matched case-sensitively against the name as Nacos
-reports it. The default `[A-Za-z0-9_-]+` keeps bare application names: it
-rejects dotted identifiers (`com.foo.Bar`), non-ASCII names and the
-`DEFAULT_GROUP@@order` form, so on a registry whose server does return that
-prefixed form the pattern has to be widened. A name the pattern rejects is never
-subscribed or fetched, and since the authority owns its zone, querying it
-answers `NXDOMAIN` rather than falling through to `native`/`forward`.
+`legacy-order-service`), matched case-sensitively against the service label as
+the query asks for it — a `LowerName` label, so already lowercase, and a pattern
+with capitals in it selects nothing. The default `[A-Za-z0-9_-]+` keeps bare
+application names: it rejects dotted identifiers (`com.foo.Bar`), non-ASCII
+names and the `DEFAULT_GROUP@@order` form, so on a registry whose server does
+return that prefixed form the pattern has to be widened. A name the pattern
+rejects is never subscribed or fetched, and since the authority owns its zone,
+querying it answers `NXDOMAIN` rather than falling through to `native`/`forward`.
 
 The first query for each name subscribes it — once per name, because the SDK
 keeps every listener it is handed. A service registered after doggy-dns started
 needs no scan: its first query subscribes it, and thereafter the client's own
-push/refresh keeps the cache current. A failed subscribe is retried by the next
-query.
+push/refresh keeps the cache current. `subscribe` reports no failure to us in
+nacos-sdk 0.8.3: it registers the listener and its own retry task, swallows the
+request error and returns `Ok`.
 
 `naming_load_cache_at_start` makes the client load its naming cache from disk, so
 a restart answers from the previous run's data and the process starts while Nacos

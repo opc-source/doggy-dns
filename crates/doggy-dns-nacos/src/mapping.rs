@@ -12,7 +12,9 @@ use std::net::IpAddr;
 /// `to_lowercase()` calls on values that were already lower.
 ///
 /// The zone suffix is dropped from the **right**, which is what keeps dotted
-/// service names (`com.example.api`) working. Membership is *not* checked here:
+/// service names (`com.example.api`) representable at this layer - the default
+/// `service_pattern` rejects a dot, so a dotted name only reaches Nacos once the
+/// pattern is widened. Membership is *not* checked here:
 /// callers must run [`Name::zone_of`] first, or a sibling like
 /// `evilnacos.local` is read as if it belonged to `nacos.local`.
 ///

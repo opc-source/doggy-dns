@@ -168,7 +168,7 @@ Points worth knowing before reading a failure:
 | `crates/doggy-dns-plugin/tests/system_dns_test.rs` | 1 | Native resolver (requires network) |
 | `crates/doggy-dns-plugin/tests/wire_query_name_test.rs` | 2 | The wire-name handoff both fallback authorities use: label bytes survive, and the `&str` path's underscore rejection stays a premise |
 | `crates/doggy-dns-xdp/tests/*` | 22 + 6 ignored | Userspace cache/interface/middleware/stats; XDP attach tests need root + Linux |
-| `crates/doggy-dns-control/tests/*` | 28 | Control plane: HTTP contract, endpoint selection, token scoping, live signals, state snapshots, redaction |
+| `crates/doggy-dns-control/tests/*` | 27 | Control plane: HTTP contract, endpoint selection, token scoping, live signals, state snapshots, redaction |
 | `tests/integration_test.rs` | 3 | End-to-end chain: Nacos hit, outside-zone fallthrough, in-zone miss stays authoritative |
 | `tests/nacos_e2e_test.rs` | 7 ignored | Live Nacos: boot-time instances, push after start-up, last-instance deletion, in-zone NXDOMAIN, IPv4-only NODATA, `service_pattern` exclusion, unreachable Nacos answers SERVFAIL |
 

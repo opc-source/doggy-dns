@@ -106,8 +106,9 @@ fn configured_filter_matches_the_whole_name() {
     assert!(!pre_anchored.is_selected("order-2"));
 }
 
-/// Matching runs on the name as Nacos reports it; the cache key is lowercased
-/// later, so nothing lowercases the pattern for the operator.
+/// Matching is case-sensitive and nothing lowercases the configured pattern. The
+/// production caller hands `is_selected` a `LowerName` label, so a mixed-case
+/// name only reaches here from a test.
 #[test]
 fn filter_matching_is_case_sensitive() {
     let filter = ServiceFilter::from_config(Some("order")).expect("valid pattern");
@@ -115,7 +116,7 @@ fn filter_matching_is_case_sensitive() {
     assert!(filter.is_selected("order"));
     assert!(
         !filter.is_selected("ORDER"),
-        "a lowercase pattern must not silently select an uppercase registration"
+        "a lowercase pattern must not silently select a differently-cased name"
     );
 }
 

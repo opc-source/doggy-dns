@@ -52,7 +52,10 @@ impl ServiceFilter {
         Ok(Self { pattern: compiled })
     }
 
-    /// True when `service_name`, exactly as Nacos reports it, should be served.
+    /// True when `service_name` should be served.
+    ///
+    /// Case-sensitive. The only production caller passes a service label out of a
+    /// `LowerName`, so that name is already lowercase here.
     pub fn is_selected(&self, service_name: &str) -> bool {
         self.pattern.is_match(service_name)
     }
@@ -224,16 +227,20 @@ impl NacosServiceWatcher {
                 )
                 .await;
             if let Err(e) = subscribed {
-                // Forget the attempt so the next query retries it.
+                // Defensive. nacos-sdk 0.8.3's `subscribe` registers the listener
+                // and its own retry task, then swallows the request error and
+                // returns `Ok(())`, so nothing reaches this arm live. If a version
+                // does hand a failure back, the ledger entry goes with it: keeping
+                // it would mean never asking again.
                 self.subscribed.remove(service);
                 tracing::warn!(
-                    "failed to subscribe to nacos service '{}': {}; the next query retries it",
+                    "nacos subscribe of service '{}' failed: {}; the next query asks again",
                     service,
                     e
                 );
                 return CatalogAnswer::Unavailable;
             }
-            tracing::info!("subscribed to nacos service: {}", service);
+            tracing::info!("asked the nacos client to subscribe service '{}'", service);
         }
 
         let instances = match self

@@ -90,8 +90,10 @@ way to ask, and keeps every listener it is handed), then reads
 `get_all_instances(..., subscribe = true)`. The SDK answers from its naming
 cache when it has an entry and asks the server otherwise, so the answer is
 always the client's current view: a last-instance removal push empties that
-cache and the next query answers `NXDOMAIN`. A subscribe call that fails is
-forgotten so the next query retries it. A read that fails, or one that takes
+cache and the next query answers `NXDOMAIN`. nacos-sdk 0.8.3 gives `subscribe`
+nothing to report back — it registers the listener and its own retry task,
+swallows the request error and returns `Ok` — so the arm that forgets a failed
+subscribe is defensive, not a live path. A read that fails, or one that takes
 longer than the watcher's three-second bound, answers `SERVFAIL` instead of
 `NXDOMAIN`, so a Nacos outage is not negative-cached downstream.
 
@@ -175,7 +177,7 @@ An instance list is replaced wholesale, never mutated in place (the Nacos client
 
 TOML config at `config/doggy-dns.toml`. Key structs in `crates/doggy-dns-basic` (`doggy_dns_basic`): `DoggyDnsConfig`, `ServerConfig`, `PluginConfig` (flat — fields per kind), `PluginKind` enum (`Nacos`, `Native`, `Forward`). `doggy-dns-core` re-exports the module as `config`.
 
-`validate_config()` checks: worker_threads > 0, TLS/HTTPS cert files exist when enabled, remote_config fields non-empty when enabled, plugin rules (one enabled plugin when `[[plugins]]` exists; Nacos connection fields, valid unique zone, `service_pattern` non-blank when given; `min_ttl <= max_ttl`; forward upstream is IP or IP:port), observability ranges/URLs (observability enabled, signal ranges, profile duration/frequency, log level, endpoint format), and control-plane rules when `[control]` is enabled (valid `listen_addr`; `endpoints` non-empty, unique, within `mcp|healthz|readyz`). Every config string may use `${ENV_VAR}`; expansion happens in `load_config()` before deserialisation and a missing variable is fatal (the raw, unexpanded file content is what the MCP `get_config` tool sees).
+`validate_config()` checks: worker_threads > 0, TLS/HTTPS cert files exist when enabled, remote_config fields non-empty when enabled, plugin rules (at least one enabled plugin when `[[plugins]]` exists; Nacos connection fields, valid unique zone, `service_pattern` non-blank when given; `min_ttl <= max_ttl`; forward upstream is IP or IP:port), observability ranges/URLs (observability enabled, signal ranges, profile duration/frequency, log level, endpoint format), and control-plane rules when `[control]` is enabled (valid `listen_addr`; `endpoints` non-empty, unique, within `mcp|healthz|readyz`). Every config string may use `${ENV_VAR}`; expansion happens in `load_config()` before deserialisation and a missing variable is fatal (the raw, unexpanded file content is what the MCP `get_config` tool sees).
 
 ## Test Conventions
 

@@ -45,7 +45,7 @@ Part of [README](../README.md).
 
 | Kind | Description |
 |------|-------------|
-| `nacos` | Resolves service names from Nacos registry via DashMap cache. Format: `<service>.<group>.<namespace>.<zone>.` |
+| `nacos` | Resolves service names from the Nacos client's naming cache. Format: `<service>.<group>.<namespace>.<zone>.` |
 | `native` | Resolves using the OS system resolver (`/etc/resolv.conf`) |
 | `forward` | Resolves using explicit upstream DNS servers. Accepts `IP` or `IP:port` (port defaults to 53) and uses the configured port for both UDP and TCP |
 
@@ -73,8 +73,9 @@ through on lookup failure so a later `forward` plugin can still answer.
   authority chain entry, so a negative answer costs no extra lookup after the first.
 - DNS name format: `<service>.<group>.<namespace>.<zone_suffix>.`
 - Example: `dig user-service.DEFAULT_GROUP.public.nacos.local A`
-- The name is split from the right, so service names may contain dots
-  (`com.example.api.DEFAULT_GROUP.public.nacos.local`)
+- The name is split from the right, so the mapping itself accepts dotted service
+  names (`com.example.api.DEFAULT_GROUP.public.nacos.local`) — which the default
+  `service_pattern` rejects, so serving one takes a widened pattern
 - The authority is authoritative for its whole zone: once a name is inside
   `<zone_suffix>`, a miss never falls through to `native`/`forward`. An unknown
   service returns `NXDOMAIN`; a service with no instance of the requested
