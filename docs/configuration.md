@@ -70,6 +70,7 @@ namespace = "public"
 group = "DEFAULT_GROUP"
 dns_zone = "nacos.local"
 ttl = 6
+service_pattern = "[A-Za-z0-9_-]+"   # default; which services to subscribe — see "Nacos subscription filter"
 
 [[plugins]]
 kind = "native"
@@ -181,6 +182,28 @@ without consulting userspace again, so a hit replays the order that was captured
 when the entry was written until its TTL expires; startup logs one `warn` when
 both settings are on. See [xdp.md](xdp.md#limitations--notes).
 
+## Nacos subscription filter
+
+`get_service_list` answers with every service in the configured group, and a
+shared Nacos holds plenty that a DNS zone has no business being pushed, so
+`service_pattern` selects which names get subscribed. The pattern is a regex
+wrapped in whole-name anchors (`order-service` therefore cannot match
+`legacy-order-service`), matched case-sensitively against the name as Nacos
+reports it. The default `[A-Za-z0-9_-]+` keeps bare application names: it
+rejects dotted identifiers (`com.foo.Bar`), non-ASCII names and the
+`DEFAULT_GROUP@@order` form, so on a registry whose server does return that
+prefixed form the pattern has to be widened. A name the pattern rejects is
+never cached, and since the authority owns its zone, querying it answers
+`NXDOMAIN` rather than falling through to `native`/`forward`. Startup logs how
+many of the listed services were subscribed; the rejected names appear at
+`debug`.
+
+The whole list is read at start-up: pages of 1000 names are fetched until the
+count reported by the first page is covered, so no service is silently left
+out. A page that fails to fetch logs a `warn` and stops the scan, leaving the
+names already read subscribed; there is no knob for the page size because the
+scan reads every page either way.
+
 ## Endpoint formats
 
 The base endpoint is `<host>/api/<org>` for OpenObserve and `http://host:4318`
@@ -204,8 +227,10 @@ the available set aborts startup when the runtime is built); TLS and HTTPS cert
 files exist when enabled; `remote_config` fields non-empty when
 enabled; plugin rules — at least one enabled plugin when `[[plugins]]` is
 present, Nacos `server_addr`/`namespace`/`group`/`dns_zone` present with a
-syntactically valid and unique zone, `min_ttl <= max_ttl` for native/forward,
-and forward `upstream` entries parse as IP or IP:port; observability signal
+syntactically valid and unique zone, `service_pattern` non-blank when given (its
+regex syntax is judged when the plugin is built, which aborts startup before any
+Nacos connection), `min_ttl <= max_ttl` for native/forward, and forward
+`upstream` entries parse as IP or IP:port; observability signal
 ranges, profile duration/frequency, log level and endpoint format;
 `xdp.cache_size > 0`, `xdp.negative_ttl > 0` and `xdp.attach_mode` is `auto` or
 `manual` when the fast path is enabled; `control.listen_addr` is a valid IP

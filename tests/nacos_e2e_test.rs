@@ -330,3 +330,35 @@ async fn e2e_aaaa_for_ipv4_only_service_is_nodata() {
         "an IPv4-only service must answer AAAA with NODATA"
     );
 }
+
+/// The built-in `service_pattern` rule subscribes bare application names only,
+/// so a dotted registration is never pushed to this process and its name stays
+/// an in-zone miss. Nacos accepts the dotted form (a Dubbo-style identifier),
+/// which is exactly why the subscription list has to be narrowed.
+#[tokio::test]
+#[ignore]
+async fn e2e_service_pattern_excludes_dotted_registration() {
+    let nacos = NacosClient::connect().await;
+    nacos.register("e2e-selected", &[("10.0.0.51", 8080)]).await;
+    nacos.register("e2e.dotted", &[("10.0.0.52", 8080)]).await;
+
+    let server = DoggyDns::start(15415).await;
+    // The bare name proves the subscription path is live, so the dotted name's
+    // answer below is the filter's doing rather than an empty cache or a
+    // start-up race.
+    server
+        .await_answers(&service_qname("e2e-selected"), RecordType::A, 1)
+        .await;
+
+    let message = server
+        .await_code(
+            &service_qname("e2e.dotted"),
+            RecordType::A,
+            ResponseCode::NXDomain,
+        )
+        .await;
+    assert!(
+        message.answers.is_empty(),
+        "a service the pattern rejected must not be subscribed, so it cannot be answered"
+    );
+}

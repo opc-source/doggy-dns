@@ -5,7 +5,7 @@ use doggy_dns_core::handler::{AnswerRotation, DoggyDnsHandler};
 use doggy_dns_core::middleware::logging::LoggingMiddleware;
 use doggy_dns_core::server::build_server;
 use doggy_dns_nacos::authority::NacosAuthority;
-use doggy_dns_nacos::watcher::NacosServiceWatcher;
+use doggy_dns_nacos::watcher::{NacosServiceWatcher, ServiceFilter};
 use doggy_dns_observability::Observability;
 use doggy_dns_plugin::Middleware;
 use doggy_dns_plugin::authority_chain::AuthorityChain;
@@ -282,7 +282,14 @@ async fn build_authority_chain(
                 let grp = plugin.group.as_deref().unwrap_or("DEFAULT_GROUP");
                 let zone = plugin.dns_zone.as_deref().unwrap_or("nacos.local");
 
-                let watcher = NacosServiceWatcher::new(addr, ns, grp).await?;
+                let watcher = NacosServiceWatcher::new(
+                    addr,
+                    ns,
+                    grp,
+                    ServiceFilter::from_config(plugin.service_pattern.as_deref())
+                        .context(format!("plugins[{i}].service_pattern"))?,
+                )
+                .await?;
                 watcher.subscribe_all().await;
                 let cache = watcher.cache();
 

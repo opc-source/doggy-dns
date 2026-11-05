@@ -772,6 +772,7 @@ dependencies = [
  "hickory-proto",
  "hickory-server",
  "nacos-sdk",
+ "regex",
  "tokio",
  "tracing",
 ]

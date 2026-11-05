@@ -1,7 +1,9 @@
 #![allow(clippy::disallowed_methods)]
 
 use dashmap::DashMap;
-use doggy_dns_nacos::watcher::{CachedInstance, InstanceChangeListener, ServiceKey};
+use doggy_dns_nacos::watcher::{
+    CachedInstance, InstanceChangeListener, ServiceFilter, ServiceKey, service_list_page_count,
+};
 use nacos_sdk::api::naming::{NamingChangeEvent, NamingEventListener, ServiceInstance};
 use std::collections::HashMap;
 use std::net::IpAddr;
@@ -240,5 +242,128 @@ fn listener_skips_updates_that_could_alias_another_key() {
     assert!(
         cache.is_empty(),
         "a separator inside the group must not produce a composite key"
+    );
+}
+
+/// The built-in pattern is the application-name rule: word characters, `-`, no
+/// dots. A dot means the registration is not a bare application name (a
+/// `com.foo.Bar` style identifier, or the `group@@service` form some Nacos
+/// versions return), and those are exactly the entries a deployment does not
+/// want pushed to it.
+#[test]
+fn default_filter_selects_bare_application_names() {
+    let filter = ServiceFilter::from_config(None).expect("the built-in pattern must compile");
+
+    for selected in ["order-service", "ORDER_svc-1", "a1"] {
+        assert!(
+            filter.is_selected(selected),
+            "{selected} is a bare application name and must be subscribed"
+        );
+    }
+
+    for rejected in [
+        "com.foo.Bar",
+        "order.service",
+        "DEFAULT_GROUP@@order",
+        "服务名",
+        "order service",
+        "",
+    ] {
+        assert!(
+            !filter.is_selected(rejected),
+            "{rejected:?} is not a bare application name and must not be subscribed"
+        );
+    }
+}
+
+/// A configured pattern is wrapped in whole-name anchors, so `user-service-\d+`
+/// cannot silently subscribe `my-user-service-1` through a substring match. An
+/// author who already wrote anchors keeps working.
+#[test]
+fn configured_filter_matches_the_whole_name() {
+    let filter = ServiceFilter::from_config(Some(r"user-service-\d+")).expect("valid pattern");
+
+    assert!(filter.is_selected("user-service-12"));
+    assert!(
+        !filter.is_selected("my-user-service-1"),
+        "an unanchored substring match would subscribe a service the operator did not name"
+    );
+    assert!(!filter.is_selected("user-service-1x"));
+
+    let pre_anchored = ServiceFilter::from_config(Some(r"^order$")).expect("valid pattern");
+    assert!(pre_anchored.is_selected("order"));
+    assert!(!pre_anchored.is_selected("order-2"));
+}
+
+/// Matching runs on the name as Nacos reports it; the cache key is lowercased
+/// later, so nothing lowercases the pattern for the operator.
+#[test]
+fn filter_matching_is_case_sensitive() {
+    let filter = ServiceFilter::from_config(Some("order")).expect("valid pattern");
+
+    assert!(filter.is_selected("order"));
+    assert!(
+        !filter.is_selected("ORDER"),
+        "a lowercase pattern must not silently select an uppercase registration"
+    );
+}
+
+/// Characterisation of the assumption behind [`DEFAULT_SERVICE_PATTERN`] being
+/// spelled as an ASCII class: with the regex crate's default `unicode` feature,
+/// a `\w` an operator writes here is Unicode-aware, so it does select a CJK
+/// registration. The built-in default must not inherit that breadth.
+#[test]
+fn user_written_word_class_is_unicode_aware() {
+    let filter = ServiceFilter::from_config(Some(r"\w+")).expect("valid pattern");
+    let default = ServiceFilter::from_config(None).expect("the built-in pattern must compile");
+
+    assert!(
+        filter.is_selected("服务名"),
+        r#""\w" in a configured pattern matches Unicode word characters"#
+    );
+    assert!(
+        !default.is_selected("服务名"),
+        "the built-in rule is ASCII-only regardless of how that could be written"
+    );
+}
+
+/// The first page reports how many services exist, and that count decides how
+/// many more pages the scan asks for. Each row is the number of pages
+/// `subscribe_all` fetches for a reported total at a 1000-entry page.
+#[test]
+fn page_count_covers_the_reported_total() {
+    for (total, want) in [
+        (0, 0),    // nothing registered: the first page answers empty
+        (1, 1),    // a single service needs the first page, and only it
+        (999, 1),  // one page still holds it
+        (1000, 1), // exact fit must not ask for a second page
+        (1001, 2), // one over the page boundary
+        (2000, 2),
+        (2001, 3),
+        (-5, 0),               // a nonsense count fetches nothing beyond the first page
+        (i32::MAX, 2_147_484), // ceil(2147483647 / 1000), without overflowing
+    ] {
+        assert_eq!(
+            service_list_page_count(total, 1000),
+            want,
+            "total {total} must need {want} pages"
+        );
+    }
+}
+
+/// A pattern that does not compile is a configuration error naming the field and
+/// the text, so the operator sees which plugin line to fix.
+#[test]
+fn invalid_pattern_is_reported_with_the_pattern() {
+    let error = ServiceFilter::from_config(Some("order(")).expect_err("unbalanced group must fail");
+    let message = error.to_string();
+
+    assert!(
+        message.contains("service_pattern"),
+        "the error must name the config field, got: {message}"
+    );
+    assert!(
+        message.contains("order("),
+        "the error must quote the rejected pattern, got: {message}"
     );
 }

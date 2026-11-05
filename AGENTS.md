@@ -84,6 +84,13 @@ receives push events → replaces entire `Vec<CachedInstance>` for a `ServiceKey
 `DashMap` (immutable update) → `NacosAuthority.lookup()` reads through the `DashMap`
 read guard and builds records from borrowed instances.
 
+`subscribe_all()` reads every `get_service_list` page of the group (1000 names per
+page, sized from the total the first page reports) and subscribes only the names
+`ServiceFilter` selects (`service_pattern`, a regex wrapped in whole-name anchors,
+default `[A-Za-z0-9_-]+` = bare application names). A name the filter rejects is
+never cached, so it resolves to authoritative `NXDOMAIN` like any unknown service;
+a page that fails to fetch is warned about and the scan stops.
+
 DNS name format: `<service>.<group>.<namespace>.<zone_suffix>.` (zone membership by
 `Name::zone_of`, key by `mapping::service_key_from_name`, split from the right so
 service names may contain dots). `ServiceKey` is one composite lowercase string
@@ -145,7 +152,7 @@ Cache updates replace the entire Vec for a key (never mutate in place). Config s
 
 TOML config at `config/doggy-dns.toml`. Key structs in `crates/doggy-dns-basic` (`doggy_dns_basic`): `DoggyDnsConfig`, `ServerConfig`, `PluginConfig` (flat — fields per kind), `PluginKind` enum (`Nacos`, `Native`, `Forward`). `doggy-dns-core` re-exports the module as `config`.
 
-`validate_config()` checks: worker_threads > 0, TLS/HTTPS cert files exist when enabled, remote_config fields non-empty when enabled, plugin rules (one enabled plugin when `[[plugins]]` exists; Nacos connection fields, valid unique zone; `min_ttl <= max_ttl`; forward upstream is IP or IP:port), observability ranges/URLs (observability enabled, signal ranges, profile duration/frequency, log level, endpoint format), and control-plane rules when `[control]` is enabled (valid `listen_addr`; `endpoints` non-empty, unique, within `mcp|healthz|readyz`). Every config string may use `${ENV_VAR}`; expansion happens in `load_config()` before deserialisation and a missing variable is fatal (the raw, unexpanded file content is what the MCP `get_config` tool sees).
+`validate_config()` checks: worker_threads > 0, TLS/HTTPS cert files exist when enabled, remote_config fields non-empty when enabled, plugin rules (one enabled plugin when `[[plugins]]` exists; Nacos connection fields, valid unique zone, `service_pattern` non-blank when given; `min_ttl <= max_ttl`; forward upstream is IP or IP:port), observability ranges/URLs (observability enabled, signal ranges, profile duration/frequency, log level, endpoint format), and control-plane rules when `[control]` is enabled (valid `listen_addr`; `endpoints` non-empty, unique, within `mcp|healthz|readyz`). Every config string may use `${ENV_VAR}`; expansion happens in `load_config()` before deserialisation and a missing variable is fatal (the raw, unexpanded file content is what the MCP `get_config` tool sees).
 
 ## Test Conventions
 
