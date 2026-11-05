@@ -1,8 +1,10 @@
 #![allow(clippy::disallowed_methods)]
 
+use doggy_dns_nacos::authority::CatalogAnswer;
 use doggy_dns_nacos::watcher::{
-    CachedInstance, FailureBackoff, NACOS_FAILURE_BACKOFF, NACOS_FAILURE_THRESHOLD, ServiceFilter,
-    usable_instances,
+    CachedInstance, FailureBackoff, NACOS_CACHE_READ_TIMEOUT, NACOS_FAILURE_BACKOFF,
+    NACOS_FAILURE_THRESHOLD, NACOS_LOOKUP_TIMEOUT, QueryEntry, ServiceFilter, cache_hit_of,
+    entry_of, usable_instances,
 };
 use nacos_sdk::api::naming::ServiceInstance;
 use std::collections::HashMap;
@@ -326,5 +328,124 @@ fn the_window_covers_exactly_its_backoff_from_its_start() {
     assert!(
         !backoff.is_open(opened_at + backoff_secs),
         "the window lifts at its end"
+    );
+}
+
+/// A reply is credited for the whole life of the process, and an outage that
+/// comes later does not take it back: this is the bit that says whether the
+/// client has ever been proven able to talk to the registry.
+///
+/// Without it, every name this process has not subscribed would keep asking the
+/// server, and an unknown name would pay two round trips for as long as the
+/// process lives. With it held forever, a start-up that began in an outage and
+/// recovered would go back to refusing the client cache - which is the case the
+/// cache-first entry exists to answer.
+#[test]
+fn a_server_reply_is_credited_for_the_rest_of_the_process() {
+    let backoff = FailureBackoff::new();
+    let now = 1_700_000_000;
+
+    assert!(
+        !backoff.ever_confirmed(),
+        "a fresh process has no evidence about the server"
+    );
+
+    backoff.record_failure(now);
+    backoff.record_failure(now);
+    assert!(
+        !backoff.ever_confirmed(),
+        "a failure is not evidence that the server answers"
+    );
+
+    backoff.record_success();
+    assert!(backoff.ever_confirmed(), "a reply is");
+
+    backoff.record_failure(now);
+    backoff.record_failure(now);
+    backoff.record_failure(now);
+    assert!(
+        backoff.ever_confirmed(),
+        "an outage after a reply does not erase the reply"
+    );
+}
+
+// The entry the query takes is the whole decision, so it is pinned as a table
+// rather than inferred from which network call a test happens to reach.
+
+/// A name already in the ledger reads the client cache whatever else is true, and
+/// an open window outranks everything a name that is not.
+#[test]
+fn the_entry_table_picks_the_source_from_three_inputs() {
+    let table = [
+        // Subscribed: pushes keep the client cache current, so it is the freshest
+        // source available and a down registry does not make it worth cutting off.
+        (true, false, false, QueryEntry::ClientCache),
+        (true, false, true, QueryEntry::ClientCache),
+        (true, true, false, QueryEntry::ClientCache),
+        (true, true, true, QueryEntry::ClientCache),
+        // Before the server has ever replied, a name the client's cache already
+        // holds answers without a round trip. This is the start-up outage: the
+        // alternative was to refuse a name the previous run left data for, because
+        // the ledger only fills from answers this process got. The cache is tried
+        // first, not only used, so an empty list still falls through to the server.
+        (false, false, false, QueryEntry::CacheFirst),
+        // Once the registry has proven it answers, an unledgered name is asked of it
+        // first: an entry loaded from disk is not evidence about a name this process
+        // has never confirmed, and serving it would hold the previous run's addresses
+        // behind a live server.
+        (false, true, false, QueryEntry::ServerFirst),
+        // Inside the window the cache is the only source, and a name it does not hold
+        // is refused rather than paid for twice. A proven outage is not unproven by a
+        // reply that came before it.
+        (false, false, true, QueryEntry::CacheOnly),
+        (false, true, true, QueryEntry::CacheOnly),
+    ];
+
+    for (ledgered, ever_confirmed, window_open, want) in table {
+        assert_eq!(
+            entry_of(ledgered, ever_confirmed, window_open),
+            want,
+            "ledgered={ledgered}, ever_confirmed={ever_confirmed}, window_open={window_open}"
+        );
+    }
+}
+
+/// What a cache read can serve: instances. An empty list is never served from
+/// this call shape - `subscribe = true` reports a failed fetch as empty, so an
+/// empty answer here cannot be read as "this name does not exist".
+#[test]
+fn a_cache_read_answers_only_with_instances() {
+    let usable = vec![make_service_instance("10.0.0.1", 8080, true, true)];
+    let answer = cache_hit_of("order", &usable).expect("a usable instance is answerable");
+    match answer {
+        CatalogAnswer::Instances(instances) => {
+            assert_eq!(instances.len(), 1);
+            assert_eq!(instances[0].ip, IpAddr::from([10, 0, 0, 1]));
+        }
+        other => panic!("expected the instances to be served, got {other:?}"),
+    }
+
+    assert!(
+        cache_hit_of("order", &[]).is_none(),
+        "an empty list must fall through, not be answered as NXDOMAIN"
+    );
+    let unhealthy = vec![make_service_instance("10.0.0.2", 8080, false, true)];
+    assert!(
+        cache_hit_of("order", &unhealthy).is_none(),
+        "a list with nothing usable says as little as an empty one"
+    );
+}
+
+/// A cache hit is a map read and a clone, so it answers in microseconds. This
+/// bound therefore only ever cuts off the round trip the SDK makes when the name
+/// is not in the cache - and that call registers the listener, the refresh task
+/// and the redo task before it waits, so cutting the wait off loses no
+/// subscription.
+#[test]
+fn the_cache_read_bound_is_far_shorter_than_a_round_trip() {
+    assert!(
+        NACOS_CACHE_READ_TIMEOUT * 10 <= NACOS_LOOKUP_TIMEOUT,
+        "a read taken instead of a call must not cost the call's budget: \
+         {NACOS_CACHE_READ_TIMEOUT:?} against {NACOS_LOOKUP_TIMEOUT:?}"
     );
 }

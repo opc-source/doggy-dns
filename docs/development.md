@@ -140,6 +140,12 @@ Points worth knowing before reading a failure:
   queries before the first push arrives; empty pushes are enabled so a service
   losing its last instance empties the client's entry and the next query sees
   the deletion instead of a stale address.
+- **A name the registry has never answered this process may be answered from
+  that disk copy before any server call** (see `entry_of`). The boot cases
+  therefore delete the cache directory first — an entry left by an earlier run
+  would answer the positive control on its own — and a process pointed at an
+  address that *refuses* the connection binds its DNS port slowly, so those
+  cases retry unanswered queries instead of timing out on the first one.
 - **Ephemeral instances live and die with the registering client's connection.**
   The test keeps its `NamingService` handle alive for exactly this reason.
 - **A batch registration replaces the service's instance list** rather than
@@ -161,7 +167,7 @@ Points worth knowing before reading a failure:
 | `crates/doggy-dns-nacos/tests/alloc_guard_test.rs` | 1 | Allocation budget for `NacosAuthority::lookup`: 5 on a hit, 1 on an in-zone miss |
 | `crates/doggy-dns-nacos/tests/authority_test.rs` | 27 | Nacos authority: catalog hits and misses, dotted names, NOERROR/NXDOMAIN/NODATA, family filtering, zone boundaries, group and namespace labels, apex SOA, which queries consult the catalog |
 | `crates/doggy-dns-nacos/tests/mapping_test.rs` | 13 | Name-to-service-name mapping (zone boundaries, group and namespace labels, escaped labels), family-filtered record creation |
-| `crates/doggy-dns-nacos/tests/watcher_test.rs` | 16 | Service filter (defaults, anchoring, case, Unicode, invalid pattern), usable-instance parsing, failure-backoff window (opens, restarts, expires, reopens, lifts on success, covers exactly its backoff, lifts on a backwards clock step) |
+| `crates/doggy-dns-nacos/tests/watcher_test.rs` | 20 | Service filter (defaults, anchoring, case, Unicode, invalid pattern), usable-instance parsing, failure-backoff window (opens, restarts, expires, reopens, lifts on success, covers exactly its backoff, lifts on a backwards clock step), the whole `entry_of` table (client cache, cache-first boot, server-first, cache-only) and `ever_confirmed`, a cache read answering only when it holds instances, the cache-read bound |
 | `crates/doggy-dns-plugin/tests/authority_chain_test.rs` | 12 | Chain resolution: empty, hit, authoritative miss, zone fallthrough, all-skip, Break, error, is_empty |
 | `crates/doggy-dns-plugin/tests/forward_test.rs` | 9 | Forward resolver: local mock upstream, custom/bare IP parsing, validation, NXDOMAIN/NODATA/SERVFAIL mapping, underscore labels still forwarded |
 | `crates/doggy-dns-plugin/tests/request_outcome_test.rs` | 3 | `RequestOutcome` construction: success, response bytes, NXDOMAIN TTL |
@@ -170,7 +176,7 @@ Points worth knowing before reading a failure:
 | `crates/doggy-dns-xdp/tests/*` | 22 + 6 ignored | Userspace cache/interface/middleware/stats; XDP attach tests need root + Linux |
 | `crates/doggy-dns-control/tests/*` | 27 | Control plane: HTTP contract, endpoint selection, token scoping, live signals, state snapshots, redaction |
 | `tests/integration_test.rs` | 3 | End-to-end chain: Nacos hit, outside-zone fallthrough, in-zone miss stays authoritative |
-| `tests/nacos_e2e_test.rs` | 9 ignored | Live Nacos: boot-time instances, push after start-up, last-instance deletion, in-zone NXDOMAIN, IPv4-only NODATA, `service_pattern` exclusion, unreachable Nacos answers SERVFAIL, a name's first query is confirmed by the server rather than its loaded disk cache, the backoff window refuses with no round trip |
+| `tests/nacos_e2e_test.rs` | 10 ignored | Live Nacos: boot-time instances, push after start-up, last-instance deletion, in-zone NXDOMAIN, IPv4-only NODATA, `service_pattern` exclusion, unreachable Nacos answers SERVFAIL, a boot cache entry is answered and then converges on the server's current list, a start-up outage answers from the client's cache without waiting on the registry, the backoff window refuses without waiting |
 
 Forward tests run against a local mock upstream, native tests make real
 network calls, and the Nacos unit tests use a fake catalog or a `DashMap` as

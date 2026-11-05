@@ -184,15 +184,21 @@ both settings are on. See [xdp.md](xdp.md#limitations--notes).
 
 ## Nacos subscription
 
-The authority keeps no instance cache of its own. A name this process has already
-subscribed is read from the Nacos client's naming cache (`get_all_instances`,
-`subscribe = true`), which each push keeps current, so DNS serves the client's
-current view. A name it has *not* subscribed is first confirmed by the server
-(`subscribe = false`): a cache entry loaded from a previous run — or the absence
-of one — says nothing about a name this process never asked the server about, and
-nacos-sdk 0.8.3 reports a failed fetch on the `subscribe = true` path as an empty
-list rather than an error. The cost of the confirmed path is one list clone plus
-address parsing per query and one round trip per new name.
+The authority keeps no instance cache of its own. Every answer is the Nacos client's
+naming cache (`get_all_instances`, `subscribe = true`), which the client's pushes and
+periodic refreshes keep current. One table (`entry_of`) picks the source: a name this
+process has subscribed reads that cache, and a name it has *not* subscribed is first
+confirmed by the server (`subscribe = false`) — outside the backoff window described
+below. A cache entry loaded from a previous run, or the absence of one, says nothing
+about a name this process never asked the
+server about, and nacos-sdk 0.8.3 reports a failed fetch on the `subscribe = true`
+path as an empty list rather than an error. While the registry has never answered this
+process, though, that confirmation has nothing to give, so the cache is read first and
+the server is asked only when the cache has nothing to serve. The price of that
+start-up rule is an answer that can carry the previous run's address until the client
+refreshes; the gain is that an outage at boot resolves names instead of answering
+`SERVFAIL`. An empty list is never served from the cache. The confirmed path costs one
+list clone plus address parsing per query and one round trip per new name.
 
 `service_pattern` selects which names may reach Nacos at all. The pattern is a
 regex wrapped in whole-name anchors (`order-service` therefore cannot match
@@ -205,44 +211,49 @@ return that prefixed form the pattern has to be widened. A name the pattern
 rejects is never subscribed or fetched, and since the authority owns its zone,
 querying it answers `NXDOMAIN` rather than falling through to `native`/`forward`.
 
-The first query for each name also subscribes it — once per name, because the SDK
-keeps every listener it is handed. A service registered after doggy-dns started
+The query that first answers a name also subscribes it — once per name, because the
+SDK keeps every listener it is handed. A service registered after doggy-dns started
 needs no scan: its first query confirms it and subscribes it, and thereafter the
-client's own push/refresh keeps the cache current. `subscribe` reports no failure
-to us in nacos-sdk 0.8.3: it registers the listener and its own retry task,
-swallows the request error and returns `Ok`.
+client's own push/refresh keeps the cache current. A name answered from the client's
+cache has to subscribe itself too: `get_all_instances` returns a cached entry before
+`subscribe_async` is reached, so without that call a disk-loaded entry would never be
+refreshed and the name would stay out of the ledger. `subscribe` reports no failure to
+us in nacos-sdk 0.8.3: it registers the listener and its own retry task, swallows the
+request error and returns `Ok`.
 
-`naming_load_cache_at_start` makes the client load its naming cache from disk, so
-subscribed names keep answering while Nacos is unreachable and the process starts
-even when the server is down — down meaning it refuses the connection. It is not a
-way to answer a name's first query: that still goes to the server. One limit is
-the SDK's, not this design's: an address that accepts TCP and never answers blocks
+`naming_load_cache_at_start` makes the client load its naming cache from disk, which
+is what a start-up outage reads (see the entry rule above) and what lets the process
+start even when the server is down — down meaning it refuses the connection. One limit
+is the SDK's, not this design's: an address that accepts TCP and never answers blocks
 start-up before the DNS port is bound, because `NamingServiceBuilder::build()`
 awaits the SDK's health check with no overall bound. That await is also on `main`,
 unchanged here.
 
-The wait on Nacos is bounded to three seconds, on both paths; a call that fails or
-exceeds that bound answers `SERVFAIL` rather than `NXDOMAIN`, so the client retries
-instead of caching "this name does not exist" past the end of the outage. Three such
-failures in a row open a 30-second backoff window: while it is open, a name this
-process has not confirmed is refused at once with `SERVFAIL` and no call, and only
-confirmed names keep being served — from the client's cache, and a cache hit needs no
-server. An answer that did come from the server closes the window and restarts the
-count; a read of the client's cache counts as neither, because it says nothing about
-whether the server is up. A window whose count has restarted is closed, so a failure
-counted beside a confirmed answer cannot keep it open, and a clock stepping behind the
-window's start lifts it instead of extending it by the whole jump. One failure after a
-window expires reopens it — the outage is already proven. The bound, the threshold and
-the window are constants in `crates/doggy-dns-nacos/src/watcher.rs`
-(`NACOS_LOOKUP_TIMEOUT`, `NACOS_FAILURE_THRESHOLD`, `NACOS_FAILURE_BACKOFF`), not
+Every call that reaches Nacos is bounded to three seconds; the cache read taken
+*instead of* a call is bounded to 50 milliseconds, so a query that tries the cache and
+then the server waits 3.05 seconds at most. A call that fails or exceeds its bound
+answers `SERVFAIL` rather than `NXDOMAIN`, so the client retries instead of caching
+"this name does not exist" past the end of the outage. Three such failures in a row open
+a 30-second backoff window: while it is open, a name the client's cache does not hold is
+refused with `SERVFAIL` after that one 50-millisecond read and no wait on the registry,
+and any name the cache holds keeps being served from it. An answer
+that did come from the server closes the window, restarts the count, and is the reply
+that makes later queries ask the server first. A read of the client's cache counts as
+neither, because it says nothing about whether the server is up. A window whose count
+has restarted is closed, so a failure counted beside a confirmed answer cannot keep it
+open, and a clock stepping behind the window's start lifts it instead of extending it by
+the whole jump. One failure after a window expires reopens it — the outage is already
+proven. The bounds, the threshold and the window are constants in
+`crates/doggy-dns-nacos/src/watcher.rs` (`NACOS_LOOKUP_TIMEOUT`,
+`NACOS_CACHE_READ_TIMEOUT`, `NACOS_FAILURE_THRESHOLD`, `NACOS_FAILURE_BACKOFF`), not
 config knobs.
 
-One limit follows from the SDK rather than this design: a confirmed name whose cache
-entry the client has since dropped is re-fetched inline on the `subscribe = true`
-path, so it waits out the three-second bound even inside the window. A registry that
-hangs therefore answers `SERVFAIL` and counts as the failure it is; a registry that
-answers with an error is swallowed by the SDK into an empty list, and the name reads
-`NXDOMAIN` uncounted.
+One limit follows from the SDK rather than this design: the naming cache is written
+only by a push or the periodic refresh, so a name subscribed moments ago can still miss
+and the SDK re-fetches it inline on the `subscribe = true` path, where it waits out the
+three-second bound even inside the window. A registry that hangs therefore answers
+`SERVFAIL` and counts as the failure it is; a registry that answers with an error is
+swallowed by the SDK into an empty list, and the name reads `NXDOMAIN` uncounted.
 
 Empty-push protection is disabled, so a service losing its last instance empties the
 client's cache instead of continuing to answer the old address.
