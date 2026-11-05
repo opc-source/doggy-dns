@@ -1,4 +1,4 @@
-use crate::authority::ServiceCatalog;
+use crate::authority::{CatalogAnswer, ServiceCatalog};
 use anyhow::anyhow;
 use dashmap::DashSet;
 use nacos_sdk::api::naming::{
@@ -9,6 +9,7 @@ use regex::Regex;
 use std::net::IpAddr;
 use std::str::FromStr;
 use std::sync::Arc;
+use std::time::Duration;
 
 /// The built-in subscription rule: a bare application name — ASCII letters,
 /// digits, `_`, `-`, and no dots.
@@ -18,6 +19,13 @@ use std::sync::Arc;
 /// quietly widen the built-in default to names an operator did not ask for.
 /// Configured patterns keep that same Unicode behaviour, deliberately.
 const DEFAULT_SERVICE_PATTERN: &str = "[A-Za-z0-9_-]+";
+
+/// How long one query may wait on Nacos before it answers SERVFAIL.
+///
+/// The SDK retries a dead connection in the background and leaves a request
+/// pending until the connection returns, which is longer than any DNS client
+/// waits. The bound turns that wait into an answer the client can act on.
+const NACOS_LOOKUP_TIMEOUT: Duration = Duration::from_secs(3);
 
 /// Which Nacos services this process answers for.
 ///
@@ -167,20 +175,39 @@ impl ServiceCatalog for NacosServiceWatcher {
     /// The client cache's answer for `service`, subscribing the name first if
     /// this process never has.
     ///
-    /// Bounded two ways: [`ServiceFilter`] has to select the name, and the
+    /// Bounded three ways: [`ServiceFilter`] has to select the name, the
     /// subscribed set makes the first query for a name the only one that spends a
-    /// `subscribe` call. The group and namespace are not checked here: this client
-    /// only ever asks the one pair it was built with, and the authority has
-    /// already matched the name's labels against it.
-    async fn instances(&self, service: &str) -> Option<Vec<CachedInstance>> {
+    /// `subscribe` call, and the wait on Nacos is capped at
+    /// [`NACOS_LOOKUP_TIMEOUT`]. The group and namespace are not checked here:
+    /// this client only ever asks the one pair it was built with, and the
+    /// authority has already matched the name's labels against it.
+    async fn instances(&self, service: &str) -> CatalogAnswer {
         if !self.filter.is_selected(service) {
             tracing::debug!(
                 "nacos service '{}' left unsubscribed: service_pattern did not select it",
                 service
             );
-            return None;
+            return CatalogAnswer::Unknown;
         }
 
+        match tokio::time::timeout(NACOS_LOOKUP_TIMEOUT, self.answer_from_nacos(service)).await {
+            Ok(answer) => answer,
+            Err(_) => {
+                tracing::warn!(
+                    "nacos did not answer for service '{}' within {:?}; answering SERVFAIL",
+                    service,
+                    NACOS_LOOKUP_TIMEOUT
+                );
+                CatalogAnswer::Unavailable
+            }
+        }
+    }
+}
+
+impl NacosServiceWatcher {
+    /// The part of [`ServiceCatalog::instances`] that may reach the network:
+    /// subscribe the name once, then read the client cache.
+    async fn answer_from_nacos(&self, service: &str) -> CatalogAnswer {
         // `contains` reads the `&str` this already has. Going straight to
         // `insert` would allocate a `String` on every query just to find out the
         // name is already subscribed - which, in steady state, it always is. If
@@ -204,7 +231,7 @@ impl ServiceCatalog for NacosServiceWatcher {
                     service,
                     e
                 );
-                return None;
+                return CatalogAnswer::Unavailable;
             }
             tracing::info!("subscribed to nacos service: {}", service);
         }
@@ -228,7 +255,7 @@ impl ServiceCatalog for NacosServiceWatcher {
                     service,
                     e
                 );
-                return None;
+                return CatalogAnswer::Unavailable;
             }
         };
 
@@ -238,8 +265,8 @@ impl ServiceCatalog for NacosServiceWatcher {
             // serve; the client cache carries no presence flag, so both answer
             // authoritative NXDOMAIN rather than NODATA.
             tracing::debug!("nacos has no usable instance of '{}'", service);
-            return None;
+            return CatalogAnswer::Unknown;
         }
-        Some(usable)
+        CatalogAnswer::Instances(usable)
     }
 }

@@ -12,15 +12,26 @@ use hickory_server::zone_handler::{
 use std::future::Future;
 use std::sync::Arc;
 
+/// What a [`ServiceCatalog`] knows about one service.
+#[derive(Debug, Clone)]
+pub enum CatalogAnswer {
+    /// The service exists. An empty list is a service with no usable instance
+    /// right now, which the authority answers as NODATA.
+    Instances(Vec<CachedInstance>),
+    /// The catalog does not know the name (authoritative NXDOMAIN).
+    Unknown,
+    /// The catalog could not answer because its backend failed. This must not
+    /// be reported as a negative answer: a client that caches NXDOMAIN would
+    /// keep "this name does not exist" for the whole TTL, long after the
+    /// outage ended.
+    Unavailable,
+}
+
 /// Where the authority reads a service's instances from on every query.
 ///
 /// The authority keeps no copy of its own: whatever it answers is what the
 /// catalog holds at that instant, so a deletion the catalog has absorbed can
 /// never be served from a stale second copy.
-///
-/// `None` means the catalog does not know the service (authoritative NXDOMAIN).
-/// `Some` means it does, and an empty list is a service with no usable instance
-/// right now (NODATA), not an unknown name.
 ///
 /// A service name, not a key: one catalog belongs to one Nacos group and
 /// namespace, which [`NacosAuthority`] checks off the DNS name before it gets
@@ -29,7 +40,7 @@ use std::sync::Arc;
 /// Generic rather than `dyn`: this call sits on the query path, so the concrete
 /// catalog lets it inline without a vtable hop or a boxed future.
 pub trait ServiceCatalog: Send + Sync {
-    fn instances(&self, service: &str) -> impl Future<Output = Option<Vec<CachedInstance>>> + Send;
+    fn instances(&self, service: &str) -> impl Future<Output = CatalogAnswer> + Send;
 }
 
 pub struct NacosAuthority<C: ServiceCatalog + 'static> {
@@ -97,6 +108,13 @@ impl<C: ServiceCatalog + 'static> NacosAuthority<C> {
 /// must never fall through to a later plugin.
 fn nxdomain() -> LookupControlFlow<AuthLookup> {
     LookupControlFlow::Continue(Err(LookupError::ResponseCode(ResponseCode::NXDomain)))
+}
+
+/// The backend behind the catalog failed, so the name's existence is unknown.
+/// SERVFAIL keeps the failure transient for the client instead of turning it
+/// into a negative answer that outlives the outage.
+fn servfail() -> LookupControlFlow<AuthLookup> {
+    LookupControlFlow::Continue(Err(LookupError::ResponseCode(ResponseCode::ServFail)))
 }
 
 /// SOA for the zone apex.
@@ -167,8 +185,9 @@ impl<C: ServiceCatalog + 'static> ZoneHandler for NacosAuthority<C> {
         // local copy this is the only way to tell an existing service (NODATA for
         // a type it does not serve) from an unknown one (NXDOMAIN).
         match self.catalog.instances(&service).await {
-            Some(instances) => self.answer(name, &instances, rtype),
-            None => nxdomain(),
+            CatalogAnswer::Instances(instances) => self.answer(name, &instances, rtype),
+            CatalogAnswer::Unknown => nxdomain(),
+            CatalogAnswer::Unavailable => servfail(),
         }
     }
 

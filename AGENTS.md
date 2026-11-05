@@ -91,7 +91,9 @@ way to ask, and keeps every listener it is handed), then reads
 cache when it has an entry and asks the server otherwise, so the answer is
 always the client's current view: a last-instance removal push empties that
 cache and the next query answers `NXDOMAIN`. A subscribe call that fails is
-forgotten so the next query retries it.
+forgotten so the next query retries it. A read that fails, or one that takes
+longer than the watcher's three-second bound, answers `SERVFAIL` instead of
+`NXDOMAIN`, so a Nacos outage is not negative-cached downstream.
 
 `ServiceFilter` gates names before any Nacos call (`service_pattern`, a regex
 wrapped in whole-name anchors, default `[A-Za-z0-9_-]+` = bare application

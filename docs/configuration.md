@@ -211,9 +211,12 @@ query.
 
 `naming_load_cache_at_start` makes the client load its naming cache from disk, so
 a restart answers from the previous run's data and the process starts while Nacos
-is unreachable; a first-ever start with Nacos down answers `NXDOMAIN`. Empty-push
-protection is disabled, so a service losing its last instance empties the client's
-cache instead of continuing to answer the old address.
+is unreachable; a first-ever start with Nacos down answers `SERVFAIL`. The wait
+on Nacos is bounded to three seconds; a read that fails or exceeds that bound
+answers `SERVFAIL` rather than `NXDOMAIN`, so the client retries instead of
+caching "this name does not exist" past the end of the outage. Empty-push
+protection is disabled, so a service losing its last instance empties the
+client's cache instead of continuing to answer the old address.
 
 A service Nacos knows but with no healthy/enabled instance also answers
 `NXDOMAIN`: `get_all_instances` returns an empty list for both that case and an

@@ -5,7 +5,7 @@
 //! without `cfg(test)`, and a private module's trait impls are still visible
 //! crate-wide, so nothing here becomes part of the documented API.
 
-use crate::authority::ServiceCatalog;
+use crate::authority::{CatalogAnswer, ServiceCatalog};
 use crate::watcher::CachedInstance;
 use dashmap::DashMap;
 
@@ -14,7 +14,10 @@ use dashmap::DashMap;
 /// the watcher. The borrowed `&str` a query yields looks the name up without
 /// building anything.
 impl ServiceCatalog for DashMap<String, Vec<CachedInstance>> {
-    async fn instances(&self, service: &str) -> Option<Vec<CachedInstance>> {
-        self.get(service).map(|entry| entry.value().clone())
+    async fn instances(&self, service: &str) -> CatalogAnswer {
+        match self.get(service) {
+            Some(entry) => CatalogAnswer::Instances(entry.value().clone()),
+            None => CatalogAnswer::Unknown,
+        }
     }
 }

@@ -1,7 +1,7 @@
 #![allow(clippy::disallowed_methods)]
 
 use dashmap::DashMap;
-use doggy_dns_nacos::authority::{NacosAuthority, ServiceCatalog};
+use doggy_dns_nacos::authority::{CatalogAnswer, NacosAuthority, ServiceCatalog};
 use doggy_dns_nacos::watcher::CachedInstance;
 use doggy_dns_plugin::authority_chain::AuthorityChain;
 use hickory_proto::op::ResponseCode;
@@ -375,12 +375,12 @@ async fn apex_soa_matches_the_record_a_negative_answer_carries() {
 /// and it records the names so the test can prove when the catalog is and is not
 /// consulted.
 struct FakeCatalog {
-    answer: Option<Vec<CachedInstance>>,
+    answer: CatalogAnswer,
     asked: Arc<Mutex<Vec<String>>>,
 }
 
 impl FakeCatalog {
-    fn new(answer: Option<Vec<CachedInstance>>) -> Arc<Self> {
+    fn new(answer: CatalogAnswer) -> Arc<Self> {
         Arc::new(Self {
             answer,
             asked: Arc::new(Mutex::new(Vec::new())),
@@ -393,7 +393,7 @@ impl FakeCatalog {
 }
 
 impl ServiceCatalog for FakeCatalog {
-    async fn instances(&self, service: &str) -> Option<Vec<CachedInstance>> {
+    async fn instances(&self, service: &str) -> CatalogAnswer {
         self.asked
             .lock()
             .expect("no poisoned mutex")
@@ -413,7 +413,18 @@ fn one_instance(ip: &str) -> Vec<CachedInstance> {
 fn catalog_authority(
     answer: Option<Vec<CachedInstance>>,
 ) -> (NacosAuthority<FakeCatalog>, Arc<FakeCatalog>) {
+    let answer = match answer {
+        Some(instances) => CatalogAnswer::Instances(instances),
+        None => CatalogAnswer::Unknown,
+    };
     let catalog = FakeCatalog::new(answer);
+    let authority =
+        NacosAuthority::new(catalog.clone(), "nacos.local", "DEFAULT_GROUP", "public", 6);
+    (authority, catalog)
+}
+
+fn unavailable_catalog_authority() -> (NacosAuthority<FakeCatalog>, Arc<FakeCatalog>) {
+    let catalog = FakeCatalog::new(CatalogAnswer::Unavailable);
     let authority =
         NacosAuthority::new(catalog.clone(), "nacos.local", "DEFAULT_GROUP", "public", 6);
     (authority, catalog)
@@ -558,6 +569,32 @@ async fn a_catalog_without_the_service_answers_nxdomain() {
             LookupControlFlow::Continue(Err(LookupError::ResponseCode(ResponseCode::NXDomain)))
         ),
         "a name the catalog does not know must stay authoritative NXDOMAIN, got {result}"
+    );
+    assert_eq!(catalog.asked().len(), 1);
+}
+
+/// A backend failure is not a negative answer: SERVFAIL tells the client to try
+/// again, where NXDOMAIN would be cached as "this name does not exist" for the
+/// whole TTL and outlive a short Nacos outage.
+#[tokio::test]
+async fn a_catalog_backend_failure_answers_servfail() {
+    let (authority, catalog) = unavailable_catalog_authority();
+
+    let result = authority
+        .lookup(
+            &qname("during-outage.default_group.public.nacos.local."),
+            RecordType::A,
+            None,
+            LookupOptions::default(),
+        )
+        .await;
+
+    assert!(
+        matches!(
+            result,
+            LookupControlFlow::Continue(Err(LookupError::ResponseCode(ResponseCode::ServFail)))
+        ),
+        "a catalog that cannot answer must not turn an outage into NXDOMAIN, got {result}"
     );
     assert_eq!(catalog.asked().len(), 1);
 }

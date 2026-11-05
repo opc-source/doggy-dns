@@ -46,6 +46,11 @@ const RECORD_TTL: u32 = 6;
 const DEADLINE: Duration = Duration::from_secs(60);
 const POLL: Duration = Duration::from_millis(300);
 
+/// Longer than the watcher's three-second Nacos bound: a SERVFAIL for an
+/// unreachable backend arrives just after that bound, so the client must not
+/// give up at the same instant.
+const REPLY_TIMEOUT: Duration = Duration::from_secs(10);
+
 fn nacos_addr() -> String {
     std::env::var("DOGGY_NACOS_ADDR").unwrap_or_else(|_| "127.0.0.1:8848".to_string())
 }
@@ -144,9 +149,13 @@ impl DoggyDns {
     }
 
     async fn start(port: u16) -> Self {
+        Self::start_with_addr(port, &nacos_addr()).await
+    }
+
+    async fn start_with_addr(port: u16, server_addr: &str) -> Self {
         let mut child = Command::new(env!("CARGO_BIN_EXE_doggy-dns"))
             .arg(Self::case_config(port))
-            .env("DOGGY_NACOS_ADDR", nacos_addr())
+            .env("DOGGY_NACOS_ADDR", server_addr)
             // Leave the output attached: `--nocapture` shows it in CI, and the
             // harness captures and replays it for a failing test.
             .kill_on_drop(true)
@@ -180,7 +189,7 @@ impl DoggyDns {
         socket.send(&bytes).await.ok()?;
 
         let mut buffer = [0u8; 2048];
-        let reply = tokio::time::timeout(Duration::from_secs(3), socket.recv(&mut buffer))
+        let reply = tokio::time::timeout(REPLY_TIMEOUT, socket.recv(&mut buffer))
             .await
             .ok()?
             .ok()?;
@@ -398,4 +407,28 @@ async fn e2e_deregistered_last_instance_stops_resolving() {
     server
         .await_code(&qname, RecordType::A, ResponseCode::NXDomain)
         .await;
+}
+
+/// An unreachable Nacos must answer SERVFAIL. The SDK retries a dead connection
+/// in the background and leaves a request pending until it returns, so without
+/// the watcher's bound this query would never answer at all; it must also not be
+/// NXDOMAIN, which a client would negative-cache past the end of the outage.
+#[tokio::test]
+#[ignore]
+async fn e2e_unreachable_nacos_answers_servfail() {
+    // Nothing listens on port 1; the SDK dials the gRPC port (address + 1000).
+    let server = DoggyDns::start_with_addr(15417, "127.0.0.1:1").await;
+
+    let message = server
+        .await_code(
+            &service_qname("cold-outage"),
+            RecordType::A,
+            ResponseCode::ServFail,
+        )
+        .await;
+
+    assert!(
+        message.answers.is_empty(),
+        "SERVFAIL must carry no answer records"
+    );
 }
