@@ -1,5 +1,6 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::{
     Router,
@@ -41,7 +42,8 @@ impl ControlPlaneHandle {
 /// JSON-RPC service at `/mcp` (guarded by the Bearer token when set),
 /// while `healthz` and `readyz` are plain GET probes that never require
 /// auth. Returns a handle that can be used to shut the listener down.
-/// If the port is already in use, returns an error.
+/// If the port is already in use, returns an error — see [`start_retrying`],
+/// which the binary uses to wait for the port instead of giving up on it.
 pub async fn start(
     state: Arc<McpState>,
     live: Arc<LiveState>,
@@ -52,19 +54,93 @@ pub async fn start(
     let listener = TcpListener::bind(addr).await?;
     let addr = listener.local_addr()?;
 
-    let router = build_router(state, &live, &cfg, cancel.clone());
-
-    let cancel_for_shutdown = cancel.clone();
+    let serve_cancel = cancel.clone();
     let join = tokio::spawn(async move {
-        axum::serve(listener, router)
-            .with_graceful_shutdown(async move {
-                cancel_for_shutdown.cancelled().await;
-            })
-            .await
-            .ok();
+        serve(listener, state, live, &cfg, serve_cancel).await;
     });
 
     Ok(ControlPlaneHandle { addr, cancel, join })
+}
+
+/// How long a successor waits before it tries the control port again. The
+/// predecessor it is waiting behind drains in `shutdown_timeout` seconds, so
+/// one or two attempts are normally enough.
+pub const BIND_RETRY_INTERVAL: Duration = Duration::from_secs(10);
+
+/// Start the control plane and hold the port until it is free.
+///
+/// A restart overlaps its predecessor on the DNS port because every DNS socket
+/// binds with `SO_REUSEPORT`. The control port is deliberately not armed the
+/// same way: two processes serving `/readyz` for one node would report two
+/// live instances to the console, so the successor waits for the predecessor to
+/// release the address and re-attempts the bind every [`BIND_RETRY_INTERVAL`].
+///
+/// This returns before the port is bound, which is why the address it carries is
+/// the configured one; the real bound address — differing when `port = 0` — is
+/// logged by the retrying task itself. Cancelling the handle stops the waiting,
+/// and `retry_in` is a parameter rather than [`BIND_RETRY_INTERVAL`] so a test
+/// can watch a retry land without waiting out ten seconds.
+///
+/// `dns_overlap` is the caller's `DNS_PORT_OVERLAP_SUPPORTED`, reported with
+/// every failed attempt: on a platform where the DNS sockets do overlap, a held
+/// control port right after a restart is the expected race, and anywhere else it
+/// means some other process owns the address. It is passed in rather than read
+/// from `doggy-dns-core` because this crate deliberately does not depend on it.
+pub fn start_retrying(
+    state: Arc<McpState>,
+    live: Arc<LiveState>,
+    cfg: ControlConfig,
+    retry_in: Duration,
+    dns_overlap: bool,
+) -> anyhow::Result<ControlPlaneHandle> {
+    let cancel = CancellationToken::new();
+    let addr = doggy_dns_basic::net::socket_addr(&cfg.listen_addr, cfg.port)?;
+
+    let wait_cancel = cancel.clone();
+    let join = tokio::spawn(async move {
+        // Warned on every attempt, not just the first: the line is the record
+        // that the control plane is still dark, and it stops appearing the
+        // moment the bind lands — so its absence says more than one line would.
+        let listener = loop {
+            match TcpListener::bind(addr).await {
+                Ok(listener) => break listener,
+                Err(error) => {
+                    tracing::warn!(
+                        %error,
+                        addr = %addr,
+                        dns_overlap,
+                        "control port still held; retrying the bind"
+                    );
+                    tokio::select! {
+                        _ = wait_cancel.cancelled() => return,
+                        _ = tokio::time::sleep(retry_in) => {}
+                    }
+                }
+            }
+        };
+
+        tracing::info!(addr = %listener.local_addr().unwrap_or(addr), "control plane listening");
+        serve(listener, state, live, &cfg, wait_cancel).await;
+    });
+
+    Ok(ControlPlaneHandle { addr, cancel, join })
+}
+
+/// Serve the router over an already bound listener until `cancel` fires.
+async fn serve(
+    listener: TcpListener,
+    state: Arc<McpState>,
+    live: Arc<LiveState>,
+    cfg: &ControlConfig,
+    cancel: CancellationToken,
+) {
+    let router = build_router(state, &live, cfg, cancel.clone());
+    axum::serve(listener, router)
+        .with_graceful_shutdown(async move {
+            cancel.cancelled().await;
+        })
+        .await
+        .ok();
 }
 
 /// Build the axum router for the control plane, exposing only the

@@ -7,7 +7,6 @@ use hickory_server::server::RequestHandler;
 use std::fs;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::net::{TcpListener, UdpSocket};
 
 pub async fn build_server<H: RequestHandler>(
     config: &DoggyDnsConfig,
@@ -20,30 +19,25 @@ pub async fn build_server<H: RequestHandler>(
 
     let udp_count = config.server.reuseport_listen_num as usize;
 
-    // UDP — `reuseport_listen_num` sockets; when > 1 the kernel fans out
-    // incoming datagrams across them via SO_REUSEPORT (Linux only).
+    // UDP — `reuseport_listen_num` sockets, every one of them armed with
+    // `SO_REUSEPORT`. The option is what lets a restart overlap its predecessor
+    // on this address; the count only decides how many receive paths the kernel
+    // spreads incoming datagrams across.
     for _ in 0..udp_count {
-        let udp_socket = if udp_count > 1 {
-            reuseport::bind_reuseport_udp(addr)
-                .context("failed to bind UDP socket with SO_REUSEPORT")?
-        } else {
-            UdpSocket::bind(addr)
-                .await
-                .context("failed to bind UDP socket")?
-        };
+        let udp_socket = reuseport::bind_udp(addr).await?;
         server.register_socket(udp_socket);
     }
     tracing::info!(
         count = udp_count,
-        reuseport = udp_count > 1,
+        reuseport = reuseport::DNS_PORT_OVERLAP_SUPPORTED,
         "listening on UDP {}",
         addr
     );
 
-    // TCP — always a single listener.
-    let tcp_listener = TcpListener::bind(addr)
-        .await
-        .context("failed to bind TCP listener")?;
+    // TCP — one listener, armed the same way: an overlap needs every socket on
+    // the address in the group, and a lone plain listener would hold the port
+    // against its successor just as firmly as against any other process.
+    let tcp_listener = reuseport::bind_tcp(addr).await?;
     let tcp_timeout = Duration::from_secs(config.server.tcp_timeout);
     server.register_listener(tcp_listener, tcp_timeout, 32);
     tracing::info!("listening on TCP {}", addr);
@@ -88,7 +82,7 @@ async fn register_tls<H: RequestHandler>(
         .with_single_cert(certs, key)
         .context("failed to build TLS server config")?;
 
-    let listener = TcpListener::bind(tls_addr).await?;
+    let listener = reuseport::bind_tcp(tls_addr).await?;
     let timeout = Duration::from_secs(config.server.tcp_timeout);
 
     server.register_tls_listener_with_tls_config(listener, timeout, Arc::new(tls_server_config))?;
@@ -120,7 +114,7 @@ async fn register_https<H: RequestHandler>(
         .with_single_cert(certs, key)?;
     tls_config.alpn_protocols = vec![b"h2".to_vec()];
 
-    let listener = TcpListener::bind(https_addr).await?;
+    let listener = reuseport::bind_tcp(https_addr).await?;
     let timeout = Duration::from_secs(config.server.tcp_timeout);
 
     server.register_https_listener_with_tls_config(
