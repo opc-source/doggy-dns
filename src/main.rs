@@ -280,17 +280,10 @@ async fn build_authority_chain(
                 let ns = plugin.namespace.as_deref().unwrap_or("public");
                 let grp = plugin.group.as_deref().unwrap_or("DEFAULT_GROUP");
                 let zone = plugin.dns_zone.as_deref().unwrap_or("nacos.local");
+                let filter = ServiceFilter::from_config(plugin.service_pattern.as_deref())
+                    .context(format!("plugins[{i}].service_pattern"))?;
 
-                let watcher = Arc::new(
-                    NacosServiceWatcher::new(
-                        addr,
-                        ns,
-                        grp,
-                        ServiceFilter::from_config(plugin.service_pattern.as_deref())
-                            .context(format!("plugins[{i}].service_pattern"))?,
-                    )
-                    .await?,
-                );
+                let watcher = Arc::new(NacosServiceWatcher::new(addr, ns, grp, filter).await?);
 
                 let name = format!("nacos[{}]", zone);
                 let authority = NacosAuthority::new(watcher.clone(), zone, grp, ns, plugin.ttl);
