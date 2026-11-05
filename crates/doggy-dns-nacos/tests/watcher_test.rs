@@ -280,3 +280,51 @@ fn a_success_while_the_window_is_open_lifts_it() {
         "the streak restarted too, so the next failure is only the first"
     );
 }
+
+/// The window is measured in wall-clock seconds, so the clock can step
+/// backwards under it (an NTP correction). The difference has to be read as
+/// "not open" rather than saturating to zero: a negative elapsed time is a
+/// window that has not started yet, and holding it open for the whole jump
+/// would refuse new names for minutes on a clock skew, not on an outage.
+#[test]
+fn a_backwards_clock_step_lifts_the_window() {
+    let backoff = FailureBackoff::new();
+    let opened_at = 1_700_000_000;
+
+    backoff.record_failure(opened_at);
+    backoff.record_failure(opened_at);
+    assert!(backoff.record_failure(opened_at));
+    assert!(backoff.is_open(opened_at), "the window is open");
+
+    assert!(
+        !backoff.is_open(opened_at - 1),
+        "a clock that stepped behind the window's start must not hold it open"
+    );
+    assert!(
+        !backoff.is_open(opened_at - 1_000_000),
+        "a large step back must lift the window, not extend it by the whole jump"
+    );
+}
+
+/// The window ends at its own instant's far edge, and a clock behind the start
+/// is not inside it: only a non-negative elapsed time counts.
+#[test]
+fn the_window_covers_exactly_its_backoff_from_its_start() {
+    let backoff = FailureBackoff::new();
+    let opened_at = 1_700_000_000;
+    let backoff_secs = i64::try_from(NACOS_FAILURE_BACKOFF.as_secs()).expect("backoff in seconds");
+
+    backoff.record_failure(opened_at);
+    backoff.record_failure(opened_at);
+    assert!(backoff.record_failure(opened_at));
+
+    assert!(backoff.is_open(opened_at), "the first second counts");
+    assert!(
+        backoff.is_open(opened_at + backoff_secs - 1),
+        "the last second counts"
+    );
+    assert!(
+        !backoff.is_open(opened_at + backoff_secs),
+        "the window lifts at its end"
+    );
+}

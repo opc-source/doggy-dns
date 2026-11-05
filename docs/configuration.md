@@ -217,23 +217,28 @@ subscribed names keep answering while Nacos is unreachable and the process start
 even when the server is down. It is not a way to answer a name's first query: that
 still goes to the server.
 
-The wait on Nacos is bounded to three seconds; a call that fails or exceeds that
-bound answers `SERVFAIL` rather than `NXDOMAIN`, so the client retries instead of
-caching "this name does not exist" past the end of the outage. Three such failures
-in a row open a 30-second backoff window: while it is open, a name this process has
-not confirmed is refused at once with `SERVFAIL` and no call, and only confirmed
-names keep being served — from the client's cache, which needs no server. An answer
-that did come from the server closes the window and restarts the count; a read of
-the client's cache counts as neither, because it says nothing about whether the
-server is up. One failure after a window expires reopens it — the outage is already
-proven. The bound, the threshold and the window are constants in
-`crates/doggy-dns-nacos/src/watcher.rs` (`NACOS_LOOKUP_TIMEOUT`,
-`NACOS_FAILURE_THRESHOLD`, `NACOS_FAILURE_BACKOFF`), not config knobs.
+The wait on Nacos is bounded to three seconds, on both paths; a call that fails or
+exceeds that bound answers `SERVFAIL` rather than `NXDOMAIN`, so the client retries
+instead of caching "this name does not exist" past the end of the outage. Three such
+failures in a row open a 30-second backoff window: while it is open, a name this
+process has not confirmed is refused at once with `SERVFAIL` and no call, and only
+confirmed names keep being served — from the client's cache, and a cache hit needs no
+server. An answer that did come from the server closes the window and restarts the
+count; a read of the client's cache counts as neither, because it says nothing about
+whether the server is up. A window whose count has restarted is closed, so a failure
+counted beside a confirmed answer cannot keep it open, and a clock stepping behind the
+window's start lifts it instead of extending it by the whole jump. One failure after a
+window expires reopens it — the outage is already proven. The bound, the threshold and
+the window are constants in `crates/doggy-dns-nacos/src/watcher.rs`
+(`NACOS_LOOKUP_TIMEOUT`, `NACOS_FAILURE_THRESHOLD`, `NACOS_FAILURE_BACKOFF`), not
+config knobs.
 
 One limit follows from the SDK rather than this design: a confirmed name whose cache
-entry the client has since dropped is re-fetched on the `subscribe = true` path,
-which reports no failure, so during an outage that name answers `NXDOMAIN` rather
-than `SERVFAIL`.
+entry the client has since dropped is re-fetched inline on the `subscribe = true`
+path, so it waits out the three-second bound even inside the window. A registry that
+hangs therefore answers `SERVFAIL` and counts as the failure it is; a registry that
+answers with an error is swallowed by the SDK into an empty list, and the name reads
+`NXDOMAIN` uncounted.
 
 Empty-push protection is disabled, so a service losing its last instance empties the
 client's cache instead of continuing to answer the old address.

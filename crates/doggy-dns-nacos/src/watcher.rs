@@ -101,10 +101,22 @@ impl FailureBackoff {
     ///
     /// The window holds for its whole backoff and lifts at its end, which is
     /// when the next unconfirmed name is allowed to call Nacos again.
+    ///
+    /// The streak is part of the test, not only a bookkeeping detail: a failure
+    /// can be counted while a concurrent confirmed answer already lifted the
+    /// window, and the counter is what says whether that answer came last. A clock
+    /// that steps behind the window's start (an NTP correction) gives a negative
+    /// elapsed time, which is read as "not open" rather than saturating to zero:
+    /// holding a refusing window open past its deadline on a clock skew costs more
+    /// than the one failing call that re-stamps it.
     pub fn is_open(&self, now: i64) -> bool {
         let opened_at = self.opened_at.load(Ordering::Relaxed);
-        opened_at != WINDOW_CLOSED
-            && now.saturating_sub(opened_at) < NACOS_FAILURE_BACKOFF.as_secs() as i64
+        let failures = self.failures.load(Ordering::Relaxed);
+        if opened_at == WINDOW_CLOSED || failures < NACOS_FAILURE_THRESHOLD {
+            return false;
+        }
+        let elapsed = now.saturating_sub(opened_at);
+        elapsed >= 0 && elapsed < NACOS_FAILURE_BACKOFF.as_secs() as i64
     }
 }
 
@@ -272,9 +284,9 @@ impl ServiceCatalog for NacosServiceWatcher {
     /// process has never subscribed the name.
     ///
     /// Bounded four ways: [`ServiceFilter`] has to select the name, the subscribed
-    /// set makes the first query for a name the only one that spends a `subscribe`
-    /// call, the wait on Nacos is capped at [`NACOS_LOOKUP_TIMEOUT`], and while
-    /// the [`FailureBackoff`] window is open an unconfirmed name is refused
+    /// ledger keeps a `subscribe` call off the steady-state path, the wait on Nacos
+    /// is capped at [`NACOS_LOOKUP_TIMEOUT`], and while the [`FailureBackoff`]
+    /// window is open an unconfirmed name is refused
     /// outright. The group and namespace are not checked here: this client only
     /// ever asks the one pair it was built with, and the authority has already
     /// matched the name's labels against it.
@@ -338,9 +350,9 @@ impl NacosServiceWatcher {
         // any window are measuring.
         self.backoff.record_success();
 
-        if !self.subscribe_name(service).await {
-            return CatalogAnswer::Unavailable;
-        }
+        // The answer is the server's own list, so it stands whether or not the
+        // subscribe below armed.
+        self.subscribe_name(service).await;
 
         Self::answer_of(service, &confirmed)
     }
@@ -388,41 +400,50 @@ impl NacosServiceWatcher {
         Self::answer_of(service, &instances)
     }
 
-    /// Put `service` in the ledger and subscribe it, returning false when the
-    /// name has to be asked again.
-    async fn subscribe_name(&self, service: &str) -> bool {
+    /// Subscribe `service`, then put it in the ledger.
+    ///
+    /// The order is the contract: a ledgered name is one the next query reads
+    /// straight out of the client's cache without asking the server, so publishing
+    /// the entry before the await would let a concurrent first query take that
+    /// shortcut for a name the client was not yet able to answer from. A cold race
+    /// can now send two subscribes; the SDK replaces an identical listener rather
+    /// than adding it twice, and neither query answers before its own server
+    /// confirmation.
+    async fn subscribe_name(&self, service: &str) {
         // `contains` reads the `&str` this already has. Going straight to
         // `insert` would allocate a `String` on every query just to find out the
-        // name is already subscribed - which, in steady state, it always is. If
-        // two cold queries race through the gate, `insert` still returns `true`
-        // for exactly one of them, so only one subscribe is sent.
-        if !self.subscribed.contains(service) && self.subscribed.insert(service.to_string()) {
-            let subscribed = self
-                .naming_service
-                .subscribe(
-                    service.to_string(),
-                    Some(self.group.clone()),
-                    vec![],
-                    Arc::clone(&self.listener),
-                )
-                .await;
-            if let Err(e) = subscribed {
-                // Defensive. nacos-sdk 0.8.3's `subscribe` registers the listener
-                // and its own retry task, then swallows the request error and
-                // returns `Ok(())`, so nothing reaches this arm live. If a version
-                // does hand a failure back, the ledger entry goes with it: keeping
-                // it would mean never asking again.
-                self.subscribed.remove(service);
+        // name is already subscribed - which, in steady state, it always is.
+        if self.subscribed.contains(service) {
+            return;
+        }
+
+        let subscribed = self
+            .naming_service
+            .subscribe(
+                service.to_string(),
+                Some(self.group.clone()),
+                vec![],
+                Arc::clone(&self.listener),
+            )
+            .await;
+        match subscribed {
+            Ok(()) => {
+                self.subscribed.insert(service.to_string());
+                tracing::info!("asked the nacos client to subscribe service '{}'", service);
+            }
+            // Defensive. nacos-sdk 0.8.3's `subscribe` registers the listener and
+            // its own retry task, then swallows the request error and returns
+            // `Ok(())`, so nothing reaches this arm live. If a version does hand a
+            // failure back, the name stays out of the ledger and the next query
+            // asks the server again.
+            Err(e) => {
                 tracing::warn!(
                     "nacos subscribe of service '{}' failed: {}; the next query asks again",
                     service,
                     e
                 );
-                return false;
             }
-            tracing::info!("asked the nacos client to subscribe service '{}'", service);
         }
-        true
     }
 
     /// What a service list implies.

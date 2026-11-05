@@ -161,7 +161,7 @@ Points worth knowing before reading a failure:
 | `crates/doggy-dns-nacos/tests/alloc_guard_test.rs` | 1 | Allocation budget for `NacosAuthority::lookup`: 5 on a hit, 1 on an in-zone miss |
 | `crates/doggy-dns-nacos/tests/authority_test.rs` | 27 | Nacos authority: catalog hits and misses, dotted names, NOERROR/NXDOMAIN/NODATA, family filtering, zone boundaries, group and namespace labels, apex SOA, which queries consult the catalog |
 | `crates/doggy-dns-nacos/tests/mapping_test.rs` | 13 | Name-to-service-name mapping (zone boundaries, group and namespace labels, escaped labels), family-filtered record creation |
-| `crates/doggy-dns-nacos/tests/watcher_test.rs` | 14 | Service filter (defaults, anchoring, case, Unicode, invalid pattern), usable-instance parsing, failure-backoff window (opens, restarts, expires, reopens, lifts on success) |
+| `crates/doggy-dns-nacos/tests/watcher_test.rs` | 16 | Service filter (defaults, anchoring, case, Unicode, invalid pattern), usable-instance parsing, failure-backoff window (opens, restarts, expires, reopens, lifts on success, covers exactly its backoff, lifts on a backwards clock step) |
 | `crates/doggy-dns-plugin/tests/authority_chain_test.rs` | 12 | Chain resolution: empty, hit, authoritative miss, zone fallthrough, all-skip, Break, error, is_empty |
 | `crates/doggy-dns-plugin/tests/forward_test.rs` | 9 | Forward resolver: local mock upstream, custom/bare IP parsing, validation, NXDOMAIN/NODATA/SERVFAIL mapping, underscore labels still forwarded |
 | `crates/doggy-dns-plugin/tests/request_outcome_test.rs` | 3 | `RequestOutcome` construction: success, response bytes, NXDOMAIN TTL |

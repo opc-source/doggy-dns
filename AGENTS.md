@@ -92,7 +92,9 @@ last-instance removal push empties that cache and the next query answers
 `NXDOMAIN`. A name that is not in the ledger is first confirmed with
 `get_all_instances(..., subscribe = false)`, which is the only shape in nacos-sdk
 0.8.3 that reports a failed request; the confirmed list is then answered from and
-the name subscribed. Nothing unconfirmed is ever served, including an entry the
+the name subscribed — the ledger entry appears only after `subscribe` returns, so a
+concurrent first query cannot take the cache shortcut for a name the client was not
+yet subscribed. Nothing unconfirmed is ever served, including an entry the
 client loaded from a previous run's disk cache.
 
 nacos-sdk 0.8.3 gives `subscribe` nothing to report back — it registers the
@@ -100,15 +102,21 @@ listener and its own retry task, swallows the request error and returns `Ok` —
 the arm that forgets a failed subscribe is defensive, not a live path. A call that
 fails, or one that takes longer than the watcher's three-second bound
 (`NACOS_LOOKUP_TIMEOUT`), answers `SERVFAIL` instead of `NXDOMAIN`, so a Nacos
-outage is not negative-cached downstream. `FailureBackoff` counts those failures:
-`NACOS_FAILURE_THRESHOLD` in a row open a `NACOS_FAILURE_BACKOFF` window in which
-an unledgered name is refused with `SERVFAIL` and no call, while ledgered names
+outage is not negative-cached downstream. The bound wraps both paths, ledgered
+included. `FailureBackoff` counts those failures:
+`NACOS_FAILURE_THRESHOLD` in a row open a `NACOS_FAILURE_BACKOFF` window, which
+stays open only while the streak still reaches the threshold — a server-confirmed
+answer restarts it even when a concurrent failure had just stamped the window — and
+which a clock stepping behind the window's start lifts rather than extends. Inside
+it an unledgered name is refused with `SERVFAIL` and no call, while ledgered names
 keep reading the client cache. A server-confirmed answer calls `record_success`
 (closing the window and restarting the streak); a client-cache read calls neither,
 because it proves nothing about the server. All three are constants, not config.
-Known limit: a ledgered name whose cache entry the SDK dropped is re-fetched on the
-`subscribe = true` path, which fast-fails to an empty list — `NXDOMAIN`, not
-`SERVFAIL`, during an outage.
+Known limit: a ledgered name whose cache entry the SDK dropped re-fetches inline on
+the `subscribe = true` path, so it waits out the same three-second bound even
+inside the window. Against a registry that hangs, that answers `SERVFAIL` and
+counts; against one that answers with an error, the SDK swallows it into an empty
+list, and the query reads `NXDOMAIN` uncounted.
 
 `ServiceFilter` gates names before any Nacos call (`service_pattern`, a regex
 wrapped in whole-name anchors, default `[A-Za-z0-9_-]+` = bare application

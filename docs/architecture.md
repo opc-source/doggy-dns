@@ -62,14 +62,18 @@ through on lookup failure so a later `forward` plugin can still answer.
 - Connects to Nacos naming service via `nacos-sdk`
 - A name's first query confirms it with the server (`get_all_instances` with
   `subscribe = false`) and subscribes it; only names the `service_pattern`
-  selects get that far. Pushes then keep the client's cache current.
+  selects get that far. Pushes then keep the client's cache current. The ledger
+  entry appears only once `subscribe` returns, so a concurrent first query cannot
+  read the cache for a name the client was not yet subscribed for.
 - Keeps no instance table of its own: a name this process subscribed reads the
   Nacos client's naming cache (`subscribe = true`), which each push replaces
   wholesale. `CachedInstance.ip` is an `IpAddr`, so a query does its address
   parsing once per read list.
 - Three failed calls to Nacos in a row open a 30-second window (`FailureBackoff`)
   in which a name this process has not confirmed is refused with `SERVFAIL` and
-  no call at all; an answer that did come from the server closes it.
+  no call at all; an answer that did come from the server closes it. The window
+  needs both the timestamp and the streak, and the three-second call bound covers
+  the cache read too.
 - The catalog is keyed by the bare service name. One plugin serves one
   group/namespace pair and the authority checks those two labels against its own
   config before asking for it, so the key never has to carry them.

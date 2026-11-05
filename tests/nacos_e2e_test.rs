@@ -535,6 +535,15 @@ async fn e2e_first_query_is_confirmed_by_the_server() {
     let qname = service_qname("e2e-stalehole");
     warm.await_answers(&qname, RecordType::A, 1).await;
     let entry = DoggyDns::await_cached_on_disk(&cache, "e2e-stalehole").await;
+    // Positive control: the assertion below only says something if there really
+    // is a stale entry to serve. Read it while the writer is still up and holding
+    // the first address.
+    let cached = std::fs::read_to_string(&entry).expect("the disk entry is not readable text");
+    assert!(
+        cached.contains("10.9.9.3"),
+        "the disk entry at {entry:?} must still carry the address the first query answered, \
+         otherwise this case proves nothing about where the second query read from: {cached}"
+    );
 
     // The writer has to go first. A client still subscribed would take the push of
     // the new list and rewrite its own disk entry, leaving nothing stale to read.
@@ -558,20 +567,29 @@ async fn e2e_first_query_is_confirmed_by_the_server() {
 }
 
 /// Once the remote has failed enough to open the backoff window, a name this
-/// process has not confirmed is refused without any call at all — so it answers
-/// inside the timeout the earlier queries each spent.
+/// process has not confirmed is refused without any call at all.
+///
+/// The comparison is against the fastest of the three calls that opened the
+/// window, not against [`NACOS_LOOKUP_TIMEOUT`]: a refused port is answered by the
+/// client in well under that bound once the channel has failed, so an absolute
+/// timing claim would hold even with no window at all. A refusal is local work, so
+/// it has to beat even the fastest real dial. Measured here: dials of 9.4 s, 3.0 s
+/// and 3.0 s (the first includes the process coming up), refusal in 1.1-1.8 ms.
 #[tokio::test]
 #[ignore]
 async fn e2e_backoff_window_refuses_without_a_round_trip() {
     // Nothing listens on port 1; every call dials the gRPC port (address + 1000)
-    // and is cut off by the watcher's [`NACOS_LOOKUP_TIMEOUT`].
+    // and fails, which is what opens the window.
     let server = DoggyDns::start_with_addr(15420, "127.0.0.1:1").await;
     let qname = service_qname("e2e-backoff");
 
+    let mut dials = Vec::new();
     for attempt in 1..=NACOS_FAILURE_THRESHOLD {
+        let started = tokio::time::Instant::now();
         let message = server
             .await_code(&qname, RecordType::A, ResponseCode::ServFail)
             .await;
+        dials.push(started.elapsed());
         assert!(
             message.answers.is_empty(),
             "failure {attempt} must answer SERVFAIL with no records"
@@ -590,9 +608,18 @@ async fn e2e_backoff_window_refuses_without_a_round_trip() {
         ResponseCode::ServFail,
         "an unconfirmed name must stay SERVFAIL while the window is open"
     );
+    let fastest_dial = *dials
+        .iter()
+        .min()
+        .expect("the three threshold failures were measured");
     assert!(
         refused_in < REFUSAL_BOUND,
         "the window must refuse without dialling: answered in {refused_in:?}, \
-         whereas an unwindowed query waits the {NACOS_LOOKUP_TIMEOUT:?} bound"
+         whereas an unwindowed query waits up to the {NACOS_LOOKUP_TIMEOUT:?} bound"
+    );
+    assert!(
+        refused_in * 2 < fastest_dial,
+        "the refusal is local work: {refused_in:?} against the fastest of the three dials, \
+         {fastest_dial:?} - they are too close, so this reply may have dialled anyway"
     );
 }
