@@ -71,7 +71,7 @@ DNS query → **Middleware chain** (before_request) → **AuthorityChain** (sequ
 
 | Kind | Struct | Crate | What it does |
 |------|--------|-------|-------------|
-| `nacos` | `NacosAuthority` | doggy-dns-nacos | Resolves `<svc>.<group>.<ns>.<zone>` from DashMap cache fed by Nacos push events |
+| `nacos` | `NacosAuthority` | doggy-dns-nacos | Resolves `<svc>.<group>.<ns>.<zone>` from the Nacos client's naming cache |
 | `native` | `NativeAuthority` | doggy-dns-plugin | Forwards to OS system resolver (/etc/resolv.conf) |
 | `forward` | `ForwardAuthority` | doggy-dns-plugin | Forwards to explicit upstream servers (e.g., 8.8.8.8) |
 
@@ -80,9 +80,11 @@ All implement hickory's `ZoneHandler` trait. Plugins are evaluated in `[[plugins
 ### Nacos Integration Flow
 
 `NacosServiceWatcher` answers from the Nacos client's naming cache and keeps no
-instance data of its own. `NacosAuthority.lookup()` calls
-`ServiceCatalog::instances(key)` on every in-zone query; the watcher splits the
-key, checks group/namespace and `ServiceFilter`, subscribes the name if this
+instance data of its own. `NacosAuthority.lookup()` splits the name itself —
+zone membership, then the service name, with the group and namespace labels
+checked against its own config — and calls
+`ServiceCatalog::instances(service)` on every in-zone query; the watcher checks
+`ServiceFilter`, subscribes the name if this
 process never has (a `DashSet<String>` of subscribed names — the SDK offers no
 way to ask, and keeps every listener it is handed), then reads
 `get_all_instances(..., subscribe = true)`. The SDK answers from its naming
@@ -107,9 +109,13 @@ the cache). `NXDOMAIN` covers both an unknown name and a known service with no
 usable instance, because `get_all_instances` returns an empty list for both.
 
 DNS name format: `<service>.<group>.<namespace>.<zone_suffix>.` (zone membership by
-`Name::zone_of`, key by `mapping::service_key_from_name`, split from the right so
-service names may contain dots). `ServiceKey` is one composite lowercase string
-(`service \u{1} group \u{1} namespace`) and `CachedInstance.ip` is an `IpAddr`, parsed
+`Name::zone_of`, service name by `mapping::service_name_from_name`, split from the
+right so service names may contain dots and the two labels below it must equal the
+configured group and namespace). That function returns a `Cow<str>` and the catalog
+is keyed by the service name alone: a single-label name — the shape the default
+`service_pattern` selects — borrows straight out of the `LowerName` instead of
+building a key, and one plugin serves one group/namespace pair, so nothing needs to
+distinguish them at the key. `CachedInstance.ip` is an `IpAddr`, parsed
 when a query reads the list; the authority never lowercases or re-parses per query because
 the handler receives a `LowerName`. Only `A`/`AAAA` record types are served, filtered
 by query type. The authority owns its whole zone: unknown services return
@@ -161,7 +167,7 @@ The tokio runtime is built manually in `main()` with configurable `worker_thread
 
 ### Immutability Pattern
 
-Cache updates replace the entire Vec for a key (never mutate in place). Config structs are `Clone`. Use `Arc<DashMap>` for concurrent access.
+An instance list is replaced wholesale, never mutated in place (the Nacos client's naming cache does this on each push; we keep no copy). Config structs are `Clone`. Use `Arc<DashMap>` / `Arc<DashSet>` for concurrent access.
 
 ## Configuration
 

@@ -60,11 +60,15 @@ through on lookup failure so a later `forward` plugin can still answer.
 ## Nacos integration
 
 - Connects to Nacos naming service via `nacos-sdk`
-- Subscribes to all services on startup; receives push updates on instance changes
-- Maintains an in-memory `DashMap<ServiceKey, Vec<CachedInstance>>` cache; updates
-  replace the entire `Vec` for a key (immutable update). `ServiceKey` is a single
-  composite lowercase string and `CachedInstance.ip` is an `IpAddr`, so a query builds
-  one key and does no address parsing.
+- Subscribes a service name on the first query that needs it (only names the
+  `service_pattern` selects), then receives push updates on instance changes
+- Keeps no instance table of its own: every in-zone query reads the Nacos client's
+  naming cache (`get_all_instances` with `subscribe = true`), which each push
+  replaces wholesale. `CachedInstance.ip` is an `IpAddr`, so a query does its
+  address parsing once per read list.
+- The catalog is keyed by the bare service name. One plugin serves one
+  group/namespace pair and the authority checks those two labels against its own
+  config before asking for it, so the key never has to carry them.
 - The apex `SOA` is built once at authority construction and cached again on the
   authority chain entry, so a negative answer costs no extra lookup after the first.
 - DNS name format: `<service>.<group>.<namespace>.<zone_suffix>.`

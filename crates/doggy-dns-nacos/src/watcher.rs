@@ -10,50 +10,6 @@ use std::net::IpAddr;
 use std::str::FromStr;
 use std::sync::Arc;
 
-/// Separator inside [`ServiceKey`].
-///
-/// Not a byte that can appear in a DNS label anyone will register, so a service
-/// name containing dots can never be re-read as a group or namespace boundary.
-pub const KEY_SEPARATOR: char = '\u{1}';
-
-/// Key for a service lookup: `service SEPARATOR group SEPARATOR namespace`, all
-/// lowercase.
-///
-/// One composite string instead of three fields: a lookup used to allocate the
-/// three parts and then lowercase each of them, six allocations for a value the
-/// caller already had in lowercase.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct ServiceKey(String);
-
-impl ServiceKey {
-    pub fn new(service_name: &str, group: &str, namespace: &str) -> Self {
-        let mut key = String::with_capacity(service_name.len() + group.len() + namespace.len() + 2);
-        key.push_str(service_name);
-        key.push(KEY_SEPARATOR);
-        key.push_str(group);
-        key.push(KEY_SEPARATOR);
-        key.push_str(namespace);
-        Self(key)
-    }
-
-    /// The composite text. For logs and assertions; not used for lookup.
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-
-    /// The three parts, borrowed. The only production caller is built from DNS
-    /// labels, where `label_text` rejects the separator, so the split cannot land
-    /// inside a service name — dotted names stay in one piece.
-    pub fn parts(&self) -> (&str, &str, &str) {
-        let mut parts = self.0.splitn(3, KEY_SEPARATOR);
-        (
-            parts.next().unwrap_or_default(),
-            parts.next().unwrap_or_default(),
-            parts.next().unwrap_or_default(),
-        )
-    }
-}
-
 /// The built-in subscription rule: a bare application name — ASCII letters,
 /// digits, `_`, `-`, and no dots.
 ///
@@ -78,8 +34,9 @@ impl ServiceFilter {
     ///
     /// The pattern is wrapped in whole-name anchors, so `order-service` selects
     /// that service and not `legacy-order-service`; a pattern that already spells
-    /// its own anchors still compiles, and matching stays case-sensitive because
-    /// the cache key is lowercased after this point, not here.
+    /// its own anchors still compiles. Matching is case-sensitive, and the only
+    /// production caller passes a name that `LowerName` already case-folded, so a
+    /// pattern with capitals in it selects nothing.
     pub fn from_config(pattern: Option<&str>) -> anyhow::Result<Self> {
         let configured = pattern.unwrap_or(DEFAULT_SERVICE_PATTERN);
         let compiled = Regex::new(&format!("^(?:{configured})$"))
@@ -151,15 +108,18 @@ impl NamingEventListener for NoopListener {
 /// an entry and otherwise fetches; because every name is subscribed before it is
 /// read, pushes keep that cache current — including a push that removes the last
 /// instance, which reaches DNS on the next query.
+///
+/// One namespace, one group: the namespace is baked into the client's
+/// configuration, and the group travels with every call, so a service name is
+/// the only thing a query has to add.
 pub struct NacosServiceWatcher {
     naming_service: Arc<NamingService>,
-    namespace: String,
     group: String,
     filter: ServiceFilter,
     listener: Arc<dyn NamingEventListener>,
     /// Names whose subscription this process has registered.
     ///
-    /// The SDK offers no way to ask whether a key is subscribed and keeps every
+    /// The SDK offers no way to ask whether a name is subscribed and keeps every
     /// listener it is handed, so this set is what makes the first query for a
     /// name the only one that subscribes it. It holds no instance data.
     subscribed: DashSet<String>,
@@ -189,7 +149,6 @@ impl NacosServiceWatcher {
 
         Ok(Self {
             naming_service: Arc::new(naming_service),
-            namespace: namespace.to_string(),
             group: group.to_string(),
             filter,
             listener: Arc::new(NoopListener),
@@ -204,23 +163,16 @@ impl NacosServiceWatcher {
     }
 }
 
-#[async_trait::async_trait]
 impl ServiceCatalog for NacosServiceWatcher {
-    /// The client cache's answer for `key`, subscribing the name first if this
-    /// process never has.
+    /// The client cache's answer for `service`, subscribing the name first if
+    /// this process never has.
     ///
-    /// Bounded three ways: the key has to belong to the configured group and
-    /// namespace, [`ServiceFilter`] has to select the name, and the subscribed
-    /// set makes the first query for a name the only one that spends a
-    /// `subscribe` call.
-    async fn instances(&self, key: &ServiceKey) -> Option<Vec<CachedInstance>> {
-        let (service, group, namespace) = key.parts();
-        if !group.eq_ignore_ascii_case(&self.group)
-            || !namespace.eq_ignore_ascii_case(&self.namespace)
-        {
-            // In our zone but not in the group we serve; nothing to ask.
-            return None;
-        }
+    /// Bounded two ways: [`ServiceFilter`] has to select the name, and the
+    /// subscribed set makes the first query for a name the only one that spends a
+    /// `subscribe` call. The group and namespace are not checked here: this client
+    /// only ever asks the one pair it was built with, and the authority has
+    /// already matched the name's labels against it.
+    async fn instances(&self, service: &str) -> Option<Vec<CachedInstance>> {
         if !self.filter.is_selected(service) {
             tracing::debug!(
                 "nacos service '{}' left unsubscribed: service_pattern did not select it",
@@ -229,7 +181,12 @@ impl ServiceCatalog for NacosServiceWatcher {
             return None;
         }
 
-        if self.subscribed.insert(service.to_string()) {
+        // `contains` reads the `&str` this already has. Going straight to
+        // `insert` would allocate a `String` on every query just to find out the
+        // name is already subscribed - which, in steady state, it always is. If
+        // two cold queries race through the gate, `insert` still returns `true`
+        // for exactly one of them, so only one subscribe is sent.
+        if !self.subscribed.contains(service) && self.subscribed.insert(service.to_string()) {
             let subscribed = self
                 .naming_service
                 .subscribe(

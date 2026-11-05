@@ -158,10 +158,10 @@ Points worth knowing before reading a failure:
 | `crates/doggy-dns-core/tests/middleware_test.rs` | 2 | Logging middleware: `before_request` continues, `after_request` completes |
 | `crates/doggy-dns-core/tests/server_test.rs` | 2 | UDP/TCP listener binding for bare and bracketed IPv6 addresses |
 | `crates/doggy-dns-core/tests/wire_golden_test.rs` | 5 | Golden wire bytes for the Nacos paths: hit (name lowercased), NXDOMAIN, NODATA, apex SOA |
-| `crates/doggy-dns-nacos/tests/alloc_guard_test.rs` | 1 | Allocation budget for `NacosAuthority::lookup`: 8 on a hit, 3 on an in-zone miss |
-| `crates/doggy-dns-nacos/tests/authority_test.rs` | 23 | Nacos authority: catalog hits and misses, dotted names, NOERROR/NXDOMAIN/NODATA, family filtering, zone boundaries, apex SOA, which queries consult the catalog |
-| `crates/doggy-dns-nacos/tests/mapping_test.rs` | 11 | Name-to-key mapping (zone boundaries, dotted services, escaped labels), family-filtered record creation |
-| `crates/doggy-dns-nacos/tests/watcher_test.rs` | 10 | Service filter (defaults, anchoring, case, Unicode, invalid pattern), usable-instance parsing, key parts |
+| `crates/doggy-dns-nacos/tests/alloc_guard_test.rs` | 1 | Allocation budget for `NacosAuthority::lookup`: 5 on a hit, 1 on an in-zone miss |
+| `crates/doggy-dns-nacos/tests/authority_test.rs` | 26 | Nacos authority: catalog hits and misses, dotted names, NOERROR/NXDOMAIN/NODATA, family filtering, zone boundaries, group and namespace labels, apex SOA, which queries consult the catalog |
+| `crates/doggy-dns-nacos/tests/mapping_test.rs` | 13 | Name-to-service-name mapping (zone boundaries, group and namespace labels, escaped labels), family-filtered record creation |
+| `crates/doggy-dns-nacos/tests/watcher_test.rs` | 8 | Service filter (defaults, anchoring, case, Unicode, invalid pattern), usable-instance parsing |
 | `crates/doggy-dns-plugin/tests/authority_chain_test.rs` | 12 | Chain resolution: empty, hit, authoritative miss, zone fallthrough, all-skip, Break, error, is_empty |
 | `crates/doggy-dns-plugin/tests/forward_test.rs` | 9 | Forward resolver: local mock upstream, custom/bare IP parsing, validation, NXDOMAIN/NODATA/SERVFAIL mapping, underscore labels still forwarded |
 | `crates/doggy-dns-plugin/tests/request_outcome_test.rs` | 3 | `RequestOutcome` construction: success, response bytes, NXDOMAIN TTL |
@@ -186,7 +186,7 @@ parameterize over `worker_threads` 1..4.
 | Bench File | Benchmarks | Description |
 |------------|------------|-------------|
 | `crates/doggy-dns-core/benches/handler_bench.rs` | 3 x 4 | Handler pipeline (nacos hit, nacos nxdomain, empty-chain nxdomain) x worker_threads 1..4 |
-| `crates/doggy-dns-nacos/benches/nacos_bench.rs` | 2 x 4 + 4 | Authority lookup (hit, miss) x worker_threads 1..4 + service-key hit/miss/dotted and `to_dns_records` |
+| `crates/doggy-dns-nacos/benches/nacos_bench.rs` | 2 x 4 + 4 | Authority lookup (hit, miss) x worker_threads 1..4 + service-name extraction hit/miss/dotted and `to_dns_records` |
 | `crates/doggy-dns-plugin/benches/chain_bench.rs` | 2 x 4 | Authority chain (empty, nacos hit) x worker_threads 1..4 |
 
 ## Key dependencies

@@ -4,7 +4,7 @@ use doggy_dns_core::config::{DoggyDnsConfig, PluginKind, load_config};
 use doggy_dns_core::handler::{AnswerRotation, DoggyDnsHandler};
 use doggy_dns_core::middleware::logging::LoggingMiddleware;
 use doggy_dns_core::server::build_server;
-use doggy_dns_nacos::authority::{NacosAuthority, ServiceCatalog};
+use doggy_dns_nacos::authority::NacosAuthority;
 use doggy_dns_nacos::watcher::{NacosServiceWatcher, ServiceFilter};
 use doggy_dns_observability::Observability;
 use doggy_dns_plugin::Middleware;
@@ -293,8 +293,7 @@ async fn build_authority_chain(
                 );
 
                 let name = format!("nacos[{}]", zone);
-                let catalog: Arc<dyn ServiceCatalog> = watcher.clone();
-                let authority = NacosAuthority::new(catalog, zone, plugin.ttl);
+                let authority = NacosAuthority::new(watcher.clone(), zone, grp, ns, plugin.ttl);
                 handlers.push((name.clone(), Arc::new(authority)));
                 watchers.push((zone.to_string(), watcher));
                 tracing::info!(plugin = %name, zone = zone, addr = addr, "loaded plugin");

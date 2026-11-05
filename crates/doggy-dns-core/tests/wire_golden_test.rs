@@ -2,8 +2,8 @@
 
 //! Byte-level golden assertions for the answers the userspace path produces.
 //!
-//! The Nacos hot-path refactor (composite cache key, `zone_of` membership,
-//! record move) is meant to be representation-only, so the wire bytes for a
+//! The Nacos hot-path refactor (borrowed service name as the cache key, `zone_of`
+//! membership, record move) is meant to be representation-only, so the wire bytes for a
 //! fixed query set must not move. These constants were captured from `main`
 //! before the refactor; if a later task changes one, that task changed the
 //! response, not the expectation.
@@ -12,7 +12,7 @@ use async_trait::async_trait;
 use dashmap::DashMap;
 use doggy_dns_core::handler::{AnswerRotation, DoggyDnsHandler};
 use doggy_dns_nacos::authority::NacosAuthority;
-use doggy_dns_nacos::watcher::{CachedInstance, ServiceKey};
+use doggy_dns_nacos::watcher::CachedInstance;
 use doggy_dns_plugin::authority_chain::AuthorityChain;
 use hickory_proto::op::{Message, MessageType, OpCode, Query};
 use hickory_proto::rr::{Name, Record, RecordType};
@@ -74,14 +74,14 @@ fn make_request(domain: &str, rtype: RecordType) -> Request {
 fn nacos_handler() -> (DoggyDnsHandler, ByteCapturingHandler) {
     let cache = Arc::new(DashMap::new());
     cache.insert(
-        ServiceKey::new("my-svc", "default_group", "public"),
+        "my-svc".to_string(),
         vec![CachedInstance {
             ip: "10.0.0.1".parse().unwrap(),
             port: 8080,
             healthy: true,
         }],
     );
-    let authority = NacosAuthority::new(cache, "nacos.local", 60);
+    let authority = NacosAuthority::new(cache, "nacos.local", "DEFAULT_GROUP", "public", 60);
     let chain = Arc::new(AuthorityChain::new(vec![(
         "nacos".to_string(),
         Arc::new(authority),

@@ -128,12 +128,12 @@ async fn empty_chain_returns_skip() {
 async fn single_handler_hit_returns_continue() {
     use dashmap::DashMap;
     use doggy_dns_nacos::authority::NacosAuthority;
-    use doggy_dns_nacos::watcher::{CachedInstance, ServiceKey};
+    use doggy_dns_nacos::watcher::CachedInstance;
     use std::sync::Arc;
 
     let cache = Arc::new(DashMap::new());
     cache.insert(
-        ServiceKey::new("my-svc", "default_group", "public"),
+        "my-svc".to_string(),
         vec![CachedInstance {
             ip: "10.0.0.1".parse().unwrap(),
             port: 8080,
@@ -141,7 +141,7 @@ async fn single_handler_hit_returns_continue() {
         }],
     );
 
-    let authority = NacosAuthority::new(cache, "nacos.local", 60);
+    let authority = NacosAuthority::new(cache, "nacos.local", "DEFAULT_GROUP", "public", 60);
     let chain = AuthorityChain::new(vec![("nacos".to_string(), Arc::new(authority))]);
 
     let name = LowerName::from(Name::from_str("my-svc.DEFAULT_GROUP.public.nacos.local.").unwrap());
@@ -157,7 +157,7 @@ async fn single_handler_miss_is_authoritative_nxdomain() {
     use std::sync::Arc;
 
     let cache = Arc::new(DashMap::new());
-    let authority = NacosAuthority::new(cache, "nacos.local", 60);
+    let authority = NacosAuthority::new(cache, "nacos.local", "DEFAULT_GROUP", "public", 60);
     let chain = AuthorityChain::new(vec![("nacos".to_string(), Arc::new(authority))]);
 
     let name =
@@ -174,24 +174,30 @@ async fn single_handler_miss_is_authoritative_nxdomain() {
 async fn first_skips_second_resolves() {
     use dashmap::DashMap;
     use doggy_dns_nacos::authority::NacosAuthority;
-    use doggy_dns_nacos::watcher::{CachedInstance, ServiceKey};
+    use doggy_dns_nacos::watcher::CachedInstance;
     use std::sync::Arc;
 
     // First handler has no data → will skip
     let empty_cache = Arc::new(DashMap::new());
-    let first = NacosAuthority::new(empty_cache, "zone-a.local", 60);
+    let first = NacosAuthority::new(empty_cache, "zone-a.local", "DEFAULT_GROUP", "public", 60);
 
     // Second handler has data → will resolve
     let populated_cache = Arc::new(DashMap::new());
     populated_cache.insert(
-        ServiceKey::new("web", "default_group", "public"),
+        "web".to_string(),
         vec![CachedInstance {
             ip: "192.168.1.1".parse().unwrap(),
             port: 80,
             healthy: true,
         }],
     );
-    let second = NacosAuthority::new(populated_cache, "zone-b.local", 30);
+    let second = NacosAuthority::new(
+        populated_cache,
+        "zone-b.local",
+        "DEFAULT_GROUP",
+        "public",
+        30,
+    );
 
     let chain = AuthorityChain::new(vec![
         ("zone-a".to_string(), Arc::new(first)),
@@ -213,8 +219,8 @@ async fn all_handlers_skip_returns_skip() {
 
     let cache1 = Arc::new(DashMap::new());
     let cache2 = Arc::new(DashMap::new());
-    let h1 = NacosAuthority::new(cache1, "zone-a.local", 60);
-    let h2 = NacosAuthority::new(cache2, "zone-b.local", 60);
+    let h1 = NacosAuthority::new(cache1, "zone-a.local", "DEFAULT_GROUP", "public", 60);
+    let h2 = NacosAuthority::new(cache2, "zone-b.local", "DEFAULT_GROUP", "public", 60);
 
     let chain = AuthorityChain::new(vec![
         ("zone-a".to_string(), Arc::new(h1)),
@@ -278,11 +284,14 @@ async fn authoritative_negative_carries_apex_soa() {
     let authority = doggy_dns_nacos::authority::NacosAuthority::new(
         Arc::new(DashMap::new()),
         "nacos.local",
+        "DEFAULT_GROUP",
+        "public",
         60,
     );
     let chain = AuthorityChain::new(vec![("nacos".to_string(), Arc::new(authority))]);
 
-    let name = LowerName::from(Name::from_str("missing.group.public.nacos.local.").unwrap());
+    let name =
+        LowerName::from(Name::from_str("missing.default_group.public.nacos.local.").unwrap());
     let result = chain.resolve(&name, RecordType::A, None).await;
 
     assert!(

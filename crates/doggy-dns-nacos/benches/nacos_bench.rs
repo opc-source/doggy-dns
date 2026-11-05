@@ -3,8 +3,8 @@
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use dashmap::DashMap;
 use doggy_dns_nacos::authority::NacosAuthority;
-use doggy_dns_nacos::mapping::{service_key_from_name, to_dns_records};
-use doggy_dns_nacos::watcher::{CachedInstance, ServiceKey};
+use doggy_dns_nacos::mapping::{service_name_from_name, to_dns_records};
+use doggy_dns_nacos::watcher::CachedInstance;
 use hickory_proto::rr::{LowerName, Name, RecordType};
 use hickory_server::zone_handler::{LookupOptions, ZoneHandler};
 use std::hint::black_box;
@@ -12,10 +12,10 @@ use std::net::{IpAddr, Ipv4Addr};
 use std::str::FromStr;
 use std::sync::Arc;
 
-fn make_populated_cache(count: usize) -> Arc<DashMap<ServiceKey, Vec<CachedInstance>>> {
+fn make_populated_cache(count: usize) -> Arc<DashMap<String, Vec<CachedInstance>>> {
     let cache = Arc::new(DashMap::new());
     for i in 0..count {
-        let key = ServiceKey::new(&format!("service-{}", i), "default_group", "public");
+        let key = format!("service-{}", i);
         let instances = vec![CachedInstance {
             ip: IpAddr::V4(Ipv4Addr::new(10, 0, (i / 256) as u8, (i % 256) as u8)),
             port: 8080,
@@ -28,7 +28,7 @@ fn make_populated_cache(count: usize) -> Arc<DashMap<ServiceKey, Vec<CachedInsta
 
 fn bench_nacos_authority_lookup_hit(c: &mut Criterion) {
     let cache = make_populated_cache(100);
-    let authority = NacosAuthority::new(cache, "nacos.local", 6);
+    let authority = NacosAuthority::new(cache, "nacos.local", "DEFAULT_GROUP", "public", 6);
     let name =
         LowerName::from(Name::from_str("service-50.default_group.public.nacos.local.").unwrap());
 
@@ -54,7 +54,7 @@ fn bench_nacos_authority_lookup_hit(c: &mut Criterion) {
 
 fn bench_nacos_authority_lookup_miss(c: &mut Criterion) {
     let cache = make_populated_cache(100);
-    let authority = NacosAuthority::new(cache, "nacos.local", 6);
+    let authority = NacosAuthority::new(cache, "nacos.local", "DEFAULT_GROUP", "public", 6);
     let name =
         LowerName::from(Name::from_str("unknown-svc.default_group.public.nacos.local.").unwrap());
 
@@ -78,35 +78,56 @@ fn bench_nacos_authority_lookup_miss(c: &mut Criterion) {
     group.finish();
 }
 
-fn bench_service_key_from_name_hit(c: &mut Criterion) {
+fn bench_service_name_from_name_hit(c: &mut Criterion) {
     let zone = Name::from_str("nacos.local").unwrap();
     let name = LowerName::from(Name::from_str("my-svc.DEFAULT_GROUP.public.nacos.local.").unwrap());
-    c.bench_function("service_key_from_name_hit", |b| {
-        b.iter(|| black_box(service_key_from_name(&name, &zone)));
+    c.bench_function("service_name_from_name_hit", |b| {
+        b.iter(|| {
+            black_box(service_name_from_name(
+                &name,
+                &zone,
+                "DEFAULT_GROUP",
+                "public",
+            ))
+        });
     });
 }
 
-fn bench_service_key_from_name_miss(c: &mut Criterion) {
+fn bench_service_name_from_name_miss(c: &mut Criterion) {
     let zone = Name::from_str("nacos.local").unwrap();
     // Two labels above the zone: too few to carry group and namespace.
     let name = LowerName::from(Name::from_str("my-svc.group.nacos.local.").unwrap());
-    c.bench_function("service_key_from_name_miss", |b| {
-        b.iter(|| black_box(service_key_from_name(&name, &zone)));
+    c.bench_function("service_name_from_name_miss", |b| {
+        b.iter(|| {
+            black_box(service_name_from_name(
+                &name,
+                &zone,
+                "DEFAULT_GROUP",
+                "public",
+            ))
+        });
     });
 }
 
-fn bench_service_key_dotted_service(c: &mut Criterion) {
+fn bench_service_name_dotted_service(c: &mut Criterion) {
     let zone = Name::from_str("nacos.local").unwrap();
     let name = LowerName::from(
         Name::from_str("com.example.api.DEFAULT_GROUP.public.nacos.local.").unwrap(),
     );
-    c.bench_function("service_key_dotted_service", |b| {
-        b.iter(|| black_box(service_key_from_name(&name, &zone)));
+    c.bench_function("service_name_dotted_service", |b| {
+        b.iter(|| {
+            black_box(service_name_from_name(
+                &name,
+                &zone,
+                "DEFAULT_GROUP",
+                "public",
+            ))
+        });
     });
 }
 
 fn bench_to_dns_records_10_ips(c: &mut Criterion) {
-    let name = Name::from_str("my-svc.nacos.local.").unwrap();
+    let name = LowerName::from(Name::from_str("my-svc.nacos.local.").unwrap());
     let instances: Vec<CachedInstance> = (0..10)
         .map(|i| CachedInstance {
             ip: IpAddr::V4(Ipv4Addr::new(10, 0, 0, i)),
@@ -123,9 +144,9 @@ criterion_group!(
     benches,
     bench_nacos_authority_lookup_hit,
     bench_nacos_authority_lookup_miss,
-    bench_service_key_from_name_hit,
-    bench_service_key_from_name_miss,
-    bench_service_key_dotted_service,
+    bench_service_name_from_name_hit,
+    bench_service_name_from_name_miss,
+    bench_service_name_dotted_service,
     bench_to_dns_records_10_ips,
 );
 criterion_main!(benches);

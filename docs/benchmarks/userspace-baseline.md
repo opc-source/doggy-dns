@@ -108,6 +108,13 @@ not from a profiler, because it is the number that cannot be argued with. Its se
 is one answering instance under a five-label name, so the count is stable across
 runs but not a general "allocations per answer" figure.
 
+The tables above are the PR's own snapshot, so their labels and counts are frozen.
+Two things have moved since: the guard's budgets are now 5 / 1, and the
+`service_key_from_name_*` IDs were renamed to `service_name_from_name_*` when the
+composite key was dropped in favour of the borrowed service name. Read the current
+budget from `alloc_guard_test` and the current IDs from `cargo bench --bench
+nacos_bench --no-run`.
+
 All four component rows are single-run medians from one machine; the `Performance`
 job's base-vs-PR `change:` lines on one runner remain the comparison that matters
 for a future regression.

@@ -1,6 +1,6 @@
 #![allow(clippy::disallowed_methods)]
 
-use doggy_dns_nacos::watcher::{CachedInstance, ServiceFilter, ServiceKey, usable_instances};
+use doggy_dns_nacos::watcher::{CachedInstance, ServiceFilter, usable_instances};
 use nacos_sdk::api::naming::ServiceInstance;
 use std::collections::HashMap;
 use std::net::IpAddr;
@@ -53,21 +53,6 @@ fn cached_instance_rejects_a_non_address() {
     assert!(
         CachedInstance::from_service_instance(&si).is_none(),
         "an unparsable address must not reach the cache"
-    );
-}
-
-/// `service.group.namespace` is ambiguous with plain dots: `a.b` in group `c`
-/// looks like `a` in group `b.c`. The separator is not a DNS label byte, so the
-/// two stay distinct, which is what lets the composite key replace three fields.
-#[test]
-fn service_key_keeps_dotted_shapes_distinct() {
-    let dotted_service = ServiceKey::new("a.b", "c", "d");
-    let dotted_group = ServiceKey::new("a", "b.c", "d");
-
-    assert_eq!(dotted_service.as_str(), "a.b\u{1}c\u{1}d");
-    assert_ne!(
-        dotted_service, dotted_group,
-        "a service name containing dots must not be re-read as a group boundary"
     );
 }
 
@@ -151,22 +136,6 @@ fn user_written_word_class_is_unicode_aware() {
         !default.is_selected("服务名"),
         "the built-in rule is ASCII-only regardless of how that could be written"
     );
-}
-
-/// The catalog is handed a key built from DNS labels and has to know which
-/// service it names and whether that key belongs to the group and namespace this
-/// process is configured for — a query for another group must not reach Nacos.
-#[test]
-fn service_key_exposes_its_parts() {
-    let key = ServiceKey::new("com.example.api", "DEFAULT_GROUP", "public");
-    assert_eq!(
-        key.parts(),
-        ("com.example.api", "DEFAULT_GROUP", "public"),
-        "a dotted service name must not be split at its dots"
-    );
-
-    let key = ServiceKey::new("order", "group", "ns");
-    assert_eq!(key.parts(), ("order", "group", "ns"));
 }
 
 /// A pattern that does not compile is a configuration error naming the field and
