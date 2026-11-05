@@ -968,6 +968,18 @@ fn validate_nacos_rejects_blank_service_pattern() {
     assert!(err.contains("service_pattern"), "unexpected error: {err}");
 }
 
+/// Subscriptions are established lazily, one per name on its first query, so
+/// there is no background scan left to configure. A config written for the
+/// retired knob still loads: serde ignores the unknown field rather than
+/// failing a deployment's start-up.
+#[test]
+fn nacos_config_ignores_a_retired_rescan_interval() {
+    let config: DoggyDnsConfig =
+        toml::from_str(&nacos_plugin("rescan_interval_secs = 0")).expect("parse failed");
+
+    validate_config(&config).expect("an unknown field must not fail validation");
+}
+
 #[test]
 fn validate_nacos_rejects_malformed_zone() {
     let err = validation_error(

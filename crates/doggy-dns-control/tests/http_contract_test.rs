@@ -29,7 +29,7 @@ fn test_live() -> Arc<LiveState> {
     let mut live = LiveState::new();
     live.register(
         "nacos.nacos.local",
-        || serde_json::json!({"cachedServices": 3}),
+        || serde_json::json!({"subscribedServices": 3}),
     );
     Arc::new(live)
 }
@@ -205,7 +205,10 @@ async fn health_endpoints_bypass_the_mcp_token() {
     let resp = get_path(handle.addr, "/readyz").await;
     assert_eq!(resp.status(), 200);
     let json: serde_json::Value = serde_json::from_str(&resp.text().await.unwrap()).unwrap();
-    assert_eq!(json["signals"]["nacos.nacos.local"]["cachedServices"], 3);
+    assert_eq!(
+        json["signals"]["nacos.nacos.local"]["subscribedServices"],
+        3
+    );
 
     handle.cancel.cancel();
 }

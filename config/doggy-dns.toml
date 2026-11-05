@@ -83,12 +83,11 @@ group = "DEFAULT_GROUP"
 dns_zone = "nacos.local"
 ttl = 6
 #service_pattern = "[A-Za-z0-9_-]+"  # Whole-name regex selecting which services
-#                                     # to subscribe. The default keeps bare
+#                                     # may reach Nacos. The default keeps bare
 #                                     # application names, so dotted, non-ASCII
 #                                     # and "group@@service" names stay out.
-#                                     # Rejected names answer NXDOMAIN. Every
-#                                     # service in the group is read at
-#                                     # start-up, 1000 names per page.
+#                                     # Rejected names answer NXDOMAIN. Each name
+#                                     # is subscribed by its first query.
 
 [[plugins]]
 kind = "native"

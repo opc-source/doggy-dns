@@ -70,7 +70,7 @@ namespace = "public"
 group = "DEFAULT_GROUP"
 dns_zone = "nacos.local"
 ttl = 6
-service_pattern = "[A-Za-z0-9_-]+"   # default; which services to subscribe — see "Nacos subscription filter"
+service_pattern = "[A-Za-z0-9_-]+"   # default; which services may reach Nacos — see "Nacos subscription"
 
 [[plugins]]
 kind = "native"
@@ -182,27 +182,45 @@ without consulting userspace again, so a hit replays the order that was captured
 when the entry was written until its TTL expires; startup logs one `warn` when
 both settings are on. See [xdp.md](xdp.md#limitations--notes).
 
-## Nacos subscription filter
+## Nacos subscription
 
-`get_service_list` answers with every service in the configured group, and a
-shared Nacos holds plenty that a DNS zone has no business being pushed, so
-`service_pattern` selects which names get subscribed. The pattern is a regex
-wrapped in whole-name anchors (`order-service` therefore cannot match
+The authority keeps no instance cache of its own. Every in-zone query reads the
+Nacos client's naming cache (`get_all_instances`, `subscribe = true`): the SDK
+answers from that cache when it has an entry and asks the server otherwise, so
+DNS always serves the client's current view. A push that removes the last
+instance reaches the answer on the next query, with no second copy to go stale.
+The cost is one clone of the instance list plus address parsing per query; a
+name the client has no cache entry for costs one client round trip, because that
+is how the SDK answers a cache miss.
+
+`service_pattern` selects which names may reach Nacos at all. The pattern is a
+regex wrapped in whole-name anchors (`order-service` therefore cannot match
 `legacy-order-service`), matched case-sensitively against the name as Nacos
 reports it. The default `[A-Za-z0-9_-]+` keeps bare application names: it
 rejects dotted identifiers (`com.foo.Bar`), non-ASCII names and the
 `DEFAULT_GROUP@@order` form, so on a registry whose server does return that
-prefixed form the pattern has to be widened. A name the pattern rejects is
-never cached, and since the authority owns its zone, querying it answers
-`NXDOMAIN` rather than falling through to `native`/`forward`. Startup logs how
-many of the listed services were subscribed; the rejected names appear at
-`debug`.
+prefixed form the pattern has to be widened. A name the pattern rejects is never
+subscribed or fetched, and since the authority owns its zone, querying it
+answers `NXDOMAIN` rather than falling through to `native`/`forward`.
 
-The whole list is read at start-up: pages of 1000 names are fetched until the
-count reported by the first page is covered, so no service is silently left
-out. A page that fails to fetch logs a `warn` and stops the scan, leaving the
-names already read subscribed; there is no knob for the page size because the
-scan reads every page either way.
+The first query for each name subscribes it — once per name, because the SDK
+keeps every listener it is handed. A service registered after doggy-dns started
+needs no scan: its first query subscribes it, and thereafter the client's own
+push/refresh keeps the cache current. A failed subscribe is retried by the next
+query.
+
+`naming_load_cache_at_start` makes the client load its naming cache from disk, so
+a restart answers from the previous run's data and the process starts while Nacos
+is unreachable; a first-ever start with Nacos down answers `NXDOMAIN`. Empty-push
+protection is disabled, so a service losing its last instance empties the client's
+cache instead of continuing to answer the old address.
+
+A service Nacos knows but with no healthy/enabled instance also answers
+`NXDOMAIN`: `get_all_instances` returns an empty list for both that case and an
+unknown name, and the client cache carries no presence flag to tell them apart.
+(The authority itself still distinguishes them: a catalog that reports the
+service with an empty list gets `NODATA`, which is the answer a future catalog
+with a presence flag will be able to give.)
 
 ## Endpoint formats
 
@@ -245,8 +263,8 @@ Streamable HTTP — `get_status` (instance identity/uptime), `list_plugins`
 (authority chain), `get_config` (TOML with secrets redacted) and
 `get_runtime_status` (live signals sampled at call time); the Bearer token
 guards this endpoint only. `healthz` is a trivial liveness probe and `readyz`
-reports live runtime signals (per-zone Nacos cache occupancy and push
-freshness, XDP attach state); both are plain GET, never require auth and
+reports live runtime signals (per-zone Nacos subscribed-name count, XDP
+attach state); both are plain GET, never require auth and
 always answer 200 — `readyz` is a report, not a verdict, so deciding what
 counts as "not ready" stays with the operator or doggy-dns-console. Full
 contract: [crates/doggy-dns-control/README.md](../crates/doggy-dns-control/README.md).

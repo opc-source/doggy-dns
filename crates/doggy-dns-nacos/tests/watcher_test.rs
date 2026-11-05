@@ -1,14 +1,9 @@
 #![allow(clippy::disallowed_methods)]
 
-use dashmap::DashMap;
-use doggy_dns_nacos::watcher::{
-    CachedInstance, InstanceChangeListener, ServiceFilter, ServiceKey, service_list_page_count,
-};
-use nacos_sdk::api::naming::{NamingChangeEvent, NamingEventListener, ServiceInstance};
+use doggy_dns_nacos::watcher::{CachedInstance, ServiceFilter, ServiceKey, usable_instances};
+use nacos_sdk::api::naming::ServiceInstance;
 use std::collections::HashMap;
 use std::net::IpAddr;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicI64, Ordering};
 
 fn make_service_instance(ip: &str, port: i32, healthy: bool, enabled: bool) -> ServiceInstance {
     ServiceInstance {
@@ -25,116 +20,22 @@ fn make_service_instance(ip: &str, port: i32, healthy: bool, enabled: bool) -> S
     }
 }
 
-fn make_listener(
-    group: &str,
-    namespace: &str,
-) -> (
-    InstanceChangeListener,
-    Arc<DashMap<ServiceKey, Vec<CachedInstance>>>,
-) {
-    let cache = Arc::new(DashMap::new());
-    let listener = InstanceChangeListener {
-        cache: Arc::clone(&cache),
-        group: group.to_string(),
-        namespace: namespace.to_string(),
-        last_push: Arc::new(AtomicI64::new(0)),
-    };
-    (listener, cache)
-}
-
-fn fire_event(
-    listener: &InstanceChangeListener,
-    service_name: &str,
-    instances: Option<Vec<ServiceInstance>>,
-) {
-    let event = Arc::new(NamingChangeEvent {
-        service_name: service_name.to_string(),
-        group_name: String::new(),
-        clusters: String::new(),
-        instances,
-    });
-    listener.event(event);
-}
-
+/// The client keeps instances this resolver cannot use; they are dropped when a
+/// query reads the list.
 #[test]
-fn listener_inserts_healthy_enabled_instances() {
-    let (listener, cache) = make_listener("default_group", "public");
-
+fn usable_instances_keeps_healthy_enabled_addresses() {
     let instances = vec![
         make_service_instance("10.0.0.1", 8080, true, true),
-        make_service_instance("10.0.0.2", 8080, true, true),
-        make_service_instance("10.0.0.3", 8080, false, true), // unhealthy
+        make_service_instance("10.0.0.2", 8080, false, true), // unhealthy
+        make_service_instance("10.0.0.3", 8080, true, false), // disabled
+        make_service_instance("not-an-ip", 8080, true, true),
     ];
 
-    fire_event(&listener, "my-svc", Some(instances));
+    let usable = usable_instances(&instances);
 
-    let key = ServiceKey::new("my-svc", "default_group", "public");
-    let cached = cache.get(&key).unwrap();
-    assert_eq!(cached.value().len(), 2);
-}
-
-#[test]
-fn listener_filters_disabled_instances() {
-    let (listener, cache) = make_listener("default_group", "public");
-
-    let instances = vec![
-        make_service_instance("10.0.0.1", 8080, true, true),
-        make_service_instance("10.0.0.2", 8080, true, false), // disabled
-    ];
-
-    fire_event(&listener, "svc-a", Some(instances));
-
-    let key = ServiceKey::new("svc-a", "default_group", "public");
-    let cached = cache.get(&key).unwrap();
-    assert_eq!(cached.value().len(), 1);
-    assert_eq!(cached.value()[0].ip, IpAddr::from([10, 0, 0, 1]));
-}
-
-#[test]
-fn listener_removes_key_when_instances_none() {
-    let (listener, cache) = make_listener("default_group", "public");
-
-    // Insert first
-    let instances = vec![make_service_instance("10.0.0.1", 8080, true, true)];
-    fire_event(&listener, "svc-remove", Some(instances));
-
-    let key = ServiceKey::new("svc-remove", "default_group", "public");
-    assert!(cache.get(&key).is_some());
-
-    // Fire with None → should remove
-    fire_event(&listener, "svc-remove", None);
-    assert!(cache.get(&key).is_none());
-}
-
-#[test]
-fn listener_replaces_entire_vec_on_update() {
-    let (listener, cache) = make_listener("default_group", "public");
-
-    // First event: 1 instance
-    fire_event(
-        &listener,
-        "svc-replace",
-        Some(vec![make_service_instance("10.0.0.1", 8080, true, true)]),
-    );
-
-    let key = ServiceKey::new("svc-replace", "default_group", "public");
-    assert_eq!(cache.get(&key).unwrap().value().len(), 1);
-
-    // Second event: 3 instances (entire vec replaced)
-    fire_event(
-        &listener,
-        "svc-replace",
-        Some(vec![
-            make_service_instance("10.0.0.2", 8080, true, true),
-            make_service_instance("10.0.0.3", 8080, true, true),
-            make_service_instance("10.0.0.4", 8080, true, true),
-        ]),
-    );
-    assert_eq!(cache.get(&key).unwrap().value().len(), 3);
-    assert_eq!(
-        cache.get(&key).unwrap().value()[0].ip,
-        IpAddr::from([10, 0, 0, 2])
-    );
+    assert_eq!(usable.len(), 1);
+    assert_eq!(usable[0].ip, IpAddr::from([10, 0, 0, 1]));
+    assert_eq!(usable[0].port, 8080);
 }
 
 #[test]
@@ -155,63 +56,6 @@ fn cached_instance_rejects_a_non_address() {
     );
 }
 
-#[test]
-fn listener_drops_only_the_bad_address() {
-    let (listener, cache) = make_listener("default_group", "public");
-
-    let mut broken = make_service_instance("garbage", 8080, true, true);
-    broken.metadata = HashMap::new();
-    fire_event(
-        &listener,
-        "svc-partial",
-        Some(vec![
-            make_service_instance("10.0.0.1", 8080, true, true),
-            broken,
-        ]),
-    );
-
-    let key = ServiceKey::new("svc-partial", "default_group", "public");
-    let cached = cache.get(&key).expect("one valid instance is enough");
-    assert_eq!(cached.value().len(), 1);
-    assert_eq!(cached.value()[0].ip, IpAddr::from([10, 0, 0, 1]));
-}
-
-#[test]
-fn listener_lowercases_keys() {
-    let (listener, cache) = make_listener("DEFAULT_GROUP", "Public");
-
-    fire_event(
-        &listener,
-        "My-SVC",
-        Some(vec![make_service_instance("10.0.0.1", 8080, true, true)]),
-    );
-
-    let key = ServiceKey::new("my-svc", "default_group", "public");
-    assert!(cache.get(&key).is_some());
-}
-
-#[test]
-fn listener_stamps_last_push_on_every_event() {
-    let (listener, _cache) = make_listener("default_group", "public");
-    assert_eq!(
-        listener.last_push.load(Ordering::Relaxed),
-        0,
-        "no event yet must read as epoch-0 (never pushed)"
-    );
-
-    fire_event(
-        &listener,
-        "svc-time",
-        Some(vec![make_service_instance("10.0.0.1", 8080, true, true)]),
-    );
-    let first = listener.last_push.load(Ordering::Relaxed);
-    assert!(first > 0, "a push event must stamp unix seconds");
-
-    // Removal events are pushes too — freshness of contact matters, not payload.
-    fire_event(&listener, "svc-time", None);
-    assert!(listener.last_push.load(Ordering::Relaxed) >= first);
-}
-
 /// `service.group.namespace` is ambiguous with plain dots: `a.b` in group `c`
 /// looks like `a` in group `b.c`. The separator is not a DNS label byte, so the
 /// two stay distinct, which is what lets the composite key replace three fields.
@@ -224,24 +68,6 @@ fn service_key_keeps_dotted_shapes_distinct() {
     assert_ne!(
         dotted_service, dotted_group,
         "a service name containing dots must not be re-read as a group boundary"
-    );
-}
-
-/// A Nacos identifier carrying the separator could forge a boundary and alias a
-/// different triple, so the listener refuses to write such a key.
-#[test]
-fn listener_skips_updates_that_could_alias_another_key() {
-    let (listener, cache) = make_listener("b\u{1}c", "public");
-
-    fire_event(
-        &listener,
-        "a",
-        Some(vec![make_service_instance("10.0.0.1", 8080, true, true)]),
-    );
-
-    assert!(
-        cache.is_empty(),
-        "a separator inside the group must not produce a composite key"
     );
 }
 
@@ -327,28 +153,20 @@ fn user_written_word_class_is_unicode_aware() {
     );
 }
 
-/// The first page reports how many services exist, and that count decides how
-/// many more pages the scan asks for. Each row is the number of pages
-/// `subscribe_all` fetches for a reported total at a 1000-entry page.
+/// The catalog is handed a key built from DNS labels and has to know which
+/// service it names and whether that key belongs to the group and namespace this
+/// process is configured for — a query for another group must not reach Nacos.
 #[test]
-fn page_count_covers_the_reported_total() {
-    for (total, want) in [
-        (0, 0),    // nothing registered: the first page answers empty
-        (1, 1),    // a single service needs the first page, and only it
-        (999, 1),  // one page still holds it
-        (1000, 1), // exact fit must not ask for a second page
-        (1001, 2), // one over the page boundary
-        (2000, 2),
-        (2001, 3),
-        (-5, 0),               // a nonsense count fetches nothing beyond the first page
-        (i32::MAX, 2_147_484), // ceil(2147483647 / 1000), without overflowing
-    ] {
-        assert_eq!(
-            service_list_page_count(total, 1000),
-            want,
-            "total {total} must need {want} pages"
-        );
-    }
+fn service_key_exposes_its_parts() {
+    let key = ServiceKey::new("com.example.api", "DEFAULT_GROUP", "public");
+    assert_eq!(
+        key.parts(),
+        ("com.example.api", "DEFAULT_GROUP", "public"),
+        "a dotted service name must not be split at its dots"
+    );
+
+    let key = ServiceKey::new("order", "group", "ns");
+    assert_eq!(key.parts(), ("order", "group", "ns"));
 }
 
 /// A pattern that does not compile is a configuration error naming the field and

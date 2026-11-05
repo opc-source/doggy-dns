@@ -1,7 +1,7 @@
 #![allow(clippy::disallowed_methods)]
 
-//! End-to-end tests for the live Nacos path: `NacosServiceWatcher` -> instance
-//! cache -> `NacosAuthority` -> DNS answer.
+//! End-to-end tests for the live Nacos path: `NacosServiceWatcher` -> the Nacos
+//! client's naming cache -> `NacosAuthority` -> DNS answer.
 //!
 //! Every case needs a running Nacos server, so they are `#[ignore]`d and never
 //! join `cargo test --workspace`. CI runs them in `.github/workflows/nacos-ci.yml`.
@@ -77,26 +77,42 @@ impl NacosClient {
     async fn register(&self, service: &str, instances: &[(&str, i32)]) {
         let instances = instances
             .iter()
-            .map(|(ip, port)| ServiceInstance {
-                ip: ip.to_string(),
-                port: *port,
-                healthy: true,
-                enabled: true,
-                ephemeral: true,
-                ..Default::default()
-            })
+            .map(|(ip, port)| test_instance(ip, *port))
             .collect();
         self.naming
             .batch_register_instance(service.to_string(), Some(GROUP.to_string()), instances)
             .await
             .expect("failed to register instances with Nacos");
     }
+
+    /// Remove one ephemeral instance; the last removal empties the service.
+    async fn deregister(&self, service: &str, ip: &str, port: i32) {
+        self.naming
+            .deregister_instance(
+                service.to_string(),
+                Some(GROUP.to_string()),
+                test_instance(ip, port),
+            )
+            .await
+            .expect("failed to deregister an instance with Nacos");
+    }
+}
+
+fn test_instance(ip: &str, port: i32) -> ServiceInstance {
+    ServiceInstance {
+        ip: ip.to_string(),
+        port,
+        healthy: true,
+        enabled: true,
+        ephemeral: true,
+        ..Default::default()
+    }
 }
 
 /// A `doggy-dns` process running the e2e configuration on `port`.
 ///
-/// Subscriptions are established once, at start-up (`subscribe_all`), so every
-/// instance the case expects must be registered before this is constructed.
+/// Instances are registered before this is constructed so a case never depends
+/// on the first query's subscription racing the server's start-up.
 struct DoggyDns {
     port: u16,
     child: Child,
@@ -361,4 +377,25 @@ async fn e2e_service_pattern_excludes_dotted_registration() {
         message.answers.is_empty(),
         "a service the pattern rejected must not be subscribed, so it cannot be answered"
     );
+}
+
+/// Deleting the last instance must be observed. Reading the client's naming
+/// cache per query is what makes this work: an empty push purges the entry (the
+/// SDK runs with empty-push protection off), so the next query finds no
+/// instance and answers `NXDOMAIN`.
+#[tokio::test]
+#[ignore]
+async fn e2e_deregistered_last_instance_stops_resolving() {
+    let nacos = NacosClient::connect().await;
+    nacos.register("e2e-deleted", &[("10.0.0.61", 8080)]).await;
+
+    let server = DoggyDns::start(15416).await;
+    let qname = service_qname("e2e-deleted");
+    server.await_answers(&qname, RecordType::A, 1).await;
+
+    nacos.deregister("e2e-deleted", "10.0.0.61", 8080).await;
+
+    server
+        .await_code(&qname, RecordType::A, ResponseCode::NXDomain)
+        .await;
 }

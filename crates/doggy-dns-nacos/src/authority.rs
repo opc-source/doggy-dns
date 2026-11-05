@@ -12,8 +12,22 @@ use hickory_server::zone_handler::{
 };
 use std::sync::Arc;
 
+/// Where the authority reads a service's instances from on every query.
+///
+/// The authority keeps no copy of its own: whatever it answers is what the
+/// catalog holds at that instant, so a deletion the catalog has absorbed can
+/// never be served from a stale second copy.
+///
+/// `None` means the catalog does not know the service (authoritative NXDOMAIN).
+/// `Some` means it does, and an empty list is a service with no usable instance
+/// right now (NODATA), not an unknown name.
+#[async_trait]
+pub trait ServiceCatalog: Send + Sync {
+    async fn instances(&self, key: &ServiceKey) -> Option<Vec<CachedInstance>>;
+}
+
 pub struct NacosAuthority {
-    cache: Arc<DashMap<ServiceKey, Vec<CachedInstance>>>,
+    catalog: Arc<dyn ServiceCatalog>,
     ttl: u32,
     origin: LowerName,
     /// Apex SOA, built once. Every in-zone negative answer attaches it, and
@@ -22,22 +36,64 @@ pub struct NacosAuthority {
 }
 
 impl NacosAuthority {
-    pub fn new(
-        cache: Arc<DashMap<ServiceKey, Vec<CachedInstance>>>,
-        dns_zone: &str,
-        ttl: u32,
-    ) -> Self {
+    /// Answer every query from `catalog`. Production hands in the Nacos client's
+    /// cache; tests and benchmarks may hand in any map-like source.
+    pub fn new(catalog: Arc<dyn ServiceCatalog>, dns_zone: &str, ttl: u32) -> Self {
         let zone_name = format!("{}.", dns_zone.trim_end_matches('.'));
         let zone = Name::from_ascii(&zone_name).unwrap_or_default();
         let origin = LowerName::from(zone.clone());
         let apex_soa = build_soa_record(&zone, ttl);
         Self {
-            cache,
+            catalog,
             ttl,
             origin,
             apex_soa,
         }
     }
+
+    /// Answer from the instances the catalog returned for this name.
+    fn answer(
+        &self,
+        name: &LowerName,
+        instances: &[CachedInstance],
+        rtype: RecordType,
+    ) -> LookupControlFlow<AuthLookup> {
+        // The service exists, but we only serve address records.
+        if !matches!(rtype, RecordType::A | RecordType::AAAA) {
+            return LookupControlFlow::Continue(Err(LookupError::NameExists));
+        }
+
+        // Answers carry an owned name: one clone for the answer itself (paid
+        // even when the family filter then finds no record) plus one per
+        // record. That is the floor a `Vec<Record>` gives us.
+        let answer_name = Name::from(name.clone());
+        let records = to_dns_records(&answer_name, instances, self.ttl, rtype);
+
+        if records.is_empty() {
+            // Service exists, but has no address of the requested family.
+            return LookupControlFlow::Continue(Err(LookupError::NameExists));
+        }
+
+        LookupControlFlow::Continue(Ok(AuthLookup::answers(
+            LookupRecords::Section(records),
+            None,
+        )))
+    }
+}
+
+/// A plain map is a catalog as well: the authority tests and benchmarks fill one
+/// directly instead of standing up a Nacos client.
+#[async_trait]
+impl ServiceCatalog for DashMap<ServiceKey, Vec<CachedInstance>> {
+    async fn instances(&self, key: &ServiceKey) -> Option<Vec<CachedInstance>> {
+        self.get(key).map(|entry| entry.value().clone())
+    }
+}
+
+/// The zone exists but this name does not, so the answer is authoritative and
+/// must never fall through to a later plugin.
+fn nxdomain() -> LookupControlFlow<AuthLookup> {
+    LookupControlFlow::Continue(Err(LookupError::ResponseCode(ResponseCode::NXDomain)))
 }
 
 /// SOA for the zone apex.
@@ -95,46 +151,17 @@ impl ZoneHandler for NacosAuthority {
             };
         }
 
-        let key = match service_key_from_name(name, &self.origin) {
-            Some(key) => key,
-            None => {
-                return LookupControlFlow::Continue(Err(LookupError::ResponseCode(
-                    ResponseCode::NXDomain,
-                )));
-            }
+        let Some(key) = service_key_from_name(name, &self.origin) else {
+            return nxdomain();
         };
 
-        // Read through the guard instead of cloning the whole Vec: an answer
-        // needs only borrowed instances now. Nothing below may await while
-        // `entry` is alive, or a slow shard holder could stall a push writing
-        // the same shard - clippy's await_holding_lock does not know about
-        // DashMap, so the alloc guard and the async tests are the tripwire.
-        let Some(entry) = self.cache.get(&key) else {
-            return LookupControlFlow::Continue(Err(LookupError::ResponseCode(
-                ResponseCode::NXDomain,
-            )));
-        };
-
-        // The service exists, but we only serve address records.
-        if !matches!(rtype, RecordType::A | RecordType::AAAA) {
-            return LookupControlFlow::Continue(Err(LookupError::NameExists));
+        // Every in-zone query reads the catalog, address type or not: without a
+        // local copy this is the only way to tell an existing service (NODATA for
+        // a type it does not serve) from an unknown one (NXDOMAIN).
+        match self.catalog.instances(&key).await {
+            Some(instances) => self.answer(name, &instances, rtype),
+            None => nxdomain(),
         }
-
-        // Answers carry an owned name: one clone for the answer itself (paid
-        // even when the family filter then finds no record) plus one per
-        // record. That is the floor a `Vec<Record>` gives us.
-        let answer_name = Name::from(name.clone());
-        let records = to_dns_records(&answer_name, entry.value(), self.ttl, rtype);
-
-        if records.is_empty() {
-            // Service exists, but has no address of the requested family.
-            return LookupControlFlow::Continue(Err(LookupError::NameExists));
-        }
-
-        LookupControlFlow::Continue(Ok(AuthLookup::answers(
-            LookupRecords::Section(records),
-            None,
-        )))
     }
 
     async fn search(

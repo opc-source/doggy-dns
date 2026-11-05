@@ -79,23 +79,38 @@ All implement hickory's `ZoneHandler` trait. Plugins are evaluated in `[[plugins
 
 ### Nacos Integration Flow
 
-`NacosServiceWatcher` → subscribes to Nacos naming service → `InstanceChangeListener`
-receives push events → replaces entire `Vec<CachedInstance>` for a `ServiceKey` in
-`DashMap` (immutable update) → `NacosAuthority.lookup()` reads through the `DashMap`
-read guard and builds records from borrowed instances.
+`NacosServiceWatcher` answers from the Nacos client's naming cache and keeps no
+instance data of its own. `NacosAuthority.lookup()` calls
+`ServiceCatalog::instances(key)` on every in-zone query; the watcher splits the
+key, checks group/namespace and `ServiceFilter`, subscribes the name if this
+process never has (a `DashSet<String>` of subscribed names — the SDK offers no
+way to ask, and keeps every listener it is handed), then reads
+`get_all_instances(..., subscribe = true)`. The SDK answers from its naming
+cache when it has an entry and asks the server otherwise, so the answer is
+always the client's current view: a last-instance removal push empties that
+cache and the next query answers `NXDOMAIN`. A subscribe call that fails is
+forgotten so the next query retries it.
 
-`subscribe_all()` reads every `get_service_list` page of the group (1000 names per
-page, sized from the total the first page reports) and subscribes only the names
-`ServiceFilter` selects (`service_pattern`, a regex wrapped in whole-name anchors,
-default `[A-Za-z0-9_-]+` = bare application names). A name the filter rejects is
-never cached, so it resolves to authoritative `NXDOMAIN` like any unknown service;
-a page that fails to fetch is warned about and the scan stops.
+`ServiceFilter` gates names before any Nacos call (`service_pattern`, a regex
+wrapped in whole-name anchors, default `[A-Za-z0-9_-]+` = bare application
+names). A name the filter rejects is never cached or subscribed, so it resolves
+to authoritative `NXDOMAIN` like any unknown service.
+
+The subscription carries a no-op listener: instance data stays in the client's
+cache (written before the SDK notifies anyone), so the listener exists only to
+keep the key in the SDK's subscriber registry and silence its "not subscribed"
+warning; the control plane reports the subscribed-name count, no push timestamp.
+The client is built with `naming_load_cache_at_start(true)`
+(a restart answers from the previous run's data) and
+`naming_push_empty_protection(false)` (a last-instance disappearance must reach
+the cache). `NXDOMAIN` covers both an unknown name and a known service with no
+usable instance, because `get_all_instances` returns an empty list for both.
 
 DNS name format: `<service>.<group>.<namespace>.<zone_suffix>.` (zone membership by
 `Name::zone_of`, key by `mapping::service_key_from_name`, split from the right so
 service names may contain dots). `ServiceKey` is one composite lowercase string
 (`service \u{1} group \u{1} namespace`) and `CachedInstance.ip` is an `IpAddr`, parsed
-when the push arrives; the authority never lowercases or re-parses per query because
+when a query reads the list; the authority never lowercases or re-parses per query because
 the handler receives a `LowerName`. Only `A`/`AAAA` record types are served, filtered
 by query type. The authority owns its whole zone: unknown services return
 authoritative `NXDOMAIN` and missing families/types return `NODATA` instead of falling
@@ -158,6 +173,6 @@ TOML config at `config/doggy-dns.toml`. Key structs in `crates/doggy-dns-basic` 
 
 - Integration tests in `tests/` and `crates/*/tests/` (not inline `#[cfg(test)]` modules)
 - Forward/native tests make real network calls
-- Nacos tests use mock DashMap caches (no Nacos server needed)
+- Nacos tests use a fake catalog or a DashMap as the catalog (no Nacos server needed)
 - Benchmarks in `crates/*/benches/` using criterion 0.8, parameterized over worker_threads 1..4
 - Benchmark output starts with "running 0 tests" (from default harness) — this is normal, criterion results follow

@@ -1,6 +1,6 @@
+use crate::authority::ServiceCatalog;
 use anyhow::anyhow;
-use dashmap::DashMap;
-use doggy_dns_basic::time::unix_now_secs;
+use dashmap::DashSet;
 use nacos_sdk::api::naming::{
     NamingChangeEvent, NamingEventListener, NamingService, NamingServiceBuilder, ServiceInstance,
 };
@@ -9,7 +9,6 @@ use regex::Regex;
 use std::net::IpAddr;
 use std::str::FromStr;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicI64, Ordering};
 
 /// Separator inside [`ServiceKey`].
 ///
@@ -17,8 +16,8 @@ use std::sync::atomic::{AtomicI64, Ordering};
 /// name containing dots can never be re-read as a group or namespace boundary.
 pub const KEY_SEPARATOR: char = '\u{1}';
 
-/// Key for the service instance cache: `service SEPARATOR group SEPARATOR
-/// namespace`, all lowercase.
+/// Key for a service lookup: `service SEPARATOR group SEPARATOR namespace`, all
+/// lowercase.
 ///
 /// One composite string instead of three fields: a lookup used to allocate the
 /// three parts and then lowercase each of them, six allocations for a value the
@@ -41,32 +40,18 @@ impl ServiceKey {
     pub fn as_str(&self) -> &str {
         &self.0
     }
-}
 
-/// True when no part contains the composite key separator, so the assembled key
-/// cannot alias a different `(service, group, namespace)` triple.
-fn parts_are_separable(parts: [&str; 3]) -> bool {
-    parts.iter().all(|part| !part.contains(KEY_SEPARATOR))
-}
-
-/// How many services one `get_service_list` page asks for while scanning the
-/// whole list. Not configurable: the scan reads every page either way, so this
-/// only trades round trips against the size of each answer.
-const SERVICE_LIST_PAGE_SIZE: i32 = 1000;
-
-/// How many pages of `page_size` it takes to cover `total` reported services.
-/// `page_size` is positive, as every caller passes the constant above.
-///
-/// The first page carries the count, so the scan knows its length without
-/// guessing; a count that is not positive, or a stale one the server retracts
-/// mid-scan, costs at most one empty page because [`NacosServiceWatcher`] stops
-/// on the first empty answer.
-pub fn service_list_page_count(total: i32, page_size: i32) -> i32 {
-    if total <= 0 {
-        return 0;
+    /// The three parts, borrowed. The only production caller is built from DNS
+    /// labels, where `label_text` rejects the separator, so the split cannot land
+    /// inside a service name — dotted names stay in one piece.
+    pub fn parts(&self) -> (&str, &str, &str) {
+        let mut parts = self.0.splitn(3, KEY_SEPARATOR);
+        (
+            parts.next().unwrap_or_default(),
+            parts.next().unwrap_or_default(),
+            parts.next().unwrap_or_default(),
+        )
     }
-    // Ceiling divide written out: `i32::div_ceil` is still unstable.
-    total / page_size + i32::from(total % page_size != 0)
 }
 
 /// The built-in subscription rule: a bare application name — ASCII letters,
@@ -78,13 +63,11 @@ pub fn service_list_page_count(total: i32, page_size: i32) -> i32 {
 /// Configured patterns keep that same Unicode behaviour, deliberately.
 const DEFAULT_SERVICE_PATTERN: &str = "[A-Za-z0-9_-]+";
 
-/// Which Nacos services this process subscribes to.
+/// Which Nacos services this process answers for.
 ///
-/// `get_service_list` reports every service in the group, and a shared
-/// Nacos carries registrations this zone has no business being pushed, so the
-/// list is narrowed before any subscription is sent. A name this filter rejects
-/// never reaches the instance cache, and the authority owns its whole zone, so
-/// querying it yields authoritative NXDOMAIN rather than a fall-through.
+/// A name this filter rejects is never sent to Nacos, and the authority owns its
+/// whole zone, so querying it yields authoritative NXDOMAIN rather than a
+/// fall-through to another plugin.
 #[derive(Debug)]
 pub struct ServiceFilter {
     pattern: Regex,
@@ -104,7 +87,7 @@ impl ServiceFilter {
         Ok(Self { pattern: compiled })
     }
 
-    /// True when `service_name`, exactly as Nacos reports it, should be subscribed.
+    /// True when `service_name`, exactly as Nacos reports it, should be served.
     pub fn is_selected(&self, service_name: &str) -> bool {
         self.pattern.is_match(service_name)
     }
@@ -119,11 +102,10 @@ pub struct CachedInstance {
 }
 
 impl CachedInstance {
-    /// Build a cache entry, rejecting an instance whose address is not an IP.
+    /// Build a record source, rejecting an instance whose address is not an IP.
     ///
-    /// Parsed once per push instead of once per query. An unparsable address is
-    /// dropped here rather than skipped while answering, so the warn log keeps
-    /// its level and text but no longer repeats for every query.
+    /// Parsed once per query read instead of once per record, so an unparsable
+    /// address is dropped before the family filter walks the list.
     pub fn from_service_instance(instance: &ServiceInstance) -> Option<Self> {
         match IpAddr::from_str(&instance.ip) {
             Ok(ip) => Some(Self {
@@ -139,61 +121,48 @@ impl CachedInstance {
     }
 }
 
-pub struct InstanceChangeListener {
-    pub cache: Arc<DashMap<ServiceKey, Vec<CachedInstance>>>,
-    pub group: String,
-    pub namespace: String,
-    /// Unix seconds of the most recent push; 0 means "never received one".
-    pub last_push: Arc<AtomicI64>,
+/// The instances worth answering with: healthy, enabled, and carrying an address
+/// that parses. The client keeps instances this resolver cannot use; they are
+/// dropped when a query reads the list.
+pub fn usable_instances(instances: &[ServiceInstance]) -> Vec<CachedInstance> {
+    instances
+        .iter()
+        .filter(|instance| instance.healthy && instance.enabled)
+        .filter_map(CachedInstance::from_service_instance)
+        .collect()
 }
 
-impl NamingEventListener for InstanceChangeListener {
-    fn event(&self, event: Arc<NamingChangeEvent>) {
-        let service_name = event.service_name.clone();
-        tracing::info!("nacos service changed: {}", service_name);
-        self.last_push.store(unix_now_secs(), Ordering::Relaxed);
+/// The listener a subscription carries.
+///
+/// No data flows through it: the SDK's emitter writes the client's naming cache
+/// before it notifies anyone, and DNS reads that cache directly. A listener is
+/// still required by `NamingService::subscribe`, and its presence keeps the SDK
+/// from dropping the change notification with "the key ... is not subscribed".
+struct NoopListener;
 
-        if !parts_are_separable([&service_name, &self.group, &self.namespace]) {
-            tracing::warn!(
-                service_name = %service_name,
-                group = %self.group,
-                namespace = %self.namespace,
-                "nacos identifiers contain the cache key separator; skipping this update"
-            );
-            return;
-        }
-
-        let key = ServiceKey::new(
-            &service_name.to_lowercase(),
-            &self.group.to_lowercase(),
-            &self.namespace.to_lowercase(),
-        );
-
-        match &event.instances {
-            Some(instances) => {
-                let cached: Vec<CachedInstance> = instances
-                    .iter()
-                    .filter(|i| i.healthy && i.enabled)
-                    .filter_map(CachedInstance::from_service_instance)
-                    .collect();
-                // Immutable replacement: insert replaces the entire value
-                self.cache.insert(key, cached);
-            }
-            None => {
-                self.cache.remove(&key);
-            }
-        }
-    }
+impl NamingEventListener for NoopListener {
+    fn event(&self, _event: Arc<NamingChangeEvent>) {}
 }
 
-/// Watches Nacos for service instance changes and maintains an in-memory cache.
+/// Answers from the Nacos client's own naming cache.
+///
+/// No instance data is kept here. Each query reads `get_all_instances` with
+/// `subscribe = true`, which the SDK answers from its naming cache when it has
+/// an entry and otherwise fetches; because every name is subscribed before it is
+/// read, pushes keep that cache current — including a push that removes the last
+/// instance, which reaches DNS on the next query.
 pub struct NacosServiceWatcher {
     naming_service: Arc<NamingService>,
-    cache: Arc<DashMap<ServiceKey, Vec<CachedInstance>>>,
     namespace: String,
     group: String,
-    last_push: Arc<AtomicI64>,
     filter: ServiceFilter,
+    listener: Arc<dyn NamingEventListener>,
+    /// Names whose subscription this process has registered.
+    ///
+    /// The SDK offers no way to ask whether a key is subscribed and keeps every
+    /// listener it is handed, so this set is what makes the first query for a
+    /// name the only one that subscribes it. It holds no instance data.
+    subscribed: DashSet<String>,
 }
 
 impl NacosServiceWatcher {
@@ -206,139 +175,114 @@ impl NacosServiceWatcher {
         let props = ClientProps::new()
             .server_addr(server_addr)
             .namespace(namespace)
-            .app_name(doggy_dns_plugin::APP_NAME);
+            .app_name(doggy_dns_plugin::APP_NAME)
+            // A service whose last instance disappears must reach the cache: with
+            // the SDK's empty-push protection on, that push is dropped and the
+            // stale address keeps being served until something else changes.
+            .naming_push_empty_protection(false)
+            // Load the client's naming cache from disk at start-up: a restart
+            // answers from the previous run's data, and a Nacos outage at boot no
+            // longer fails the build (the client retries in the background).
+            .naming_load_cache_at_start(true);
 
         let naming_service = NamingServiceBuilder::new(props).build().await?;
 
         Ok(Self {
             naming_service: Arc::new(naming_service),
-            cache: Arc::new(DashMap::new()),
             namespace: namespace.to_string(),
             group: group.to_string(),
-            last_push: Arc::new(AtomicI64::new(0)),
             filter,
+            listener: Arc::new(NoopListener),
+            subscribed: DashSet::new(),
         })
     }
 
-    /// Subscribe to a specific service for push updates.
-    pub async fn subscribe(&self, service_name: &str) -> anyhow::Result<()> {
-        let listener = InstanceChangeListener {
-            cache: Arc::clone(&self.cache),
-            group: self.group.clone(),
-            namespace: self.namespace.clone(),
-            last_push: Arc::clone(&self.last_push),
-        };
-
-        self.naming_service
-            .subscribe(
-                service_name.to_string(),
-                Some(self.group.clone()),
-                vec![],
-                Arc::new(listener),
-            )
-            .await?;
-
-        tracing::info!("subscribed to nacos service: {}", service_name);
-        Ok(())
+    /// How many names this process has subscribed to, for the control plane's
+    /// per-zone live signal.
+    pub fn subscribed_count(&self) -> usize {
+        self.subscribed.len()
     }
+}
 
-    /// Get cached instances for a service.
-    pub fn get_instances(&self, key: &ServiceKey) -> Option<Vec<CachedInstance>> {
-        self.cache.get(key).map(|entry| entry.value().clone())
-    }
-
-    /// Subscribe to the services [`Self::filter`] selects from the whole service
-    /// list of the configured group, read at start-up.
-    pub async fn subscribe_all(&self) {
-        let Some(service_names) = self.read_service_list().await else {
-            return;
-        };
-
-        let (selected, filtered_out): (Vec<&String>, Vec<&String>) = service_names
-            .iter()
-            .partition(|service_name| self.filter.is_selected(service_name));
-
-        for service_name in &filtered_out {
+#[async_trait::async_trait]
+impl ServiceCatalog for NacosServiceWatcher {
+    /// The client cache's answer for `key`, subscribing the name first if this
+    /// process never has.
+    ///
+    /// Bounded three ways: the key has to belong to the configured group and
+    /// namespace, [`ServiceFilter`] has to select the name, and the subscribed
+    /// set makes the first query for a name the only one that spends a
+    /// `subscribe` call.
+    async fn instances(&self, key: &ServiceKey) -> Option<Vec<CachedInstance>> {
+        let (service, group, namespace) = key.parts();
+        if !group.eq_ignore_ascii_case(&self.group)
+            || !namespace.eq_ignore_ascii_case(&self.namespace)
+        {
+            // In our zone but not in the group we serve; nothing to ask.
+            return None;
+        }
+        if !self.filter.is_selected(service) {
             tracing::debug!(
                 "nacos service '{}' left unsubscribed: service_pattern did not select it",
-                service_name
+                service
             );
+            return None;
         }
-        for service_name in &selected {
-            if let Err(e) = self.subscribe(service_name).await {
-                tracing::warn!("failed to subscribe to service '{}': {}", service_name, e);
-            }
-        }
-        tracing::info!(
-            "subscribed to {} of {} nacos services in group {} ({} not selected by service_pattern)",
-            selected.len(),
-            service_names.len(),
-            self.group,
-            filtered_out.len()
-        );
-    }
 
-    /// Read every page of the group's service list, sized from the count the
-    /// first page reports. `None` only when that first request failed, which
-    /// leaves nothing to subscribe.
-    async fn read_service_list(&self) -> Option<Vec<String>> {
-        let (mut service_names, pages) = match self
+        if self.subscribed.insert(service.to_string()) {
+            let subscribed = self
+                .naming_service
+                .subscribe(
+                    service.to_string(),
+                    Some(self.group.clone()),
+                    vec![],
+                    Arc::clone(&self.listener),
+                )
+                .await;
+            if let Err(e) = subscribed {
+                // Forget the attempt so the next query retries it.
+                self.subscribed.remove(service);
+                tracing::warn!(
+                    "failed to subscribe to nacos service '{}': {}; the next query retries it",
+                    service,
+                    e
+                );
+                return None;
+            }
+            tracing::info!("subscribed to nacos service: {}", service);
+        }
+
+        let instances = match self
             .naming_service
-            .get_service_list(1, SERVICE_LIST_PAGE_SIZE, Some(self.group.clone()))
+            .get_all_instances(
+                service.to_string(),
+                Some(self.group.clone()),
+                vec![],
+                // Reads the client's cache when it has an entry, which is what
+                // keeps the common query local.
+                true,
+            )
             .await
         {
-            Ok((names, total)) => (
-                names,
-                service_list_page_count(total, SERVICE_LIST_PAGE_SIZE),
-            ),
+            Ok(instances) => instances,
             Err(e) => {
                 tracing::warn!(
-                    "failed to list the nacos services of group {}: {}; nothing is subscribed at start-up, so in-zone names answer NXDOMAIN until the list can be read",
-                    self.group,
+                    "failed to read the nacos client cache for service '{}': {}",
+                    service,
                     e
                 );
                 return None;
             }
         };
 
-        for page_no in 2..=pages {
-            match self
-                .naming_service
-                .get_service_list(page_no, SERVICE_LIST_PAGE_SIZE, Some(self.group.clone()))
-                .await
-            {
-                Ok((page, _total)) => {
-                    if page.is_empty() {
-                        // The count went stale mid-scan; the server has no more.
-                        break;
-                    }
-                    service_names.extend(page);
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        "failed to read page {} of {} of the nacos service list of group {}: {}; subscribing to the {} names already read",
-                        page_no,
-                        pages,
-                        self.group,
-                        e,
-                        service_names.len()
-                    );
-                    break;
-                }
-            }
+        let usable = usable_instances(&instances);
+        if usable.is_empty() {
+            // Either Nacos does not know the name, or it has nothing healthy to
+            // serve; the client cache carries no presence flag, so both answer
+            // authoritative NXDOMAIN rather than NODATA.
+            tracing::debug!("nacos has no usable instance of '{}'", service);
+            return None;
         }
-
-        Some(service_names)
-    }
-
-    /// Get a reference to the cache.
-    pub fn cache(&self) -> Arc<DashMap<ServiceKey, Vec<CachedInstance>>> {
-        Arc::clone(&self.cache)
-    }
-
-    /// Unix seconds of the most recent push event shared with all listeners
-    /// of this watcher; 0 means no push has ever arrived.
-    pub fn last_push(&self) -> Arc<AtomicI64> {
-        Arc::clone(&self.last_push)
+        Some(usable)
     }
 }

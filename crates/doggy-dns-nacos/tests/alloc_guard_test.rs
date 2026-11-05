@@ -104,13 +104,16 @@ fn hit_and_miss_paths_allocate_within_budget() {
         RecordType::A,
     );
 
-    // Measured with a zero budget on this file's first run: 6 allocations for
-    // one answering instance and 2 for the in-zone miss. The budget equals the
-    // measurement - no slack - so the next `to_lowercase`, `format!` or `Vec`
-    // clone on this path fails the suite instead of the next review. Changing
-    // the seed above means re-measuring; that is deliberate, not routine.
-    const HIT_BUDGET: usize = 6;
-    const MISS_BUDGET: usize = 2;
+    // Measured: 8 allocations for one answering instance and 3 for the in-zone
+    // miss. The budget equals the measurement - no slack - so the next
+    // `to_lowercase`, `format!` or extra `Vec` clone on this path fails the suite
+    // instead of the next review. Both counts grew by one when the authority
+    // started reading a `ServiceCatalog` per query (the boxed `async_trait`
+    // future), and the hit grew by another: the map-backed catalog returns an
+    // owned `Vec`, so the answer no longer borrows the cache entry. Changing the
+    // seed above means re-measuring; that is deliberate, not routine.
+    const HIT_BUDGET: usize = 8;
+    const MISS_BUDGET: usize = 3;
     assert!(
         hit <= HIT_BUDGET,
         "hit path: {hit} allocations (budget {HIT_BUDGET}) - record the measured count"
