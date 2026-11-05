@@ -145,7 +145,8 @@ async fn async_main(
 
     tracing::info!("doggy-dns is ready");
 
-    // Start the control plane if enabled (non-fatal on failure). The XDP
+    // Start the control plane if enabled, keeping its port if the previous
+    // process has not released it yet (non-fatal either way). The XDP
     // attach flag is fixed after startup — the manager lives as long as this
     // function and dropping it detaches the program.
     let live = build_live_state(&watchers, xdp.enabled());
@@ -366,11 +367,19 @@ async fn start_control_plane(
 
     let control_config = config.control.clone();
 
-    // start() only binds the listener and spawns the serve task; a failure
-    // here must stay non-fatal so DNS service continues alone.
-    match doggy_dns_control::start(state, live, control_config).await {
+    // A control port the previous process still holds is the expected case
+    // during a restart — the DNS sockets overlap, the control port does not —
+    // so the bind is retried rather than given up on. The only error left here
+    // is an unusable listen address, which still must not stop DNS.
+    match doggy_dns_control::start_retrying(
+        state,
+        live,
+        control_config,
+        doggy_dns_control::BIND_RETRY_INTERVAL,
+        doggy_dns_core::reuseport::DNS_PORT_OVERLAP_SUPPORTED,
+    ) {
         Ok(handle) => {
-            tracing::info!(addr = %handle.addr, "control plane listening");
+            tracing::info!(addr = %handle.addr, "control plane starting");
             Some(handle)
         }
         Err(error) => {

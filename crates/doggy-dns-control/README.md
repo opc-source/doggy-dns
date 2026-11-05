@@ -18,7 +18,7 @@ Kubernetes probe target.
 - **Endpoint selection** — `control.endpoints` decides which routes exist
   (`mcp`, `healthz`, `readyz`); everything else 404s.
 - **Read-only** — all four tools carry `readOnlyHint = true`, `destructiveHint = false`.
-- **Non-fatal** — if the control plane port is already in use, the DNS server continues running.
+- **Non-fatal** — if the control plane port is already in use, the DNS server continues running and the bind is retried every 10s until the port frees (see `BIND_RETRY_INTERVAL`). The control port is deliberately *not* in the `SO_REUSEPORT` group the DNS sockets join: two processes answering `/readyz` for one node would look like two instances.
 - **Config redaction** — `get_config` recursively replaces sensitive values (`password`, `token`, `secret`, `authorization`, `api_key`, `apikey`, `passwd`) with `"***"`.
 - **Optional Bearer auth** — set `[control].token` to require `Authorization: Bearer <token>` on `/mcp`; health endpoints never require it.
 - **Discovery** — the node publishes `doggy_dns.ip_addr` and `doggy_dns.control.port` OTel resource attributes so doggy-dns-console can join `http://{ip_addr}:{control_port}/mcp` and discover instances without static configuration.

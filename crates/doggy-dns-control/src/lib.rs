@@ -9,7 +9,7 @@ pub mod server;
 pub mod state;
 pub mod transport;
 
-pub use transport::{ControlPlaneHandle, start};
+pub use transport::{BIND_RETRY_INTERVAL, ControlPlaneHandle, start, start_retrying};
 
 use serde::{Deserialize, Serialize};
 

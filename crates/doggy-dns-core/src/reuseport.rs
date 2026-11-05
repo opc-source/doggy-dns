@@ -1,55 +1,91 @@
-//! SO_REUSEPORT UDP socket binding.
+//! Socket binding with `SO_REUSEPORT`.
+//!
+//! A restart can overlap two processes on one address only if *every* socket
+//! bound to that address asked for `SO_REUSEPORT` before its `bind()`: the
+//! option is fixed at bind time and cannot be added by whoever arrives later.
+//! It is therefore set unconditionally, and `reuseport_listen_num` decides only
+//! how many UDP receive paths this process opens — the fan-out is UDP-only,
+//! because that is where the query volume is; TCP keeps one listener per port.
+//!
+//! Non-Linux platforms do not request the option and keep the plain bind, so
+//! they still build and run — they just have no overlap window. A second socket
+//! on one address is impossible there, which is why `reuseport_listen_num > 1`
+//! remains a Linux-only configuration.
 //!
 //! Uses raw `libc` calls instead of `socket2` — the operations we need
-//! (`socket`, `setsockopt`, `fcntl`, `bind`) are thin wrappers, and we
+//! (`socket`, `setsockopt`, `fcntl`, `bind`, `listen`) are thin wrappers, and we
 //! already depend on `libc` for `SO_REUSEPORT`.
-//!
-//! The entire module is conditionally compiled: on Linux it provides the
-//! real implementation; on other platforms it exposes a stub that always
-//! returns an error (config validation should prevent this path anyway).
 
-#[cfg(target_os = "linux")]
-use anyhow::Context;
-use anyhow::Result;
-use tokio::net::UdpSocket;
+use anyhow::{Context, Result};
+use std::net::SocketAddr;
+use tokio::net::{TcpListener, UdpSocket};
 
+/// Accept backlog matching `tokio::net::TcpListener::bind`, which delegates to
+/// mio and asks for 128 on Linux (mio 1.2.4, `net/tcp/listener.rs`). Taking the
+/// fd over into this module moves the `listen()` call here, so the value has to
+/// be repeated deliberately rather than inherited silently.
 #[cfg(target_os = "linux")]
-pub fn bind_reuseport_udp(addr: std::net::SocketAddr) -> Result<UdpSocket> {
+const LISTEN_BACKLOG: libc::c_int = 128;
+
+/// Whether this platform can overlap a restart with its predecessor. A property
+/// of the platform rather than of the configuration, so the startup log states
+/// it: `reuseport` means the option was set, not merely that several sockets
+/// were opened. It is public because the control plane reads it too: that
+/// listener deliberately stays out of the group, so whether the DNS port can
+/// overlap at all decides whether its bind is a race or a certainty.
+pub const DNS_PORT_OVERLAP_SUPPORTED: bool = cfg!(target_os = "linux");
+
+/// Bind a UDP socket for the DNS server. `reuseport_listen_num` decides how
+/// many of these one process opens; only UDP has the volume to want several.
+#[cfg(target_os = "linux")]
+pub async fn bind_udp(addr: SocketAddr) -> Result<UdpSocket> {
     use std::os::fd::FromRawFd;
 
-    let fd = create_raw_socket(addr, libc::SOCK_DGRAM, libc::IPPROTO_UDP)?;
-    if let Err(e) = set_reuse_addr(fd) {
-        unsafe { libc::close(fd) };
-        return Err(e);
-    }
-    if let Err(e) = set_reuse_port(fd) {
-        unsafe { libc::close(fd) };
-        return Err(e);
-    }
-    if let Err(e) = set_nonblocking(fd) {
-        unsafe { libc::close(fd) };
-        return Err(e);
-    }
-    if let Err(e) = bind_raw(fd, addr) {
-        unsafe { libc::close(fd) };
-        return Err(e);
-    }
+    let fd = bind_raw_socket(addr, libc::SOCK_DGRAM, libc::IPPROTO_UDP)
+        .with_context(|| format!("failed to bind UDP socket with SO_REUSEPORT on {addr}"))?;
+    // `from_raw_fd` takes ownership here, so any failure below closes the fd
+    // along with the std socket instead of leaking it.
     let std_socket = unsafe { std::net::UdpSocket::from_raw_fd(fd) };
-    UdpSocket::from_std(std_socket).map_err(|e| anyhow::anyhow!(e))
+    UdpSocket::from_std(std_socket).context("failed to register the UDP socket with the runtime")
 }
 
+/// Bind a UDP socket for the DNS server.
 #[cfg(not(target_os = "linux"))]
-pub fn bind_reuseport_udp(_addr: std::net::SocketAddr) -> Result<UdpSocket> {
-    anyhow::bail!("SO_REUSEPORT UDP binding is only supported on Linux")
+pub async fn bind_udp(addr: SocketAddr) -> Result<UdpSocket> {
+    UdpSocket::bind(addr)
+        .await
+        .with_context(|| format!("failed to bind UDP socket on {addr}"))
 }
 
-// ---------------------------------------------------------------------------
-// Linux-only helpers
-// ---------------------------------------------------------------------------
-
+/// Bind a single TCP listener, for the DNS, TLS or HTTPS server: the fan-out
+/// above is UDP only, so TCP gets one address holder per process.
 #[cfg(target_os = "linux")]
-fn create_raw_socket(
-    addr: std::net::SocketAddr,
+pub async fn bind_tcp(addr: SocketAddr) -> Result<TcpListener> {
+    use std::os::fd::FromRawFd;
+
+    let fd = bind_raw_socket(addr, libc::SOCK_STREAM, libc::IPPROTO_TCP)
+        .with_context(|| format!("failed to bind TCP listener with SO_REUSEPORT on {addr}"))?;
+    let std_listener = unsafe { std::net::TcpListener::from_raw_fd(fd) };
+    TcpListener::from_std(std_listener)
+        .context("failed to register the TCP listener with the runtime")
+}
+
+/// Bind a single TCP listener, for the DNS, TLS or HTTPS server.
+#[cfg(not(target_os = "linux"))]
+pub async fn bind_tcp(addr: SocketAddr) -> Result<TcpListener> {
+    TcpListener::bind(addr)
+        .await
+        .with_context(|| format!("failed to bind TCP listener on {addr}"))
+}
+
+/// Create, arm and bind a socket, leaving it ready to hand to `from_raw_fd`.
+///
+/// One function owns the `close()` on every failure between `socket()` and the
+/// transfer of ownership, which is why the option setup is not spelled out at
+/// each call site the way it was when only UDP needed it.
+#[cfg(target_os = "linux")]
+fn bind_raw_socket(
+    addr: SocketAddr,
     sock_type: libc::c_int,
     protocol: libc::c_int,
 ) -> Result<libc::c_int> {
@@ -62,9 +98,37 @@ fn create_raw_socket(
     if fd < 0 {
         return Err(std::io::Error::last_os_error()).context("libc::socket() failed");
     }
+
+    let arm = || -> Result<()> {
+        set_reuse_addr(fd)?;
+        set_reuse_port(fd)?;
+        set_nonblocking(fd)?;
+        bind_raw(fd, addr)?;
+        // A bound stream socket is not a listener until `listen()` runs, and a
+        // datagram socket must not call it: deriving it from the type instead
+        // of taking a flag makes forgetting it on the TCP path impossible.
+        if sock_type == libc::SOCK_STREAM {
+            listen_raw(fd, LISTEN_BACKLOG)?;
+        }
+        Ok(())
+    };
+
+    arm().inspect_err(|_| {
+        unsafe { libc::close(fd) };
+    })?;
     Ok(fd)
 }
 
+// ---------------------------------------------------------------------------
+// Linux-only socket calls
+// ---------------------------------------------------------------------------
+
+/// Set on both kinds, for different reasons. The TCP bind this replaces set it
+/// — mio sets `SO_REUSEADDR` on every non-Windows TCP listener — so dropping it
+/// would change restart behaviour rather than only add the overlap. The UDP
+/// reuseport path set it too, and it is what lets a restarting process rebind an
+/// address its predecessor still holds; the plain `UdpSocket::bind` it now
+/// replaces did not, so this is the one behaviour a count of 1 gains.
 #[cfg(target_os = "linux")]
 fn set_reuse_addr(fd: libc::c_int) -> Result<()> {
     set_sockopt_int(fd, libc::SOL_SOCKET, libc::SO_REUSEADDR)
@@ -152,6 +216,18 @@ fn bind_raw(fd: libc::c_int, addr: std::net::SocketAddr) -> Result<()> {
                 return Err(std::io::Error::last_os_error()).context("libc::bind() failed");
             }
         }
+    }
+    Ok(())
+}
+
+/// `bind()` alone does not make a TCP socket a listener: the bind this path
+/// replaces called `listen()` on its way.
+#[cfg(target_os = "linux")]
+fn listen_raw(fd: libc::c_int, backlog: libc::c_int) -> Result<()> {
+    let ret = unsafe { libc::listen(fd, backlog) };
+    if ret < 0 {
+        return Err(std::io::Error::last_os_error())
+            .context(format!("libc::listen(backlog={backlog}) failed"));
     }
     Ok(())
 }

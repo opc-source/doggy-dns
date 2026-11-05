@@ -4,14 +4,17 @@ port = 15353
 tcp_timeout = 10
 shutdown_timeout = 5
 worker_threads = 1    # defaults to 1 (runs as DaemonSet, one per node)
-#reuseport_listen_num = 1  # Number of UDP sockets to bind with SO_REUSEPORT for
-                            # kernel-level load balancing across receive tasks.
-                            # Default: 1 (single socket, no reuseport).
+#reuseport_listen_num = 1  # Number of UDP sockets to bind, for kernel-level
+                            # load balancing across receive tasks.
+                            # Default: 1 (single receive path).
                             # Recommended: set equal to physical core count (not
                             # vCPU count) for optimal performance. E.g., on a
                             # 4-core machine with hyperthreading (8 vCPUs), set
                             # both worker_threads and reuseport_listen_num to 4.
-                            # Only effective on Linux.
+                            # Every socket, and the TCP listener too, is bound
+                            # with SO_REUSEPORT on Linux, so a restart can start
+                            # answering while its predecessor drains. Above 1 is
+                            # Linux-only: no other platform shares one address.
 #cpu_affinity = [0, 2, 4, 6]  # One core per worker thread, so a worker keeps that
 #                             # core's caches instead of roaming. The length must
 #                             # equal worker_threads and core ids must be unique and

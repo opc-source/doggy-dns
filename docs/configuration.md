@@ -13,8 +13,10 @@ port = 15353
 tcp_timeout = 10          # seconds, default 10
 shutdown_timeout = 5      # seconds, default 5
 worker_threads = 1        # default 1 (suitable for DaemonSet, one per node)
-#reuseport_listen_num = 1 # SO_REUSEPORT UDP sockets; default 1 (single socket).
-                          # Linux only; recommended: physical core count.
+#reuseport_listen_num = 1 # UDP receive paths; default 1. Sockets and the TCP
+                          # listener bind with SO_REUSEPORT on Linux, so a
+                          # restart overlaps the previous process. Above 1 is
+                          # Linux-only; recommended: physical core count.
 #cpu_affinity = [0, 2, 4, 6] # one core per worker thread; see "CPU affinity".
 rotate_answers = true     # default true: cycle multi-record answers per response
 
@@ -300,6 +302,12 @@ attach state); both are plain GET, never require auth and
 always answer 200 — `readyz` is a report, not a verdict, so deciding what
 counts as "not ready" stays with the operator or doggy-dns-console. Full
 contract: [crates/doggy-dns-control/README.md](../crates/doggy-dns-control/README.md).
+
+A restart overlaps its predecessor on the DNS port, because every DNS socket
+binds with `SO_REUSEPORT` (see `reuseport_listen_num`). The control port is not
+in that group — two processes answering `/readyz` would report two instances of
+one node — so a successor that finds it held keeps trying every 10s until the
+predecessor releases it, and DNS serves alone in the meantime.
 
 When observability is enabled, the node publishes `doggy_dns.ip_addr` — a
 concrete bind address as-is, loopback for a loopback bind, or the egress
