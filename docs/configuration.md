@@ -214,8 +214,12 @@ swallows the request error and returns `Ok`.
 
 `naming_load_cache_at_start` makes the client load its naming cache from disk, so
 subscribed names keep answering while Nacos is unreachable and the process starts
-even when the server is down. It is not a way to answer a name's first query: that
-still goes to the server.
+even when the server is down — down meaning it refuses the connection. It is not a
+way to answer a name's first query: that still goes to the server. One limit is
+the SDK's, not this design's: an address that accepts TCP and never answers blocks
+start-up before the DNS port is bound, because `NamingServiceBuilder::build()`
+awaits the SDK's health check with no overall bound. That await is also on `main`,
+unchanged here.
 
 The wait on Nacos is bounded to three seconds, on both paths; a call that fails or
 exceeds that bound answers `SERVFAIL` rather than `NXDOMAIN`, so the client retries

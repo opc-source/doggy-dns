@@ -129,7 +129,10 @@ keep the key in the SDK's subscriber registry and silence its "not subscribed"
 warning; the control plane reports the subscribed-name count, no push timestamp.
 The client is built with `naming_load_cache_at_start(true)` (what a restart reads
 back is the previous run's data — a name's first query is still confirmed by the
-server) and
+server; an address that *refuses* the connection is tolerated the same way, but one
+that accepts TCP and never answers blocks `NamingServiceWatcher::new` in the SDK's
+unbounded `build()` health check, before the DNS port binds — pre-existing, and
+unchanged here) and
 `naming_push_empty_protection(false)` (a last-instance disappearance must reach
 the cache). `NXDOMAIN` covers both an unknown name and a known service with no
 usable instance, because `get_all_instances` returns an empty list for both.
