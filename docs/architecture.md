@@ -67,6 +67,9 @@ through on lookup failure so a later `forward` plugin can still answer.
   Nacos client's naming cache (`subscribe = true`), which each push replaces
   wholesale. `CachedInstance.ip` is an `IpAddr`, so a query does its address
   parsing once per read list.
+- Three failed calls to Nacos in a row open a 30-second window (`FailureBackoff`)
+  in which a name this process has not confirmed is refused with `SERVFAIL` and
+  no call at all; an answer that did come from the server closes it.
 - The catalog is keyed by the bare service name. One plugin serves one
   group/namespace pair and the authority checks those two labels against its own
   config before asking for it, so the key never has to carry them.

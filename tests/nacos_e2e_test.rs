@@ -23,6 +23,7 @@
 //! test process: ephemeral instances disappear once the client connection is
 //! dropped, so the `NacosClient` handle must outlive the queries below.
 
+use doggy_dns_nacos::watcher::{NACOS_FAILURE_THRESHOLD, NACOS_LOOKUP_TIMEOUT};
 use hickory_proto::op::{Message, MessageType, OpCode, Query, ResponseCode};
 use hickory_proto::rr::{Name, RData, RecordType};
 use nacos_sdk::api::naming::{NamingService, NamingServiceBuilder, ServiceInstance};
@@ -50,6 +51,11 @@ const POLL: Duration = Duration::from_millis(300);
 /// unreachable backend arrives just after that bound, so the client must not
 /// give up at the same instant.
 const REPLY_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// How fast a query refused by the backoff window must answer. It spends no
+/// round trip, so anything near the watcher's lookup timeout means it dialled
+/// anyway; the slack is scheduling jitter, not waiting.
+const REFUSAL_BOUND: Duration = Duration::from_millis(1_500);
 
 fn nacos_addr() -> String {
     std::env::var("DOGGY_NACOS_ADDR").unwrap_or_else(|_| "127.0.0.1:8848".to_string())
@@ -548,5 +554,45 @@ async fn e2e_first_query_is_confirmed_by_the_server() {
         answer_ips(&message),
         HashSet::from(["10.9.9.4".to_string()]),
         "the first query must be answered by the server, not by the entry loaded at {entry:?}"
+    );
+}
+
+/// Once the remote has failed enough to open the backoff window, a name this
+/// process has not confirmed is refused without any call at all — so it answers
+/// inside the timeout the earlier queries each spent.
+#[tokio::test]
+#[ignore]
+async fn e2e_backoff_window_refuses_without_a_round_trip() {
+    // Nothing listens on port 1; every call dials the gRPC port (address + 1000)
+    // and is cut off by the watcher's [`NACOS_LOOKUP_TIMEOUT`].
+    let server = DoggyDns::start_with_addr(15420, "127.0.0.1:1").await;
+    let qname = service_qname("e2e-backoff");
+
+    for attempt in 1..=NACOS_FAILURE_THRESHOLD {
+        let message = server
+            .await_code(&qname, RecordType::A, ResponseCode::ServFail)
+            .await;
+        assert!(
+            message.answers.is_empty(),
+            "failure {attempt} must answer SERVFAIL with no records"
+        );
+    }
+
+    let started = tokio::time::Instant::now();
+    let message = server
+        .send(&qname, RecordType::A)
+        .await
+        .expect("no reply after the backoff window opened");
+    let refused_in = started.elapsed();
+
+    assert_eq!(
+        message.metadata.response_code,
+        ResponseCode::ServFail,
+        "an unconfirmed name must stay SERVFAIL while the window is open"
+    );
+    assert!(
+        refused_in < REFUSAL_BOUND,
+        "the window must refuse without dialling: answered in {refused_in:?}, \
+         whereas an unwindowed query waits the {NACOS_LOOKUP_TIMEOUT:?} bound"
     );
 }

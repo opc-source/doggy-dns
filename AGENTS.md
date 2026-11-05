@@ -100,10 +100,14 @@ listener and its own retry task, swallows the request error and returns `Ok` —
 the arm that forgets a failed subscribe is defensive, not a live path. A call that
 fails, or one that takes longer than the watcher's three-second bound
 (`NACOS_LOOKUP_TIMEOUT`), answers `SERVFAIL` instead of `NXDOMAIN`, so a Nacos
-outage is not negative-cached downstream.
-
-Known limit: a ledgered name whose cache entry the SDK dropped is re-fetched on
-the `subscribe = true` path, which fast-fails to an empty list — `NXDOMAIN`, not
+outage is not negative-cached downstream. `FailureBackoff` counts those failures:
+`NACOS_FAILURE_THRESHOLD` in a row open a `NACOS_FAILURE_BACKOFF` window in which
+an unledgered name is refused with `SERVFAIL` and no call, while ledgered names
+keep reading the client cache. A server-confirmed answer calls `record_success`
+(closing the window and restarting the streak); a client-cache read calls neither,
+because it proves nothing about the server. All three are constants, not config.
+Known limit: a ledgered name whose cache entry the SDK dropped is re-fetched on the
+`subscribe = true` path, which fast-fails to an empty list — `NXDOMAIN`, not
 `SERVFAIL`, during an outage.
 
 `ServiceFilter` gates names before any Nacos call (`service_pattern`, a regex

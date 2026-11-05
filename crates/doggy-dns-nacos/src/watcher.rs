@@ -9,6 +9,7 @@ use regex::Regex;
 use std::net::IpAddr;
 use std::str::FromStr;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicI64, AtomicU32, Ordering};
 use std::time::Duration;
 
 /// The built-in subscription rule: a bare application name — ASCII letters,
@@ -25,7 +26,87 @@ const DEFAULT_SERVICE_PATTERN: &str = "[A-Za-z0-9_-]+";
 /// The SDK retries a dead connection in the background and leaves a request
 /// pending until the connection returns, which is longer than any DNS client
 /// waits. The bound turns that wait into an answer the client can act on.
-const NACOS_LOOKUP_TIMEOUT: Duration = Duration::from_secs(3);
+pub const NACOS_LOOKUP_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// How many consecutive remote failures open the backoff window.
+///
+/// One failure is a query, two are a bad minute; the third is an outage worth
+/// stopping for. A lower threshold would let a flaky link switch the remote off
+/// for names no client has asked about yet.
+pub const NACOS_FAILURE_THRESHOLD: u32 = 3;
+
+/// How long the backoff window holds once it opens.
+///
+/// Long enough to ride out a Nacos restart without spending a timeout per query,
+/// short enough that the registry is asked again soon after it recovers.
+pub const NACOS_FAILURE_BACKOFF: Duration = Duration::from_secs(30);
+
+/// `opened_at` value meaning "no window".
+const WINDOW_CLOSED: i64 = i64::MIN;
+
+/// Counts consecutive remote failures and holds a backoff window once the
+/// streak reaches [`NACOS_FAILURE_THRESHOLD`].
+///
+/// Only calls that actually reach Nacos belong here: a read answered from the
+/// client's cache proves nothing about the server, so counting it would keep a
+/// dead registry looking alive. The window is the watcher's signal to stop
+/// spending round trips on names it has never confirmed.
+///
+/// The clock is a parameter of every call, never read from the process, so the
+/// window's boundaries are testable without sleeping through them.
+#[derive(Debug)]
+pub struct FailureBackoff {
+    failures: AtomicU32,
+    opened_at: AtomicI64,
+}
+
+impl Default for FailureBackoff {
+    fn default() -> Self {
+        Self {
+            failures: AtomicU32::new(0),
+            opened_at: AtomicI64::new(WINDOW_CLOSED),
+        }
+    }
+}
+
+impl FailureBackoff {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Count a remote failure at `now`; true when the window is open as a
+    /// result.
+    ///
+    /// A failure past the threshold re-stamps the window and also returns true,
+    /// so one failure after an expired window reopens it: the outage is already
+    /// proven, and making the remote pay the whole threshold again would spend
+    /// another three timeouts on a dead server.
+    pub fn record_failure(&self, now: i64) -> bool {
+        let streak = self.failures.fetch_add(1, Ordering::Relaxed) + 1;
+        if streak < NACOS_FAILURE_THRESHOLD {
+            return false;
+        }
+        self.opened_at.store(now, Ordering::Relaxed);
+        true
+    }
+
+    /// Count a confirmed answer: the streak restarts and any window goes away,
+    /// because a reply is evidence the server is alive *now*.
+    pub fn record_success(&self) {
+        self.failures.store(0, Ordering::Relaxed);
+        self.opened_at.store(WINDOW_CLOSED, Ordering::Relaxed);
+    }
+
+    /// True while the backoff window covers `now`.
+    ///
+    /// The window holds for its whole backoff and lifts at its end, which is
+    /// when the next unconfirmed name is allowed to call Nacos again.
+    pub fn is_open(&self, now: i64) -> bool {
+        let opened_at = self.opened_at.load(Ordering::Relaxed);
+        opened_at != WINDOW_CLOSED
+            && now.saturating_sub(opened_at) < NACOS_FAILURE_BACKOFF.as_secs() as i64
+    }
+}
 
 /// Which Nacos services this process answers for.
 ///
@@ -140,6 +221,8 @@ pub struct NacosServiceWatcher {
     /// listener it is handed, so this set is what makes the first query for a
     /// name the only one that subscribes it. It holds no instance data.
     subscribed: DashSet<String>,
+    /// Consecutive failures of the calls that actually reach Nacos.
+    backoff: FailureBackoff,
 }
 
 impl NacosServiceWatcher {
@@ -173,6 +256,7 @@ impl NacosServiceWatcher {
             filter,
             listener: Arc::new(NoopListener),
             subscribed: DashSet::new(),
+            backoff: FailureBackoff::new(),
         })
     }
 
@@ -187,12 +271,13 @@ impl ServiceCatalog for NacosServiceWatcher {
     /// The client cache's answer for `service`, or a server confirmation if this
     /// process has never subscribed the name.
     ///
-    /// Bounded three ways: [`ServiceFilter`] has to select the name, the
-    /// subscribed set makes the first query for a name the only one that spends a
-    /// `subscribe` call, and the wait on Nacos is capped at
-    /// [`NACOS_LOOKUP_TIMEOUT`]. The group and namespace are not checked here:
-    /// this client only ever asks the one pair it was built with, and the
-    /// authority has already matched the name's labels against it.
+    /// Bounded four ways: [`ServiceFilter`] has to select the name, the subscribed
+    /// set makes the first query for a name the only one that spends a `subscribe`
+    /// call, the wait on Nacos is capped at [`NACOS_LOOKUP_TIMEOUT`], and while
+    /// the [`FailureBackoff`] window is open an unconfirmed name is refused
+    /// outright. The group and namespace are not checked here: this client only
+    /// ever asks the one pair it was built with, and the authority has already
+    /// matched the name's labels against it.
     async fn instances(&self, service: &str) -> CatalogAnswer {
         if !self.filter.is_selected(service) {
             tracing::debug!(
@@ -200,6 +285,18 @@ impl ServiceCatalog for NacosServiceWatcher {
                 service
             );
             return CatalogAnswer::Unknown;
+        }
+
+        // The window refuses names this process has never confirmed, and nothing
+        // else: a ledger name reads the client's cache, which costs no round
+        // trip, so an outage does not make it worth cutting off.
+        let now = doggy_dns_basic::time::unix_now_secs();
+        if self.backoff.is_open(now) && !self.subscribed.contains(service) {
+            tracing::debug!(
+                "nacos backoff window open; refusing '{}' with SERVFAIL and no call",
+                service
+            );
+            return CatalogAnswer::Unavailable;
         }
 
         match tokio::time::timeout(NACOS_LOOKUP_TIMEOUT, self.answer_from_nacos(service)).await {
@@ -210,6 +307,7 @@ impl ServiceCatalog for NacosServiceWatcher {
                     service,
                     NACOS_LOOKUP_TIMEOUT
                 );
+                self.record_remote_failure();
                 CatalogAnswer::Unavailable
             }
         }
@@ -232,9 +330,13 @@ impl NacosServiceWatcher {
                     service,
                     e
                 );
+                self.record_remote_failure();
                 return CatalogAnswer::Unavailable;
             }
         };
+        // A reply is evidence the server answers, which is what the counter and
+        // any window are measuring.
+        self.backoff.record_success();
 
         if !self.subscribe_name(service).await {
             return CatalogAnswer::Unavailable;
@@ -334,5 +436,21 @@ impl NacosServiceWatcher {
             return CatalogAnswer::Unknown;
         }
         CatalogAnswer::Instances(usable)
+    }
+
+    /// Count one failure of a call that reached Nacos, and say so when that
+    /// failure opened the backoff window.
+    ///
+    /// Only failures are counted here, never cache reads: an answer served from
+    /// the client's cache says nothing about whether the server is up. The
+    /// per-query cause is logged by the caller; this is the one line that says
+    /// what happens next.
+    fn record_remote_failure(&self) {
+        let now = doggy_dns_basic::time::unix_now_secs();
+        if self.backoff.record_failure(now) {
+            tracing::warn!(
+                "nacos remote failures have reached the {NACOS_FAILURE_THRESHOLD}-in-a-row threshold; holding {NACOS_FAILURE_BACKOFF:?} before asking about a new name again. Names already subscribed keep answering from the client cache, unconfirmed ones get SERVFAIL."
+            );
+        }
     }
 }
