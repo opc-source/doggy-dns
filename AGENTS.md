@@ -86,34 +86,49 @@ checked against its own config — and calls
 `ServiceCatalog::instances(service)` on every in-zone query; the watcher checks
 `ServiceFilter`, then splits on its ledger of subscribed names (a
 `DashSet<String>` — the SDK offers no way to ask, and keeps every listener it is
-handed). A ledger name reads `get_all_instances(..., subscribe = true)`, which the
-SDK answers from its naming cache, so the answer is the client's current view: a
-last-instance removal push empties that cache and the next query answers
-`NXDOMAIN`. A name that is not in the ledger is first confirmed with
-`get_all_instances(..., subscribe = false)`, which is the only shape in nacos-sdk
-0.8.3 that reports a failed request; the confirmed list is then answered from and
-the name subscribed — the ledger entry appears only after `subscribe` returns, so a
-concurrent first query cannot take the cache shortcut for a name the client was not
-yet subscribed. Nothing unconfirmed is ever served, including an entry the
-client loaded from a previous run's disk cache.
+handed). `entry_of(ledgered, ever_confirmed, window_open)` then picks the source:
+
+- a ledger name reads `get_all_instances(..., subscribe = true)`, which the SDK
+  answers from its naming cache, so the answer is the client's current view: a
+  last-instance removal push empties that cache and the next query answers
+  `NXDOMAIN`.
+- an unledgered name in a process the registry has never answered (start-up) gets
+  that same cache read first and is confirmed only when the cache has nothing to
+  serve — the disk-loaded cache is what answers names during a start-up outage.
+- an unledgered name in a process the registry *has* answered is first confirmed
+  with `get_all_instances(..., subscribe = false)`, the only shape in nacos-sdk
+  0.8.3 that reports a failed request; a failed confirmation tries the client's
+  cache before answering `SERVFAIL`.
+- an unledgered name inside an open backoff window gets the cache read and nothing
+  else; an empty read is `SERVFAIL`, refused without waiting on the registry.
+
+An empty list is never served from the cache — there it means "not held", not NODATA —
+so a name answers either with instances or with the server's own verdict. The ledger
+entry appears only after `subscribe` returns, so concurrent first queries can each take
+the unledgered path until it lands.
 
 nacos-sdk 0.8.3 gives `subscribe` nothing to report back — it registers the
 listener and its own retry task, swallows the request error and returns `Ok` — so
 the arm that forgets a failed subscribe is defensive, not a live path. A call that
 fails, or one that takes longer than the watcher's three-second bound
 (`NACOS_LOOKUP_TIMEOUT`), answers `SERVFAIL` instead of `NXDOMAIN`, so a Nacos
-outage is not negative-cached downstream. The bound wraps both paths, ledgered
-included. `FailureBackoff` counts those failures:
+outage is not negative-cached downstream. The cache read taken *instead of* a call
+carries its own 50-millisecond bound (`NACOS_CACHE_READ_TIMEOUT`); the ledgered
+path keeps the three seconds, because there the SDK turns a cache miss into a fetch
+of its own. `FailureBackoff` counts only calls that reached Nacos:
 `NACOS_FAILURE_THRESHOLD` in a row open a `NACOS_FAILURE_BACKOFF` window, which
 stays open only while the streak still reaches the threshold — a server-confirmed
 answer restarts it even when a concurrent failure had just stamped the window — and
 which a clock stepping behind the window's start lifts rather than extends. Inside
-it an unledgered name is refused with `SERVFAIL` and no call, while ledgered names
-keep reading the client cache. A server-confirmed answer calls `record_success`
-(closing the window and restarting the streak); a client-cache read calls neither,
-because it proves nothing about the server. All three are constants, not config.
-Known limit: a ledgered name whose cache entry the SDK dropped re-fetches inline on
-the `subscribe = true` path, so it waits out the same three-second bound even
+it an unledgered name is served from the client's cache or refused with `SERVFAIL`,
+never after a wait on the registry, while ledgered names keep reading that cache. A
+server-confirmed answer calls `record_success` — closing the window, restarting the
+streak, and setting once for the process the `ever_confirmed` flag that turns the
+start-up rule into confirm-first; a client-cache read calls neither, because it
+proves nothing about the server. All four are constants, not config.
+Known limit: the naming cache is written only by a push or the periodic refresh, so a
+ledgered name whose entry has not been written yet re-fetches inline on the
+`subscribe = true` path, where it waits out the same three-second bound even
 inside the window. Against a registry that hangs, that answers `SERVFAIL` and
 counts; against one that answers with an error, the SDK swallows it into an empty
 list, and the query reads `NXDOMAIN` uncounted.
@@ -128,8 +143,9 @@ cache (written before the SDK notifies anyone), so the listener exists only to
 keep the key in the SDK's subscriber registry and silence its "not subscribed"
 warning; the control plane reports the subscribed-name count, no push timestamp.
 The client is built with `naming_load_cache_at_start(true)` (what a restart reads
-back is the previous run's data — a name's first query is still confirmed by the
-server; an address that *refuses* the connection is tolerated the same way, but one
+back is the previous run's data, and until the registry has answered this process it
+is also what a first query for a name reads; an address that *refuses* the connection
+is tolerated the same way, but one
 that accepts TCP and never answers blocks `NamingServiceWatcher::new` in the SDK's
 unbounded `build()` health check, before the DNS port binds — pre-existing, and
 unchanged here) and

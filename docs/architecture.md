@@ -60,20 +60,27 @@ through on lookup failure so a later `forward` plugin can still answer.
 ## Nacos integration
 
 - Connects to Nacos naming service via `nacos-sdk`
-- A name's first query confirms it with the server (`get_all_instances` with
-  `subscribe = false`) and subscribes it; only names the `service_pattern`
-  selects get that far. Pushes then keep the client's cache current. The ledger
-  entry appears only once `subscribe` returns, so a concurrent first query cannot
-  read the cache for a name the client was not yet subscribed for.
-- Keeps no instance table of its own: a name this process subscribed reads the
-  Nacos client's naming cache (`subscribe = true`), which each push replaces
-  wholesale. `CachedInstance.ip` is an `IpAddr`, so a query does its address
-  parsing once per read list.
+- One rule picks the source per query (`entry_of`): a name this process subscribed
+  reads the client's cache; an unledgered name the registry has never answered
+  (start-up) reads the cache first and is confirmed by the server only if the cache
+  has nothing; an unledgered name in a process the registry *has* answered is
+  confirmed first (`get_all_instances` with `subscribe = false`), with the client's
+  cache as the fallback if that call failed; and an unledgered name inside the
+  backoff window gets the cache read only. Only names the `service_pattern`
+  selects get this far. Every answer needs instances: an empty cache read is a miss,
+  not a `NODATA`, so no query is served from absence. The ledger entry appears only
+  once `subscribe` returns, so concurrent first queries for one name may each take
+  the unledgered path until the entry lands.
+- Keeps no instance table of its own: every answer is the Nacos client's naming cache
+  (`subscribe = true`), which each push replaces wholesale. `CachedInstance.ip` is an
+  `IpAddr`, so a query does its address parsing once per read list.
 - Three failed calls to Nacos in a row open a 30-second window (`FailureBackoff`)
-  in which a name this process has not confirmed is refused with `SERVFAIL` and
-  no call at all; an answer that did come from the server closes it. The window
-  needs both the timestamp and the streak, and the three-second call bound covers
-  the cache read too.
+  in which an unledgered name is served from the client's cache or refused with
+  `SERVFAIL` — never after a wait on the registry; an answer that did come from the
+  server closes it. The window needs both the timestamp and the streak. Each call
+  that reaches Nacos is bounded at three seconds; a cache read taken *instead of* a
+  call is bounded at 50 milliseconds, while the subscribed path keeps the three
+  seconds because the SDK turns a cache miss into its own fetch.
 - The catalog is keyed by the bare service name. One plugin serves one
   group/namespace pair and the authority checks those two labels against its own
   config before asking for it, so the key never has to carry them.

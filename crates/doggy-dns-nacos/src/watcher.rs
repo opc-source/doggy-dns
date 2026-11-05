@@ -9,7 +9,7 @@ use regex::Regex;
 use std::net::IpAddr;
 use std::str::FromStr;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicI64, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, Ordering};
 use std::time::Duration;
 
 /// The built-in subscription rule: a bare application name — ASCII letters,
@@ -21,12 +21,28 @@ use std::time::Duration;
 /// Configured patterns keep that same Unicode behaviour, deliberately.
 const DEFAULT_SERVICE_PATTERN: &str = "[A-Za-z0-9_-]+";
 
-/// How long one query may wait on Nacos before it answers SERVFAIL.
+/// How long one call that reaches Nacos may wait before it answers SERVFAIL.
 ///
 /// The SDK retries a dead connection in the background and leaves a request
 /// pending until the connection returns, which is longer than any DNS client
 /// waits. The bound turns that wait into an answer the client can act on.
+///
+/// It is a per-call bound, not a per-query one: a query that first reads the
+/// client's cache and then asks the server gets both budgets, so its worst case
+/// is [`NACOS_CACHE_READ_TIMEOUT`] plus this.
 pub const NACOS_LOOKUP_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// How long the client's own view may take to answer.
+///
+/// A name the cache holds answers in microseconds: it is a map read and a clone.
+/// So this bound only ever cuts off the round trip the SDK makes when the name is
+/// *not* held, and cutting that one off costs nothing. `subscribe_async` registers
+/// the listener, the refresh task and the redo task before it waits for the server
+/// (`naming/mod.rs:489-520`), so the name stays subscribed and the SDK fills the
+/// cache itself once the registry answers again. What it buys is the point: a
+/// start-up or outage probe of a name the client has never seen costs 50 ms instead
+/// of a full [`NACOS_LOOKUP_TIMEOUT`].
+pub const NACOS_CACHE_READ_TIMEOUT: Duration = Duration::from_millis(50);
 
 /// How many consecutive remote failures open the backoff window.
 ///
@@ -58,6 +74,13 @@ const WINDOW_CLOSED: i64 = i64::MIN;
 pub struct FailureBackoff {
     failures: AtomicU32,
     opened_at: AtomicI64,
+    /// Whether a call that reached Nacos ever answered in this process.
+    ///
+    /// Set once by [`FailureBackoff::record_success`] and never cleared: this is
+    /// not a health check, it is the memory that the registry has been proven
+    /// reachable. It decides whether an unledgered name may be answered from the
+    /// client's cache before anyone has asked the server.
+    confirmed: AtomicBool,
 }
 
 impl Default for FailureBackoff {
@@ -65,6 +88,7 @@ impl Default for FailureBackoff {
         Self {
             failures: AtomicU32::new(0),
             opened_at: AtomicI64::new(WINDOW_CLOSED),
+            confirmed: AtomicBool::new(false),
         }
     }
 }
@@ -95,6 +119,18 @@ impl FailureBackoff {
     pub fn record_success(&self) {
         self.failures.store(0, Ordering::Relaxed);
         self.opened_at.store(WINDOW_CLOSED, Ordering::Relaxed);
+        self.confirmed.store(true, Ordering::Relaxed);
+    }
+
+    /// Whether a call that reached Nacos has ever answered in this process.
+    ///
+    /// False only at the very start, which is the state where the client's cache
+    /// is the only thing that can answer while the registry is out of reach. A
+    /// later failure streak does not take the evidence back: the question this
+    /// answers is "has this registry ever been reached", not "is it reachable now"
+    /// - and the second one is [`FailureBackoff::is_open`].
+    pub fn ever_confirmed(&self) -> bool {
+        self.confirmed.load(Ordering::Relaxed)
     }
 
     /// True while the backoff window covers `now`.
@@ -117,6 +153,50 @@ impl FailureBackoff {
         }
         let elapsed = now.saturating_sub(opened_at);
         elapsed >= 0 && elapsed < NACOS_FAILURE_BACKOFF.as_secs() as i64
+    }
+}
+
+/// Which source a query reads first, and what it may fall back to.
+///
+/// The three inputs are everything the watcher knows about the name and about
+/// Nacos: whether this process registered a subscription for the name, whether
+/// the registry has ever answered it, and whether the failure window is open.
+/// Keeping that as a table rather than as branches spread across the call sites
+/// is what lets the rules be read - and tested - as one statement.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QueryEntry {
+    /// The name is subscribed: read the client's cache. Pushes keep it current, so
+    /// it is the freshest source there is, and it answers locally even while the
+    /// registry is down. A name whose entry has not been written yet is the one
+    /// case where this read reaches the server, and it keeps the full
+    /// [`NACOS_LOOKUP_TIMEOUT`] for that.
+    ClientCache,
+    /// Not subscribed, and the registry has never answered this process: the
+    /// client's cache first. An entry it holds answers a start-up outage; an empty
+    /// list is not served, so the name still gets its server confirmation.
+    CacheFirst,
+    /// Not subscribed, and the registry does answer: ask it, and read the client's
+    /// cache only after that call failed. A disk-loaded entry is not evidence
+    /// about a name this process has never confirmed, and serving it ahead of a
+    /// live server would hold the previous run's addresses for a TTL.
+    ServerFirst,
+    /// Not subscribed and the failure window is open: the client's cache is the
+    /// only source, and a name it does not hold is refused without waiting on the
+    /// registry.
+    CacheOnly,
+}
+
+/// The table behind [`QueryEntry`]. See the variants for what each state means
+/// and why it reads what it reads.
+pub fn entry_of(ledgered: bool, ever_confirmed: bool, window_open: bool) -> QueryEntry {
+    if ledgered {
+        QueryEntry::ClientCache
+    } else if window_open {
+        QueryEntry::CacheOnly
+    } else if ever_confirmed {
+        QueryEntry::ServerFirst
+    } else {
+        QueryEntry::CacheFirst
     }
 }
 
@@ -193,6 +273,26 @@ pub fn usable_instances(instances: &[ServiceInstance]) -> Vec<CachedInstance> {
         .collect()
 }
 
+/// What the client's cache can answer for `service`, if anything.
+///
+/// Some only when the list holds an instance worth serving. An empty list is
+/// deliberately not an answer: `get_all_instances(subscribe = true)` reports a
+/// fetch that failed exactly as it reports a service with no instances
+/// (`naming/mod.rs:368-372`), so from this call shape empty proves nothing, and
+/// answering NXDOMAIN on it would negative-cache an outage. What a `None` means is
+/// the caller's decision - ask the server, or refuse.
+pub fn cache_hit_of(service: &str, instances: &[ServiceInstance]) -> Option<CatalogAnswer> {
+    let usable = usable_instances(instances);
+    if usable.is_empty() {
+        tracing::debug!(
+            "the nacos client cache has nothing to answer '{}' with",
+            service
+        );
+        return None;
+    }
+    Some(CatalogAnswer::Instances(usable))
+}
+
 /// The listener a subscription carries.
 ///
 /// No data flows through it: the SDK's emitter writes the client's naming cache
@@ -213,11 +313,21 @@ impl NamingEventListener for NoopListener {
 /// it entered the ledger, pushes keep that cache current — including a push that
 /// removes the last instance, which reaches DNS on the next query.
 ///
-/// The first query for a name does not read that cache. It asks the server
-/// directly (`subscribe = false`), because a cache entry the client loaded from
-/// disk, or the absence of one, is not evidence about a name this process has
-/// never confirmed — and the SDK's `subscribe = true` path reports a failed
-/// fetch as an empty list, which would be served as authoritative NXDOMAIN.
+/// The first query for a name asks the server (`subscribe = false`) unless the
+/// registry has not answered this process yet. Neither an entry the client loaded
+/// from disk nor the absence of one is evidence about a name this process has
+/// never confirmed, and the SDK's `subscribe = true` path reports a failed fetch
+/// exactly as it reports a service with no usable instance, so an answer taken
+/// only from the cache can turn an outage into an authoritative NXDOMAIN. That is
+/// why the server is asked by default. But while no reply has ever arrived, the
+/// confirmation has nothing to give and the client's own view is what stands
+/// between a start-up outage and SERVFAIL for every name — so there the cache is
+/// read first, briefly, and an empty list is still not served. [`entry_of`] is
+/// the table of those rules.
+///
+/// A call that reaches the server and fails, or one that outlives the bound, is
+/// counted by [`FailureBackoff`]; the window it opens leaves the client's cache as
+/// the only source for names not yet subscribed.
 ///
 /// One namespace, one group: the namespace is baked into the client's
 /// configuration, and the group travels with every call, so a service name is
@@ -252,12 +362,11 @@ impl NacosServiceWatcher {
             // the SDK's empty-push protection on, that push is dropped and the
             // stale address keeps being served until something else changes.
             .naming_push_empty_protection(false)
-            // Load the client's naming cache from disk at start-up. A name's
-            // first query is still confirmed by the server, so loaded entries
-            // are not served as unconfirmed answers; they are what a subscribed
-            // name reads when the server is already down again by then. It also
-            // keeps a Nacos outage at boot from failing the build (the client
-            // retries in the background).
+            // Load the client's naming cache from disk at start-up. What a loaded
+            // entry answers is a name the registry has not been reached yet, so it
+            // is the emergency view — never a substitute for the confirmation a
+            // live server gives afterwards. It also keeps a Nacos outage at boot
+            // from failing the build (the client retries in the background).
             .naming_load_cache_at_start(true);
 
         let naming_service = NamingServiceBuilder::new(props).build().await?;
@@ -280,15 +389,15 @@ impl NacosServiceWatcher {
 }
 
 impl ServiceCatalog for NacosServiceWatcher {
-    /// The client cache's answer for `service`, or a server confirmation if this
-    /// process has never subscribed the name.
+    /// What this process reads to answer for `service`, chosen by [`entry_of`].
     ///
     /// Bounded four ways: [`ServiceFilter`] has to select the name, the subscribed
-    /// ledger keeps a `subscribe` call off the steady-state path, the wait on Nacos
-    /// is capped at [`NACOS_LOOKUP_TIMEOUT`], and while the [`FailureBackoff`]
-    /// window is open an unconfirmed name is refused
-    /// outright. The group and namespace are not checked here: this client only
-    /// ever asks the one pair it was built with, and the authority has already
+    /// ledger keeps a `subscribe` call off the steady-state path, every call that
+    /// reaches Nacos is capped at [`NACOS_LOOKUP_TIMEOUT`] and every cache read
+    /// taken instead of a call at [`NACOS_CACHE_READ_TIMEOUT`], and while the
+    /// [`FailureBackoff`] window is open a name the client cache does not hold is
+    /// refused outright. The group and namespace are not checked here: this client
+    /// only ever asks the one pair it was built with, and the authority has already
     /// matched the name's labels against it.
     async fn instances(&self, service: &str) -> CatalogAnswer {
         if !self.filter.is_selected(service) {
@@ -299,48 +408,80 @@ impl ServiceCatalog for NacosServiceWatcher {
             return CatalogAnswer::Unknown;
         }
 
-        // The window refuses names this process has never confirmed, and nothing
-        // else: a ledger name reads the client's cache, which costs no round
-        // trip, so an outage does not make it worth cutting off.
         let now = doggy_dns_basic::time::unix_now_secs();
-        if self.backoff.is_open(now) && !self.subscribed.contains(service) {
-            tracing::debug!(
-                "nacos backoff window open; refusing '{}' with SERVFAIL and no call",
-                service
-            );
-            return CatalogAnswer::Unavailable;
-        }
+        let entry = entry_of(
+            self.subscribed.contains(service),
+            self.backoff.ever_confirmed(),
+            self.backoff.is_open(now),
+        );
 
-        match tokio::time::timeout(NACOS_LOOKUP_TIMEOUT, self.answer_from_nacos(service)).await {
-            Ok(answer) => answer,
-            Err(_) => {
-                tracing::warn!(
-                    "nacos did not answer for service '{}' within {:?}; answering SERVFAIL",
-                    service,
-                    NACOS_LOOKUP_TIMEOUT
-                );
-                self.record_remote_failure();
-                CatalogAnswer::Unavailable
-            }
+        match entry {
+            // Subscribed: the cache is the freshest source, so an outage does not
+            // make it worth cutting off.
+            QueryEntry::ClientCache => self.read_client_cache(service).await,
+            // Nothing has ever come back from the registry, so the client's own
+            // view is the only thing that can answer quickly - and a name it does
+            // not hold still gets its required confirmation.
+            QueryEntry::CacheFirst => match self.answer_from_cache(service).await {
+                Some(answer) => answer,
+                None => self.answer_from_server(service).await,
+            },
+            // The registry answers, so it is asked; the client's cache only gets a
+            // say once that call has failed.
+            QueryEntry::ServerFirst => match self.answer_from_server(service).await {
+                CatalogAnswer::Unavailable => self
+                    .answer_from_cache(service)
+                    .await
+                    .unwrap_or(CatalogAnswer::Unavailable),
+                answer => answer,
+            },
+            // The window is open and the name is not subscribed: nothing is worth
+            // a wait on the registry, and what the client holds is all there is.
+            QueryEntry::CacheOnly => match self.answer_from_cache(service).await {
+                Some(answer) => answer,
+                None => {
+                    tracing::debug!(
+                        "nacos backoff window open and the client cache does not hold '{}'; answering SERVFAIL without waiting on the registry",
+                        service
+                    );
+                    CatalogAnswer::Unavailable
+                }
+            },
         }
     }
 }
 
 impl NacosServiceWatcher {
-    /// The part of [`ServiceCatalog::instances`] that may reach the network:
-    /// confirm an unledgered name with the server, then read the client cache.
-    async fn answer_from_nacos(&self, service: &str) -> CatalogAnswer {
-        if self.subscribed.contains(service) {
-            return self.read_client_cache(service).await;
-        }
-
-        let confirmed = match self.confirm_with_server(service).await {
-            Ok(instances) => instances,
-            Err(e) => {
+    /// Ask the server for `service`, then answer from its own list.
+    ///
+    /// The confirmation is the rule that keeps a name this process has never seen
+    /// from being answered by absence: only the server can tell "unknown service"
+    /// apart from "the fetch failed", and only `subscribe = false` reports the
+    /// failure. A name that gets here and answers is therefore served from the
+    /// server's own list, and the reply is what credits the registry for
+    /// [`entry_of`] from then on.
+    async fn answer_from_server(&self, service: &str) -> CatalogAnswer {
+        let confirmed = match tokio::time::timeout(
+            NACOS_LOOKUP_TIMEOUT,
+            self.confirm_with_server(service),
+        )
+        .await
+        {
+            Ok(Ok(instances)) => instances,
+            Ok(Err(e)) => {
                 tracing::warn!(
                     "nacos could not confirm service '{}': {}; answering SERVFAIL so a failure is not negative-cached as NXDOMAIN",
                     service,
                     e
+                );
+                self.record_remote_failure();
+                return CatalogAnswer::Unavailable;
+            }
+            Err(_) => {
+                tracing::warn!(
+                    "nacos did not confirm service '{}' within {:?}; answering SERVFAIL so a hang is not negative-cached as NXDOMAIN",
+                    service,
+                    NACOS_LOOKUP_TIMEOUT
                 );
                 self.record_remote_failure();
                 return CatalogAnswer::Unavailable;
@@ -355,6 +496,39 @@ impl NacosServiceWatcher {
         self.subscribe_name(service).await;
 
         Self::answer_of(service, &confirmed)
+    }
+
+    /// What the client's own view answers for `service` right now, if anything.
+    ///
+    /// [`NACOS_CACHE_READ_TIMEOUT`] is the whole budget, and this never counts a
+    /// failure: a cache that has nothing to say says nothing about the server. The
+    /// caller decides what a `None` means - ask the server, or refuse.
+    ///
+    /// A hit is what arms the subscription. `get_all_instances` returns the cached
+    /// entry before `subscribe_async` is reached (`naming/mod.rs:361-363`), so
+    /// without the call below a disk-loaded entry would never be refreshed by a
+    /// push or the polling updater, and the name would stay out of the ledger to be
+    /// probed again on every query.
+    async fn answer_from_cache(&self, service: &str) -> Option<CatalogAnswer> {
+        let instances =
+            match tokio::time::timeout(NACOS_CACHE_READ_TIMEOUT, self.fetch_cache(service)).await {
+                Ok(Ok(instances)) => instances,
+                Ok(Err(e)) => {
+                    tracing::debug!(
+                        "the nacos client could not read service '{}': {}",
+                        service,
+                        e
+                    );
+                    return None;
+                }
+                Err(_) => return None,
+            };
+
+        let hit = cache_hit_of(service, &instances);
+        if hit.is_some() {
+            self.subscribe_name(service).await;
+        }
+        hit
     }
 
     /// Ask the server for `service` with no cache read and no subscription.
@@ -372,10 +546,16 @@ impl NacosServiceWatcher {
             .await
     }
 
-    /// The client cache's own answer for a name this process subscribed.
-    async fn read_client_cache(&self, service: &str) -> CatalogAnswer {
-        let instances = match self
-            .naming_service
+    /// Ask the client's own view for `service`.
+    ///
+    /// `subscribe = true` reads the naming cache when it holds the name; when it
+    /// does not, the SDK subscribes the name and waits for its first fetch, which is
+    /// why every caller bounds this call rather than trusting it to be local.
+    async fn fetch_cache(
+        &self,
+        service: &str,
+    ) -> Result<Vec<ServiceInstance>, nacos_sdk::api::error::Error> {
+        self.naming_service
             .get_all_instances(
                 service.to_string(),
                 Some(self.group.clone()),
@@ -385,14 +565,34 @@ impl NacosServiceWatcher {
                 true,
             )
             .await
+    }
+
+    /// The client cache's own answer for a name this process subscribed.
+    ///
+    /// A ledgered name is read locally in the common case, but the cache only ever
+    /// gets an entry from a push or the polling updater, so a name subscribed
+    /// moments ago can still miss; the SDK then re-fetches inline, which is a call
+    /// that reaches Nacos and is bounded and counted like any other.
+    async fn read_client_cache(&self, service: &str) -> CatalogAnswer {
+        let instances = match tokio::time::timeout(NACOS_LOOKUP_TIMEOUT, self.fetch_cache(service))
+            .await
         {
-            Ok(instances) => instances,
-            Err(e) => {
+            Ok(Ok(instances)) => instances,
+            Ok(Err(e)) => {
                 tracing::warn!(
                     "failed to read the nacos client cache for service '{}': {}",
                     service,
                     e
                 );
+                return CatalogAnswer::Unavailable;
+            }
+            Err(_) => {
+                tracing::warn!(
+                    "the nacos client did not answer for subscribed service '{}' within {:?}; answering SERVFAIL",
+                    service,
+                    NACOS_LOOKUP_TIMEOUT
+                );
+                self.record_remote_failure();
                 return CatalogAnswer::Unavailable;
             }
         };
@@ -407,8 +607,8 @@ impl NacosServiceWatcher {
     /// the entry before the await would let a concurrent first query take that
     /// shortcut for a name the client was not yet able to answer from. A cold race
     /// can now send two subscribes; the SDK replaces an identical listener rather
-    /// than adding it twice, and neither query answers before its own server
-    /// confirmation.
+    /// than adding it twice, and a query that races ahead of the entry takes
+    /// whichever path [`entry_of`] gives an unledgered name.
     async fn subscribe_name(&self, service: &str) {
         // `contains` reads the `&str` this already has. Going straight to
         // `insert` would allocate a `String` on every query just to find out the
@@ -470,7 +670,7 @@ impl NacosServiceWatcher {
         let now = doggy_dns_basic::time::unix_now_secs();
         if self.backoff.record_failure(now) {
             tracing::warn!(
-                "nacos remote failures have reached the {NACOS_FAILURE_THRESHOLD}-in-a-row threshold; holding {NACOS_FAILURE_BACKOFF:?} before asking about a new name again. Names already subscribed keep answering from the client cache, unconfirmed ones get SERVFAIL."
+                "nacos remote failures have reached the {NACOS_FAILURE_THRESHOLD}-in-a-row threshold; holding {NACOS_FAILURE_BACKOFF:?} before asking about a new name again. Names already subscribed, and any the client cache holds, keep answering from it; the rest get SERVFAIL."
             );
         }
     }
