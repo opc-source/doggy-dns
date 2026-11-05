@@ -71,7 +71,7 @@ DNS query → **Middleware chain** (before_request) → **AuthorityChain** (sequ
 
 | Kind | Struct | Crate | What it does |
 |------|--------|-------|-------------|
-| `nacos` | `NacosAuthority` | doggy-dns-nacos | Resolves `<svc>.<group>.<ns>.<zone>` from DashMap cache fed by Nacos push events |
+| `nacos` | `NacosAuthority` | doggy-dns-nacos | Resolves `<svc>.<group>.<ns>.<zone>` from the Nacos client's naming cache |
 | `native` | `NativeAuthority` | doggy-dns-plugin | Forwards to OS system resolver (/etc/resolv.conf) |
 | `forward` | `ForwardAuthority` | doggy-dns-plugin | Forwards to explicit upstream servers (e.g., 8.8.8.8) |
 
@@ -79,16 +79,73 @@ All implement hickory's `ZoneHandler` trait. Plugins are evaluated in `[[plugins
 
 ### Nacos Integration Flow
 
-`NacosServiceWatcher` → subscribes to Nacos naming service → `InstanceChangeListener`
-receives push events → replaces entire `Vec<CachedInstance>` for a `ServiceKey` in
-`DashMap` (immutable update) → `NacosAuthority.lookup()` reads through the `DashMap`
-read guard and builds records from borrowed instances.
+`NacosServiceWatcher` answers from the Nacos client's naming cache and keeps no
+instance data of its own. `NacosAuthority.lookup()` splits the name itself —
+zone membership, then the service name, with the group and namespace labels
+checked against its own config — and calls
+`ServiceCatalog::instances(service)` on every in-zone query; the watcher checks
+`ServiceFilter`, then splits on its ledger of subscribed names (a
+`DashSet<String>` — the SDK offers no way to ask, and keeps every listener it is
+handed). A ledger name reads `get_all_instances(..., subscribe = true)`, which the
+SDK answers from its naming cache, so the answer is the client's current view: a
+last-instance removal push empties that cache and the next query answers
+`NXDOMAIN`. A name that is not in the ledger is first confirmed with
+`get_all_instances(..., subscribe = false)`, which is the only shape in nacos-sdk
+0.8.3 that reports a failed request; the confirmed list is then answered from and
+the name subscribed — the ledger entry appears only after `subscribe` returns, so a
+concurrent first query cannot take the cache shortcut for a name the client was not
+yet subscribed. Nothing unconfirmed is ever served, including an entry the
+client loaded from a previous run's disk cache.
+
+nacos-sdk 0.8.3 gives `subscribe` nothing to report back — it registers the
+listener and its own retry task, swallows the request error and returns `Ok` — so
+the arm that forgets a failed subscribe is defensive, not a live path. A call that
+fails, or one that takes longer than the watcher's three-second bound
+(`NACOS_LOOKUP_TIMEOUT`), answers `SERVFAIL` instead of `NXDOMAIN`, so a Nacos
+outage is not negative-cached downstream. The bound wraps both paths, ledgered
+included. `FailureBackoff` counts those failures:
+`NACOS_FAILURE_THRESHOLD` in a row open a `NACOS_FAILURE_BACKOFF` window, which
+stays open only while the streak still reaches the threshold — a server-confirmed
+answer restarts it even when a concurrent failure had just stamped the window — and
+which a clock stepping behind the window's start lifts rather than extends. Inside
+it an unledgered name is refused with `SERVFAIL` and no call, while ledgered names
+keep reading the client cache. A server-confirmed answer calls `record_success`
+(closing the window and restarting the streak); a client-cache read calls neither,
+because it proves nothing about the server. All three are constants, not config.
+Known limit: a ledgered name whose cache entry the SDK dropped re-fetches inline on
+the `subscribe = true` path, so it waits out the same three-second bound even
+inside the window. Against a registry that hangs, that answers `SERVFAIL` and
+counts; against one that answers with an error, the SDK swallows it into an empty
+list, and the query reads `NXDOMAIN` uncounted.
+
+`ServiceFilter` gates names before any Nacos call (`service_pattern`, a regex
+wrapped in whole-name anchors, default `[A-Za-z0-9_-]+` = bare application
+names). A name the filter rejects is never cached or subscribed, so it resolves
+to authoritative `NXDOMAIN` like any unknown service.
+
+The subscription carries a no-op listener: instance data stays in the client's
+cache (written before the SDK notifies anyone), so the listener exists only to
+keep the key in the SDK's subscriber registry and silence its "not subscribed"
+warning; the control plane reports the subscribed-name count, no push timestamp.
+The client is built with `naming_load_cache_at_start(true)` (what a restart reads
+back is the previous run's data — a name's first query is still confirmed by the
+server; an address that *refuses* the connection is tolerated the same way, but one
+that accepts TCP and never answers blocks `NamingServiceWatcher::new` in the SDK's
+unbounded `build()` health check, before the DNS port binds — pre-existing, and
+unchanged here) and
+`naming_push_empty_protection(false)` (a last-instance disappearance must reach
+the cache). `NXDOMAIN` covers both an unknown name and a known service with no
+usable instance, because `get_all_instances` returns an empty list for both.
 
 DNS name format: `<service>.<group>.<namespace>.<zone_suffix>.` (zone membership by
-`Name::zone_of`, key by `mapping::service_key_from_name`, split from the right so
-service names may contain dots). `ServiceKey` is one composite lowercase string
-(`service \u{1} group \u{1} namespace`) and `CachedInstance.ip` is an `IpAddr`, parsed
-when the push arrives; the authority never lowercases or re-parses per query because
+`Name::zone_of`, service name by `mapping::service_name_from_name`, split from the
+right so service names may contain dots and the two labels below it must equal the
+configured group and namespace). That function returns a `Cow<str>` and the catalog
+is keyed by the service name alone: a single-label name — the shape the default
+`service_pattern` selects — borrows straight out of the `LowerName` instead of
+building a key, and one plugin serves one group/namespace pair, so nothing needs to
+distinguish them at the key. `CachedInstance.ip` is an `IpAddr`, parsed
+when a query reads the list; the authority never lowercases or re-parses per query because
 the handler receives a `LowerName`. Only `A`/`AAAA` record types are served, filtered
 by query type. The authority owns its whole zone: unknown services return
 authoritative `NXDOMAIN` and missing families/types return `NODATA` instead of falling
@@ -139,18 +196,18 @@ The tokio runtime is built manually in `main()` with configurable `worker_thread
 
 ### Immutability Pattern
 
-Cache updates replace the entire Vec for a key (never mutate in place). Config structs are `Clone`. Use `Arc<DashMap>` for concurrent access.
+An instance list is replaced wholesale, never mutated in place (the Nacos client's naming cache does this on each push; we keep no copy). Config structs are `Clone`. Use `Arc<DashMap>` / `Arc<DashSet>` for concurrent access.
 
 ## Configuration
 
 TOML config at `config/doggy-dns.toml`. Key structs in `crates/doggy-dns-basic` (`doggy_dns_basic`): `DoggyDnsConfig`, `ServerConfig`, `PluginConfig` (flat — fields per kind), `PluginKind` enum (`Nacos`, `Native`, `Forward`). `doggy-dns-core` re-exports the module as `config`.
 
-`validate_config()` checks: worker_threads > 0, TLS/HTTPS cert files exist when enabled, remote_config fields non-empty when enabled, plugin rules (one enabled plugin when `[[plugins]]` exists; Nacos connection fields, valid unique zone; `min_ttl <= max_ttl`; forward upstream is IP or IP:port), observability ranges/URLs (observability enabled, signal ranges, profile duration/frequency, log level, endpoint format), and control-plane rules when `[control]` is enabled (valid `listen_addr`; `endpoints` non-empty, unique, within `mcp|healthz|readyz`). Every config string may use `${ENV_VAR}`; expansion happens in `load_config()` before deserialisation and a missing variable is fatal (the raw, unexpanded file content is what the MCP `get_config` tool sees).
+`validate_config()` checks: worker_threads > 0, TLS/HTTPS cert files exist when enabled, remote_config fields non-empty when enabled, plugin rules (at least one enabled plugin when `[[plugins]]` exists; Nacos connection fields, valid unique zone, `service_pattern` non-blank when given; `min_ttl <= max_ttl`; forward upstream is IP or IP:port), observability ranges/URLs (observability enabled, signal ranges, profile duration/frequency, log level, endpoint format), and control-plane rules when `[control]` is enabled (valid `listen_addr`; `endpoints` non-empty, unique, within `mcp|healthz|readyz`). Every config string may use `${ENV_VAR}`; expansion happens in `load_config()` before deserialisation and a missing variable is fatal (the raw, unexpanded file content is what the MCP `get_config` tool sees).
 
 ## Test Conventions
 
 - Integration tests in `tests/` and `crates/*/tests/` (not inline `#[cfg(test)]` modules)
 - Forward/native tests make real network calls
-- Nacos tests use mock DashMap caches (no Nacos server needed)
+- Nacos tests use a fake catalog or a DashMap as the catalog (no Nacos server needed)
 - Benchmarks in `crates/*/benches/` using criterion 0.8, parameterized over worker_threads 1..4
 - Benchmark output starts with "running 0 tests" (from default harness) — this is normal, criterion results follow

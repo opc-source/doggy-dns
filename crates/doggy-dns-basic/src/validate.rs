@@ -171,6 +171,15 @@ fn validate_plugins(plugins: &[PluginConfig]) -> anyhow::Result<()> {
                     zones.insert(zone.clone()),
                     "duplicate nacos dns_zone '{zone}' at {label}; each enabled nacos plugin needs its own zone"
                 );
+                // Syntax is the regex crate's to judge, and this crate does not
+                // depend on it; a pattern that will not compile surfaces when the
+                // plugin is built, before any Nacos connection.
+                if let Some(pattern) = &plugin.service_pattern {
+                    anyhow::ensure!(
+                        !pattern.trim().is_empty(),
+                        "{label}.service_pattern must not be blank; omit it for the built-in bare-application-name rule"
+                    );
+                }
             }
             PluginKind::Native => validate_resolver_ttls(&label, plugin)?,
             PluginKind::Forward => {

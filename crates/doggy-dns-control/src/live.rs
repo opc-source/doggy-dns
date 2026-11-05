@@ -1,4 +1,3 @@
-use doggy_dns_basic::time::unix_now_secs;
 use serde_json::{Map, Value};
 use std::sync::Arc;
 
@@ -30,28 +29,23 @@ impl LiveState {
         self.probes.push((name.into(), Arc::new(probe)));
     }
 
-    /// Standard signal shape for one Nacos zone:
-    /// `{"cachedServices": n, "lastPushSecondsAgo": null | seconds}`.
-    /// `last_push_unix` returning 0 means "no push has ever arrived" and is
-    /// reported as `null` rather than a misleading number.
+    /// Standard signal shape for one Nacos zone: `{"subscribedServices": n}`.
+    ///
+    /// The instance data lives in the Nacos client's cache, so this is the only
+    /// thing doggy-dns knows about a zone: how many names it subscribed.
     pub fn register_nacos_zone(
         &mut self,
         zone: &str,
-        cached_services: impl Fn() -> u64 + Send + Sync + 'static,
-        last_push_unix: impl Fn() -> i64 + Send + Sync + 'static,
+        subscribed_services: impl Fn() -> u64 + Send + Sync + 'static,
     ) {
         self.register(format!("nacos.{zone}"), move || {
-            let ts = last_push_unix();
-            let freshness = if ts == 0 {
-                Value::Null
-            } else {
-                Value::from(unix_now_secs().saturating_sub(ts))
-            };
             // Built by hand: `json!` expands through `Result::unwrap`, which
             // .clippy.toml disallows.
             let mut signal = Map::new();
-            signal.insert("cachedServices".to_string(), Value::from(cached_services()));
-            signal.insert("lastPushSecondsAgo".to_string(), freshness);
+            signal.insert(
+                "subscribedServices".to_string(),
+                Value::from(subscribed_services()),
+            );
             Value::Object(signal)
         });
     }

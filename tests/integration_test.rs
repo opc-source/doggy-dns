@@ -2,7 +2,7 @@
 
 use dashmap::DashMap;
 use doggy_dns_nacos::authority::NacosAuthority;
-use doggy_dns_nacos::watcher::{CachedInstance, ServiceKey};
+use doggy_dns_nacos::watcher::CachedInstance;
 use doggy_dns_plugin::authority_chain::AuthorityChain;
 use doggy_dns_plugin::builtin::forward::ForwardAuthority;
 use hickory_proto::rr::{LowerName, Name, RecordType};
@@ -11,10 +11,10 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 
-fn setup_nacos_cache() -> Arc<DashMap<ServiceKey, Vec<CachedInstance>>> {
+fn setup_nacos_cache() -> Arc<DashMap<String, Vec<CachedInstance>>> {
     let cache = Arc::new(DashMap::new());
     cache.insert(
-        ServiceKey::new("web-app", "default_group", "public"),
+        "web-app".to_string(),
         vec![CachedInstance {
             ip: "10.0.0.1".parse().unwrap(),
             port: 8080,
@@ -27,7 +27,13 @@ fn setup_nacos_cache() -> Arc<DashMap<ServiceKey, Vec<CachedInstance>>> {
 #[tokio::test]
 async fn chain_nacos_hit() {
     let cache = setup_nacos_cache();
-    let nacos = Arc::new(NacosAuthority::new(cache, "nacos.local", 6));
+    let nacos = Arc::new(NacosAuthority::new(
+        cache,
+        "nacos.local",
+        "DEFAULT_GROUP",
+        "public",
+        6,
+    ));
     let forward = Arc::new(
         ForwardAuthority::new(
             vec!["8.8.8.8:53".to_string()],
@@ -55,7 +61,13 @@ async fn chain_nacos_hit() {
 #[tokio::test]
 async fn chain_outside_nacos_zone_falls_to_forward() {
     let cache = Arc::new(DashMap::new()); // empty cache
-    let nacos = Arc::new(NacosAuthority::new(cache, "nacos.local", 6));
+    let nacos = Arc::new(NacosAuthority::new(
+        cache,
+        "nacos.local",
+        "DEFAULT_GROUP",
+        "public",
+        6,
+    ));
     let forward = Arc::new(
         ForwardAuthority::new(
             vec!["8.8.8.8:53".to_string()],
@@ -85,7 +97,13 @@ async fn chain_outside_nacos_zone_falls_to_forward() {
 #[tokio::test]
 async fn chain_unknown_service_in_nacos_zone_does_not_fall_to_forward() {
     let cache = Arc::new(DashMap::new()); // empty cache
-    let nacos = Arc::new(NacosAuthority::new(cache, "nacos.local", 6));
+    let nacos = Arc::new(NacosAuthority::new(
+        cache,
+        "nacos.local",
+        "DEFAULT_GROUP",
+        "public",
+        6,
+    ));
     let forward = Arc::new(
         ForwardAuthority::new(
             vec!["8.8.8.8:53".to_string()],

@@ -70,6 +70,7 @@ namespace = "public"
 group = "DEFAULT_GROUP"
 dns_zone = "nacos.local"
 ttl = 6
+service_pattern = "[A-Za-z0-9_-]+"   # default; which services may reach Nacos — see "Nacos subscription"
 
 [[plugins]]
 kind = "native"
@@ -181,6 +182,78 @@ without consulting userspace again, so a hit replays the order that was captured
 when the entry was written until its TTL expires; startup logs one `warn` when
 both settings are on. See [xdp.md](xdp.md#limitations--notes).
 
+## Nacos subscription
+
+The authority keeps no instance cache of its own. A name this process has already
+subscribed is read from the Nacos client's naming cache (`get_all_instances`,
+`subscribe = true`), which each push keeps current, so DNS serves the client's
+current view. A name it has *not* subscribed is first confirmed by the server
+(`subscribe = false`): a cache entry loaded from a previous run — or the absence
+of one — says nothing about a name this process never asked the server about, and
+nacos-sdk 0.8.3 reports a failed fetch on the `subscribe = true` path as an empty
+list rather than an error. The cost of the confirmed path is one list clone plus
+address parsing per query and one round trip per new name.
+
+`service_pattern` selects which names may reach Nacos at all. The pattern is a
+regex wrapped in whole-name anchors (`order-service` therefore cannot match
+`legacy-order-service`), matched case-sensitively against the service label as
+the query asks for it — a `LowerName` label, so already lowercase, and a pattern
+with capitals in it selects nothing. The default `[A-Za-z0-9_-]+` keeps bare
+application names: it rejects dotted identifiers (`com.foo.Bar`), non-ASCII
+names and the `DEFAULT_GROUP@@order` form, so on a registry whose server does
+return that prefixed form the pattern has to be widened. A name the pattern
+rejects is never subscribed or fetched, and since the authority owns its zone,
+querying it answers `NXDOMAIN` rather than falling through to `native`/`forward`.
+
+The first query for each name also subscribes it — once per name, because the SDK
+keeps every listener it is handed. A service registered after doggy-dns started
+needs no scan: its first query confirms it and subscribes it, and thereafter the
+client's own push/refresh keeps the cache current. `subscribe` reports no failure
+to us in nacos-sdk 0.8.3: it registers the listener and its own retry task,
+swallows the request error and returns `Ok`.
+
+`naming_load_cache_at_start` makes the client load its naming cache from disk, so
+subscribed names keep answering while Nacos is unreachable and the process starts
+even when the server is down — down meaning it refuses the connection. It is not a
+way to answer a name's first query: that still goes to the server. One limit is
+the SDK's, not this design's: an address that accepts TCP and never answers blocks
+start-up before the DNS port is bound, because `NamingServiceBuilder::build()`
+awaits the SDK's health check with no overall bound. That await is also on `main`,
+unchanged here.
+
+The wait on Nacos is bounded to three seconds, on both paths; a call that fails or
+exceeds that bound answers `SERVFAIL` rather than `NXDOMAIN`, so the client retries
+instead of caching "this name does not exist" past the end of the outage. Three such
+failures in a row open a 30-second backoff window: while it is open, a name this
+process has not confirmed is refused at once with `SERVFAIL` and no call, and only
+confirmed names keep being served — from the client's cache, and a cache hit needs no
+server. An answer that did come from the server closes the window and restarts the
+count; a read of the client's cache counts as neither, because it says nothing about
+whether the server is up. A window whose count has restarted is closed, so a failure
+counted beside a confirmed answer cannot keep it open, and a clock stepping behind the
+window's start lifts it instead of extending it by the whole jump. One failure after a
+window expires reopens it — the outage is already proven. The bound, the threshold and
+the window are constants in `crates/doggy-dns-nacos/src/watcher.rs`
+(`NACOS_LOOKUP_TIMEOUT`, `NACOS_FAILURE_THRESHOLD`, `NACOS_FAILURE_BACKOFF`), not
+config knobs.
+
+One limit follows from the SDK rather than this design: a confirmed name whose cache
+entry the client has since dropped is re-fetched inline on the `subscribe = true`
+path, so it waits out the three-second bound even inside the window. A registry that
+hangs therefore answers `SERVFAIL` and counts as the failure it is; a registry that
+answers with an error is swallowed by the SDK into an empty list, and the name reads
+`NXDOMAIN` uncounted.
+
+Empty-push protection is disabled, so a service losing its last instance empties the
+client's cache instead of continuing to answer the old address.
+
+A service Nacos knows but with no healthy/enabled instance also answers
+`NXDOMAIN`: `get_all_instances` returns an empty list for both that case and an
+unknown name, and the client cache carries no presence flag to tell them apart.
+(The authority itself still distinguishes them: a catalog that reports the
+service with an empty list gets `NODATA`, which is the answer a future catalog
+with a presence flag will be able to give.)
+
 ## Endpoint formats
 
 The base endpoint is `<host>/api/<org>` for OpenObserve and `http://host:4318`
@@ -204,8 +277,10 @@ the available set aborts startup when the runtime is built); TLS and HTTPS cert
 files exist when enabled; `remote_config` fields non-empty when
 enabled; plugin rules — at least one enabled plugin when `[[plugins]]` is
 present, Nacos `server_addr`/`namespace`/`group`/`dns_zone` present with a
-syntactically valid and unique zone, `min_ttl <= max_ttl` for native/forward,
-and forward `upstream` entries parse as IP or IP:port; observability signal
+syntactically valid and unique zone, `service_pattern` non-blank when given (its
+regex syntax is judged when the plugin is built, which aborts startup before any
+Nacos connection), `min_ttl <= max_ttl` for native/forward, and forward
+`upstream` entries parse as IP or IP:port; observability signal
 ranges, profile duration/frequency, log level and endpoint format;
 `xdp.cache_size > 0`, `xdp.negative_ttl > 0` and `xdp.attach_mode` is `auto` or
 `manual` when the fast path is enabled; `control.listen_addr` is a valid IP
@@ -220,8 +295,8 @@ Streamable HTTP — `get_status` (instance identity/uptime), `list_plugins`
 (authority chain), `get_config` (TOML with secrets redacted) and
 `get_runtime_status` (live signals sampled at call time); the Bearer token
 guards this endpoint only. `healthz` is a trivial liveness probe and `readyz`
-reports live runtime signals (per-zone Nacos cache occupancy and push
-freshness, XDP attach state); both are plain GET, never require auth and
+reports live runtime signals (per-zone Nacos subscribed-name count, XDP
+attach state); both are plain GET, never require auth and
 always answer 200 — `readyz` is a report, not a verdict, so deciding what
 counts as "not ready" stays with the operator or doggy-dns-console. Full
 contract: [crates/doggy-dns-control/README.md](../crates/doggy-dns-control/README.md).

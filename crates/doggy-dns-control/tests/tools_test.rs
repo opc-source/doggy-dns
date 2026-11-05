@@ -29,7 +29,7 @@ fn test_live() -> Arc<LiveState> {
     let mut live = LiveState::new();
     live.register(
         "nacos.nacos.local",
-        || serde_json::json!({"cachedServices": 3}),
+        || serde_json::json!({"subscribedServices": 3}),
     );
     Arc::new(live)
 }
@@ -150,5 +150,8 @@ async fn get_runtime_status_returns_registered_signals() {
     let server = DoggyMcpServer::new(Arc::new(test_state()), test_live());
     let result = server.get_runtime_status().await.unwrap();
     let json = first_text_json(&result);
-    assert_eq!(json["signals"]["nacos.nacos.local"]["cachedServices"], 3);
+    assert_eq!(
+        json["signals"]["nacos.nacos.local"]["subscribedServices"],
+        3
+    );
 }

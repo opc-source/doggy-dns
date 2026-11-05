@@ -5,7 +5,7 @@ use doggy_dns_core::handler::{AnswerRotation, DoggyDnsHandler};
 use doggy_dns_core::middleware::logging::LoggingMiddleware;
 use doggy_dns_core::server::build_server;
 use doggy_dns_nacos::authority::NacosAuthority;
-use doggy_dns_nacos::watcher::NacosServiceWatcher;
+use doggy_dns_nacos::watcher::{NacosServiceWatcher, ServiceFilter};
 use doggy_dns_observability::Observability;
 use doggy_dns_plugin::Middleware;
 use doggy_dns_plugin::authority_chain::AuthorityChain;
@@ -13,7 +13,6 @@ use doggy_dns_plugin::builtin::forward::ForwardAuthority;
 use doggy_dns_plugin::builtin::native::NativeAuthority;
 use hickory_server::zone_handler::ZoneHandler;
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
 use std::time::Duration;
 use tokio::signal;
 
@@ -251,9 +250,9 @@ where
 
 async fn build_authority_chain(
     config: &DoggyDnsConfig,
-) -> Result<(Vec<(String, NacosServiceWatcher)>, AuthorityChain)> {
+) -> Result<(Vec<(String, Arc<NacosServiceWatcher>)>, AuthorityChain)> {
     let mut handlers: Vec<(String, Arc<dyn ZoneHandler>)> = Vec::new();
-    let mut watchers: Vec<(String, NacosServiceWatcher)> = Vec::new();
+    let mut watchers: Vec<(String, Arc<NacosServiceWatcher>)> = Vec::new();
 
     if config.plugins.is_empty() {
         // Default: forward to 8.8.8.8 and 1.1.1.1
@@ -281,13 +280,13 @@ async fn build_authority_chain(
                 let ns = plugin.namespace.as_deref().unwrap_or("public");
                 let grp = plugin.group.as_deref().unwrap_or("DEFAULT_GROUP");
                 let zone = plugin.dns_zone.as_deref().unwrap_or("nacos.local");
+                let filter = ServiceFilter::from_config(plugin.service_pattern.as_deref())
+                    .context(format!("plugins[{i}].service_pattern"))?;
 
-                let watcher = NacosServiceWatcher::new(addr, ns, grp).await?;
-                watcher.subscribe_all().await;
-                let cache = watcher.cache();
+                let watcher = Arc::new(NacosServiceWatcher::new(addr, ns, grp, filter).await?);
 
                 let name = format!("nacos[{}]", zone);
-                let authority = NacosAuthority::new(cache, zone, plugin.ttl);
+                let authority = NacosAuthority::new(watcher.clone(), zone, grp, ns, plugin.ttl);
                 handlers.push((name.clone(), Arc::new(authority)));
                 watchers.push((zone.to_string(), watcher));
                 tracing::info!(plugin = %name, zone = zone, addr = addr, "loaded plugin");
@@ -327,22 +326,17 @@ async fn build_authority_chain(
 }
 
 /// Register the live runtime signals the control plane reports: one per
-/// Nacos zone (cache occupancy + push freshness) plus the XDP attach state.
+/// Nacos zone (subscription count) plus the XDP attach state.
 /// Forward/native upstream health is deliberately not probed here — active
 /// upstream checks are a separate concern.
 fn build_live_state(
-    watchers: &[(String, NacosServiceWatcher)],
+    watchers: &[(String, Arc<NacosServiceWatcher>)],
     xdp_attached: bool,
 ) -> Arc<LiveState> {
     let mut live = LiveState::new();
     for (zone, watcher) in watchers {
-        let cache = watcher.cache();
-        let last_push = watcher.last_push();
-        live.register_nacos_zone(
-            zone,
-            move || cache.len() as u64,
-            move || last_push.load(Ordering::Relaxed),
-        );
+        let watcher = Arc::clone(watcher);
+        live.register_nacos_zone(zone, move || watcher.subscribed_count() as u64);
     }
     live.register_xdp(move || xdp_attached);
     Arc::new(live)

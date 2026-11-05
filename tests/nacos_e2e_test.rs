@@ -1,7 +1,7 @@
 #![allow(clippy::disallowed_methods)]
 
-//! End-to-end tests for the live Nacos path: `NacosServiceWatcher` -> instance
-//! cache -> `NacosAuthority` -> DNS answer.
+//! End-to-end tests for the live Nacos path: `NacosServiceWatcher` -> the Nacos
+//! client's naming cache -> `NacosAuthority` -> DNS answer.
 //!
 //! Every case needs a running Nacos server, so they are `#[ignore]`d and never
 //! join `cargo test --workspace`. CI runs them in `.github/workflows/nacos-ci.yml`.
@@ -23,13 +23,14 @@
 //! test process: ephemeral instances disappear once the client connection is
 //! dropped, so the `NacosClient` handle must outlive the queries below.
 
+use doggy_dns_nacos::watcher::{NACOS_FAILURE_THRESHOLD, NACOS_LOOKUP_TIMEOUT};
 use hickory_proto::op::{Message, MessageType, OpCode, Query, ResponseCode};
 use hickory_proto::rr::{Name, RData, RecordType};
 use nacos_sdk::api::naming::{NamingService, NamingServiceBuilder, ServiceInstance};
 use nacos_sdk::api::props::ClientProps;
 use std::collections::HashSet;
 use std::net::{Ipv4Addr, SocketAddr};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 use tokio::net::UdpSocket;
 use tokio::process::{Child, Command};
@@ -45,6 +46,16 @@ const RECORD_TTL: u32 = 6;
 /// turning CI jitter into a failure.
 const DEADLINE: Duration = Duration::from_secs(60);
 const POLL: Duration = Duration::from_millis(300);
+
+/// Longer than the watcher's three-second Nacos bound: a SERVFAIL for an
+/// unreachable backend arrives just after that bound, so the client must not
+/// give up at the same instant.
+const REPLY_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// How fast a query refused by the backoff window must answer. It spends no
+/// round trip, so anything near the watcher's lookup timeout means it dialled
+/// anyway; the slack is scheduling jitter, not waiting.
+const REFUSAL_BOUND: Duration = Duration::from_millis(1_500);
 
 fn nacos_addr() -> String {
     std::env::var("DOGGY_NACOS_ADDR").unwrap_or_else(|_| "127.0.0.1:8848".to_string())
@@ -77,26 +88,76 @@ impl NacosClient {
     async fn register(&self, service: &str, instances: &[(&str, i32)]) {
         let instances = instances
             .iter()
-            .map(|(ip, port)| ServiceInstance {
-                ip: ip.to_string(),
-                port: *port,
-                healthy: true,
-                enabled: true,
-                ephemeral: true,
-                ..Default::default()
-            })
+            .map(|(ip, port)| test_instance(ip, *port))
             .collect();
         self.naming
             .batch_register_instance(service.to_string(), Some(GROUP.to_string()), instances)
             .await
             .expect("failed to register instances with Nacos");
     }
+
+    /// Remove one ephemeral instance; the last removal empties the service.
+    async fn deregister(&self, service: &str, ip: &str, port: i32) {
+        self.naming
+            .deregister_instance(
+                service.to_string(),
+                Some(GROUP.to_string()),
+                test_instance(ip, port),
+            )
+            .await
+            .expect("failed to deregister an instance with Nacos");
+    }
+
+    /// The server's own list for `service`, with no client cache in the way.
+    ///
+    /// `subscribe = false` reads through to the server, so this says what the
+    /// registry actually holds rather than what some client last remembered.
+    async fn server_ips(&self, service: &str) -> HashSet<String> {
+        self.naming
+            .get_all_instances(service.to_string(), Some(GROUP.to_string()), vec![], false)
+            .await
+            .unwrap_or_default()
+            .iter()
+            .map(|instance| instance.ip.clone())
+            .collect()
+    }
+
+    /// Wait until the server's list for `service` is exactly `ips`.
+    ///
+    /// A registration is not queryable the instant the call returns; a case that
+    /// asserts what a *later* process must read from the server has to wait for
+    /// that state, or it measures the propagation instead of the behaviour.
+    async fn await_server_has(&self, service: &str, ips: &[&str]) {
+        let want: HashSet<String> = ips.iter().map(|ip| ip.to_string()).collect();
+        let deadline = tokio::time::Instant::now() + DEADLINE;
+        loop {
+            let seen = self.server_ips(service).await;
+            if seen == want {
+                return;
+            }
+            if tokio::time::Instant::now() >= deadline {
+                panic!("the server never served {service} as {want:?}; it says {seen:?}");
+            }
+            tokio::time::sleep(POLL).await;
+        }
+    }
+}
+
+fn test_instance(ip: &str, port: i32) -> ServiceInstance {
+    ServiceInstance {
+        ip: ip.to_string(),
+        port,
+        healthy: true,
+        enabled: true,
+        ephemeral: true,
+        ..Default::default()
+    }
 }
 
 /// A `doggy-dns` process running the e2e configuration on `port`.
 ///
-/// Subscriptions are established once, at start-up (`subscribe_all`), so every
-/// instance the case expects must be registered before this is constructed.
+/// Instances are registered before this is constructed so a case never depends
+/// on the first query's subscription racing the server's start-up.
 struct DoggyDns {
     port: u16,
     child: Child,
@@ -128,9 +189,31 @@ impl DoggyDns {
     }
 
     async fn start(port: u16) -> Self {
+        Self::start_with(port, &nacos_addr(), &Self::cache_dir(port)).await
+    }
+
+    async fn start_with_addr(port: u16, server_addr: &str) -> Self {
+        Self::start_with(port, server_addr, &Self::cache_dir(port)).await
+    }
+
+    /// The Nacos client's naming cache directory for one case.
+    ///
+    /// `NACOS_CLIENT_CACHE_DIR` is read by the SDK (`env_first` is on by
+    /// default), so pointing it under the test's temp dir keeps every case out of
+    /// `~/nacos` — no run inherits another's cache, and a test cannot leave
+    /// entries behind that change what a later start-up loads.
+    fn cache_dir(port: u16) -> PathBuf {
+        PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("nacos-cache-{port}"))
+    }
+
+    /// Start on `port` against `server_addr`, with the SDK's naming cache in
+    /// `cache_dir`. Two processes sharing one `cache_dir` is how a case hands the
+    /// first run's loaded cache to the second.
+    async fn start_with(port: u16, server_addr: &str, cache_dir: &Path) -> Self {
         let mut child = Command::new(env!("CARGO_BIN_EXE_doggy-dns"))
             .arg(Self::case_config(port))
-            .env("DOGGY_NACOS_ADDR", nacos_addr())
+            .env("DOGGY_NACOS_ADDR", server_addr)
+            .env("NACOS_CLIENT_CACHE_DIR", cache_dir)
             // Leave the output attached: `--nocapture` shows it in CI, and the
             // harness captures and replays it for a failing test.
             .kill_on_drop(true)
@@ -145,6 +228,31 @@ impl DoggyDns {
         }
 
         Self { port, child }
+    }
+
+    /// Wait until the SDK has written `service`'s naming cache entry to disk.
+    ///
+    /// The client persists a cache entry when a push lands, not when a query
+    /// reads it, so a case that needs the entry to survive the process has to
+    /// watch for the file rather than assume the answer it just got was stored.
+    async fn await_cached_on_disk(cache_dir: &Path, service: &str) -> PathBuf {
+        // <cache_dir>/naming/<namespace>/<group>@@<service>
+        let dir = cache_dir.join("naming").join(NAMESPACE);
+        let deadline = tokio::time::Instant::now() + DEADLINE;
+        loop {
+            if let Ok(entries) = std::fs::read_dir(&dir) {
+                for entry in entries.flatten() {
+                    let name = entry.file_name();
+                    if name.to_string_lossy().ends_with(&format!("@@{service}")) {
+                        return entry.path();
+                    }
+                }
+            }
+            if tokio::time::Instant::now() >= deadline {
+                panic!("the nacos client never wrote a disk cache entry for '{service}'");
+            }
+            tokio::time::sleep(POLL).await;
+        }
     }
 
     /// Send one A query, returning `None` while the server is not answering yet.
@@ -164,7 +272,7 @@ impl DoggyDns {
         socket.send(&bytes).await.ok()?;
 
         let mut buffer = [0u8; 2048];
-        let reply = tokio::time::timeout(Duration::from_secs(3), socket.recv(&mut buffer))
+        let reply = tokio::time::timeout(REPLY_TIMEOUT, socket.recv(&mut buffer))
             .await
             .ok()?
             .ok()?;
@@ -328,5 +436,190 @@ async fn e2e_aaaa_for_ipv4_only_service_is_nodata() {
     assert!(
         message.answers.is_empty(),
         "an IPv4-only service must answer AAAA with NODATA"
+    );
+}
+
+/// The built-in `service_pattern` rule subscribes bare application names only,
+/// so a dotted registration is never pushed to this process and its name stays
+/// an in-zone miss. Nacos accepts the dotted form (a Dubbo-style identifier),
+/// which is exactly why the subscription list has to be narrowed.
+#[tokio::test]
+#[ignore]
+async fn e2e_service_pattern_excludes_dotted_registration() {
+    let nacos = NacosClient::connect().await;
+    nacos.register("e2e-selected", &[("10.0.0.51", 8080)]).await;
+    nacos.register("e2e.dotted", &[("10.0.0.52", 8080)]).await;
+
+    let server = DoggyDns::start(15415).await;
+    // The bare name proves the subscription path is live, so the dotted name's
+    // answer below is the filter's doing rather than an empty cache or a
+    // start-up race.
+    server
+        .await_answers(&service_qname("e2e-selected"), RecordType::A, 1)
+        .await;
+
+    let message = server
+        .await_code(
+            &service_qname("e2e.dotted"),
+            RecordType::A,
+            ResponseCode::NXDomain,
+        )
+        .await;
+    assert!(
+        message.answers.is_empty(),
+        "a service the pattern rejected must not be subscribed, so it cannot be answered"
+    );
+}
+
+/// Deleting the last instance must be observed. Reading the client's naming
+/// cache per query is what makes this work: an empty push purges the entry (the
+/// SDK runs with empty-push protection off), so the next query finds no
+/// instance and answers `NXDOMAIN`.
+#[tokio::test]
+#[ignore]
+async fn e2e_deregistered_last_instance_stops_resolving() {
+    let nacos = NacosClient::connect().await;
+    nacos.register("e2e-deleted", &[("10.0.0.61", 8080)]).await;
+
+    let server = DoggyDns::start(15416).await;
+    let qname = service_qname("e2e-deleted");
+    server.await_answers(&qname, RecordType::A, 1).await;
+
+    nacos.deregister("e2e-deleted", "10.0.0.61", 8080).await;
+
+    server
+        .await_code(&qname, RecordType::A, ResponseCode::NXDomain)
+        .await;
+}
+
+/// An unreachable Nacos must answer SERVFAIL. The SDK retries a dead connection
+/// in the background and leaves a request pending until it returns, so without
+/// the watcher's bound this query would never answer at all; it must also not be
+/// NXDOMAIN, which a client would negative-cache past the end of the outage.
+#[tokio::test]
+#[ignore]
+async fn e2e_unreachable_nacos_answers_servfail() {
+    // Nothing listens on port 1; the SDK dials the gRPC port (address + 1000).
+    let server = DoggyDns::start_with_addr(15417, "127.0.0.1:1").await;
+
+    let message = server
+        .await_code(
+            &service_qname("cold-outage"),
+            RecordType::A,
+            ResponseCode::ServFail,
+        )
+        .await;
+
+    assert!(
+        message.answers.is_empty(),
+        "SERVFAIL must carry no answer records"
+    );
+}
+
+/// The first query for a name must be confirmed by the server, never answered
+/// from a cache entry this process has not confirmed.
+///
+/// `naming_load_cache_at_start(true)` makes the client load the previous run's
+/// entries, and `get_all_instances(subscribe = true)` answers from that cache
+/// before it asks anything — so a loaded entry is served even when the server's
+/// list has since moved. Registered here by one process and read back by the
+/// next: the disk entry carries the first address, the server the second.
+#[tokio::test]
+#[ignore]
+async fn e2e_first_query_is_confirmed_by_the_server() {
+    let nacos = NacosClient::connect().await;
+    nacos.register("e2e-stalehole", &[("10.9.9.3", 8080)]).await;
+
+    let cache = DoggyDns::cache_dir(15418);
+    let warm = DoggyDns::start_with(15418, &nacos_addr(), &cache).await;
+    let qname = service_qname("e2e-stalehole");
+    warm.await_answers(&qname, RecordType::A, 1).await;
+    let entry = DoggyDns::await_cached_on_disk(&cache, "e2e-stalehole").await;
+    // Positive control: the assertion below only says something if there really
+    // is a stale entry to serve. Read it while the writer is still up and holding
+    // the first address.
+    let cached = std::fs::read_to_string(&entry).expect("the disk entry is not readable text");
+    assert!(
+        cached.contains("10.9.9.3"),
+        "the disk entry at {entry:?} must still carry the address the first query answered, \
+         otherwise this case proves nothing about where the second query read from: {cached}"
+    );
+
+    // The writer has to go first. A client still subscribed would take the push of
+    // the new list and rewrite its own disk entry, leaving nothing stale to read.
+    drop(warm);
+    nacos.register("e2e-stalehole", &[("10.9.9.4", 8080)]).await;
+    // The address below must be the server's, not this process's memory of the
+    // registration call: a replacement is not queryable the instant it returns.
+    nacos.await_server_has("e2e-stalehole", &["10.9.9.4"]).await;
+
+    let server = DoggyDns::start_with(15419, &nacos_addr(), &cache).await;
+    let message = tokio::time::timeout(Duration::from_secs(20), server.send(&qname, RecordType::A))
+        .await
+        .expect("the first query did not answer within its own bound")
+        .expect("no reply to the first query");
+
+    assert_eq!(
+        answer_ips(&message),
+        HashSet::from(["10.9.9.4".to_string()]),
+        "the first query must be answered by the server, not by the entry loaded at {entry:?}"
+    );
+}
+
+/// Once the remote has failed enough to open the backoff window, a name this
+/// process has not confirmed is refused without any call at all.
+///
+/// The comparison is against the fastest of the three calls that opened the
+/// window, not against [`NACOS_LOOKUP_TIMEOUT`]: a refused port is answered by the
+/// client in well under that bound once the channel has failed, so an absolute
+/// timing claim would hold even with no window at all. A refusal is local work, so
+/// it has to beat even the fastest real dial. Measured here: dials of 9.4 s, 3.0 s
+/// and 3.0 s (the first includes the process coming up), refusal in 1.1-1.8 ms.
+#[tokio::test]
+#[ignore]
+async fn e2e_backoff_window_refuses_without_a_round_trip() {
+    // Nothing listens on port 1; every call dials the gRPC port (address + 1000)
+    // and fails, which is what opens the window.
+    let server = DoggyDns::start_with_addr(15420, "127.0.0.1:1").await;
+    let qname = service_qname("e2e-backoff");
+
+    let mut dials = Vec::new();
+    for attempt in 1..=NACOS_FAILURE_THRESHOLD {
+        let started = tokio::time::Instant::now();
+        let message = server
+            .await_code(&qname, RecordType::A, ResponseCode::ServFail)
+            .await;
+        dials.push(started.elapsed());
+        assert!(
+            message.answers.is_empty(),
+            "failure {attempt} must answer SERVFAIL with no records"
+        );
+    }
+
+    let started = tokio::time::Instant::now();
+    let message = server
+        .send(&qname, RecordType::A)
+        .await
+        .expect("no reply after the backoff window opened");
+    let refused_in = started.elapsed();
+
+    assert_eq!(
+        message.metadata.response_code,
+        ResponseCode::ServFail,
+        "an unconfirmed name must stay SERVFAIL while the window is open"
+    );
+    let fastest_dial = *dials
+        .iter()
+        .min()
+        .expect("the three threshold failures were measured");
+    assert!(
+        refused_in < REFUSAL_BOUND,
+        "the window must refuse without dialling: answered in {refused_in:?}, \
+         whereas an unwindowed query waits up to the {NACOS_LOOKUP_TIMEOUT:?} bound"
+    );
+    assert!(
+        refused_in * 2 < fastest_dial,
+        "the refusal is local work: {refused_in:?} against the fastest of the three dials, \
+         {fastest_dial:?} - they are too close, so this reply may have dialled anyway"
     );
 }

@@ -21,6 +21,7 @@ pub struct PluginConfig {
     pub namespace: Option<String>,
     pub group: Option<String>,
     pub dns_zone: Option<String>,
+    pub service_pattern: Option<String>,
     #[serde(default = "default_ttl")]
     pub ttl: u32,
     // Resolver-specific (native / forward)

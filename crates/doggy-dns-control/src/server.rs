@@ -134,7 +134,7 @@ impl DoggyMcpServer {
 
     #[tool(
         name = "get_runtime_status",
-        description = "Return live runtime signals (plugin cache sizes, push freshness, fast-path state) sampled at call time.",
+        description = "Return live runtime signals (per-zone subscription counts, fast-path state) sampled at call time.",
         annotations(
             title = "Get live runtime signals",
             read_only_hint = true,

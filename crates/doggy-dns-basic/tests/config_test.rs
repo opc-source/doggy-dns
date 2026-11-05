@@ -920,6 +920,65 @@ server_addr = "127.0.0.1:8848"
     assert!(err.contains("namespace"), "unexpected error: {err}");
 }
 
+/// One enabled nacos plugin with the fields validation requires, plus `extra`
+/// lines inside its block.
+fn nacos_plugin(extra: &str) -> String {
+    format!(
+        r#"
+[server]
+listen_addr = "0.0.0.0"
+port = 53
+
+[[plugins]]
+kind = "nacos"
+enabled = true
+server_addr = "127.0.0.1:8848"
+namespace = "public"
+group = "DEFAULT_GROUP"
+dns_zone = "nacos.local"
+{extra}
+"#
+    )
+}
+
+#[test]
+fn nacos_service_pattern_is_optional() {
+    let config: DoggyDnsConfig = toml::from_str(&nacos_plugin("")).expect("parse failed");
+    let plugin = &config.plugins[0];
+
+    assert_eq!(plugin.service_pattern, None);
+    validate_config(&config).expect("the defaults must validate");
+}
+
+#[test]
+fn nacos_service_pattern_parses_when_specified() {
+    let config: DoggyDnsConfig =
+        toml::from_str(&nacos_plugin(r#"service_pattern = "order-.*""#)).expect("parse failed");
+
+    assert_eq!(
+        config.plugins[0].service_pattern.as_deref(),
+        Some("order-.*")
+    );
+}
+
+#[test]
+fn validate_nacos_rejects_blank_service_pattern() {
+    let err = validation_error(&nacos_plugin("service_pattern = \"   \""));
+
+    assert!(err.contains("service_pattern"), "unexpected error: {err}");
+}
+
+/// An unknown key must not fail a deployment's start-up: serde ignores it.
+/// `rescan_interval_secs` never shipped, and a config that carries it - or any
+/// other stray field - still loads.
+#[test]
+fn nacos_config_ignores_an_unknown_key() {
+    let config: DoggyDnsConfig =
+        toml::from_str(&nacos_plugin("rescan_interval_secs = 0")).expect("parse failed");
+
+    validate_config(&config).expect("an unknown field must not fail validation");
+}
+
 #[test]
 fn validate_nacos_rejects_malformed_zone() {
     let err = validation_error(

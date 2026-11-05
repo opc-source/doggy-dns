@@ -1,12 +1,13 @@
 #![allow(clippy::disallowed_methods)]
 
-use dashmap::DashMap;
-use doggy_dns_nacos::watcher::{CachedInstance, InstanceChangeListener, ServiceKey};
-use nacos_sdk::api::naming::{NamingChangeEvent, NamingEventListener, ServiceInstance};
+use doggy_dns_nacos::watcher::{
+    CachedInstance, FailureBackoff, NACOS_FAILURE_BACKOFF, NACOS_FAILURE_THRESHOLD, ServiceFilter,
+    usable_instances,
+};
+use nacos_sdk::api::naming::ServiceInstance;
 use std::collections::HashMap;
 use std::net::IpAddr;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicI64, Ordering};
+use std::time::Duration;
 
 fn make_service_instance(ip: &str, port: i32, healthy: bool, enabled: bool) -> ServiceInstance {
     ServiceInstance {
@@ -23,116 +24,22 @@ fn make_service_instance(ip: &str, port: i32, healthy: bool, enabled: bool) -> S
     }
 }
 
-fn make_listener(
-    group: &str,
-    namespace: &str,
-) -> (
-    InstanceChangeListener,
-    Arc<DashMap<ServiceKey, Vec<CachedInstance>>>,
-) {
-    let cache = Arc::new(DashMap::new());
-    let listener = InstanceChangeListener {
-        cache: Arc::clone(&cache),
-        group: group.to_string(),
-        namespace: namespace.to_string(),
-        last_push: Arc::new(AtomicI64::new(0)),
-    };
-    (listener, cache)
-}
-
-fn fire_event(
-    listener: &InstanceChangeListener,
-    service_name: &str,
-    instances: Option<Vec<ServiceInstance>>,
-) {
-    let event = Arc::new(NamingChangeEvent {
-        service_name: service_name.to_string(),
-        group_name: String::new(),
-        clusters: String::new(),
-        instances,
-    });
-    listener.event(event);
-}
-
+/// The client keeps instances this resolver cannot use; they are dropped when a
+/// query reads the list.
 #[test]
-fn listener_inserts_healthy_enabled_instances() {
-    let (listener, cache) = make_listener("default_group", "public");
-
+fn usable_instances_keeps_healthy_enabled_addresses() {
     let instances = vec![
         make_service_instance("10.0.0.1", 8080, true, true),
-        make_service_instance("10.0.0.2", 8080, true, true),
-        make_service_instance("10.0.0.3", 8080, false, true), // unhealthy
+        make_service_instance("10.0.0.2", 8080, false, true), // unhealthy
+        make_service_instance("10.0.0.3", 8080, true, false), // disabled
+        make_service_instance("not-an-ip", 8080, true, true),
     ];
 
-    fire_event(&listener, "my-svc", Some(instances));
+    let usable = usable_instances(&instances);
 
-    let key = ServiceKey::new("my-svc", "default_group", "public");
-    let cached = cache.get(&key).unwrap();
-    assert_eq!(cached.value().len(), 2);
-}
-
-#[test]
-fn listener_filters_disabled_instances() {
-    let (listener, cache) = make_listener("default_group", "public");
-
-    let instances = vec![
-        make_service_instance("10.0.0.1", 8080, true, true),
-        make_service_instance("10.0.0.2", 8080, true, false), // disabled
-    ];
-
-    fire_event(&listener, "svc-a", Some(instances));
-
-    let key = ServiceKey::new("svc-a", "default_group", "public");
-    let cached = cache.get(&key).unwrap();
-    assert_eq!(cached.value().len(), 1);
-    assert_eq!(cached.value()[0].ip, IpAddr::from([10, 0, 0, 1]));
-}
-
-#[test]
-fn listener_removes_key_when_instances_none() {
-    let (listener, cache) = make_listener("default_group", "public");
-
-    // Insert first
-    let instances = vec![make_service_instance("10.0.0.1", 8080, true, true)];
-    fire_event(&listener, "svc-remove", Some(instances));
-
-    let key = ServiceKey::new("svc-remove", "default_group", "public");
-    assert!(cache.get(&key).is_some());
-
-    // Fire with None → should remove
-    fire_event(&listener, "svc-remove", None);
-    assert!(cache.get(&key).is_none());
-}
-
-#[test]
-fn listener_replaces_entire_vec_on_update() {
-    let (listener, cache) = make_listener("default_group", "public");
-
-    // First event: 1 instance
-    fire_event(
-        &listener,
-        "svc-replace",
-        Some(vec![make_service_instance("10.0.0.1", 8080, true, true)]),
-    );
-
-    let key = ServiceKey::new("svc-replace", "default_group", "public");
-    assert_eq!(cache.get(&key).unwrap().value().len(), 1);
-
-    // Second event: 3 instances (entire vec replaced)
-    fire_event(
-        &listener,
-        "svc-replace",
-        Some(vec![
-            make_service_instance("10.0.0.2", 8080, true, true),
-            make_service_instance("10.0.0.3", 8080, true, true),
-            make_service_instance("10.0.0.4", 8080, true, true),
-        ]),
-    );
-    assert_eq!(cache.get(&key).unwrap().value().len(), 3);
-    assert_eq!(
-        cache.get(&key).unwrap().value()[0].ip,
-        IpAddr::from([10, 0, 0, 2])
-    );
+    assert_eq!(usable.len(), 1);
+    assert_eq!(usable[0].ip, IpAddr::from([10, 0, 0, 1]));
+    assert_eq!(usable[0].port, 8080);
 }
 
 #[test]
@@ -153,92 +60,271 @@ fn cached_instance_rejects_a_non_address() {
     );
 }
 
+/// The built-in pattern is the application-name rule: word characters, `-`, no
+/// dots. A dot means the registration is not a bare application name (a
+/// `com.foo.Bar` style identifier, or the `group@@service` form some Nacos
+/// versions return), and those are exactly the entries a deployment does not
+/// want pushed to it.
 #[test]
-fn listener_drops_only_the_bad_address() {
-    let (listener, cache) = make_listener("default_group", "public");
+fn default_filter_selects_bare_application_names() {
+    let filter = ServiceFilter::from_config(None).expect("the built-in pattern must compile");
 
-    let mut broken = make_service_instance("garbage", 8080, true, true);
-    broken.metadata = HashMap::new();
-    fire_event(
-        &listener,
-        "svc-partial",
-        Some(vec![
-            make_service_instance("10.0.0.1", 8080, true, true),
-            broken,
-        ]),
-    );
+    for selected in ["order-service", "ORDER_svc-1", "a1"] {
+        assert!(
+            filter.is_selected(selected),
+            "{selected} is a bare application name and must be subscribed"
+        );
+    }
 
-    let key = ServiceKey::new("svc-partial", "default_group", "public");
-    let cached = cache.get(&key).expect("one valid instance is enough");
-    assert_eq!(cached.value().len(), 1);
-    assert_eq!(cached.value()[0].ip, IpAddr::from([10, 0, 0, 1]));
+    for rejected in [
+        "com.foo.Bar",
+        "order.service",
+        "DEFAULT_GROUP@@order",
+        "服务名",
+        "order service",
+        "",
+    ] {
+        assert!(
+            !filter.is_selected(rejected),
+            "{rejected:?} is not a bare application name and must not be subscribed"
+        );
+    }
 }
 
+/// A configured pattern is wrapped in whole-name anchors, so `user-service-\d+`
+/// cannot silently subscribe `my-user-service-1` through a substring match. An
+/// author who already wrote anchors keeps working.
 #[test]
-fn listener_lowercases_keys() {
-    let (listener, cache) = make_listener("DEFAULT_GROUP", "Public");
+fn configured_filter_matches_the_whole_name() {
+    let filter = ServiceFilter::from_config(Some(r"user-service-\d+")).expect("valid pattern");
 
-    fire_event(
-        &listener,
-        "My-SVC",
-        Some(vec![make_service_instance("10.0.0.1", 8080, true, true)]),
+    assert!(filter.is_selected("user-service-12"));
+    assert!(
+        !filter.is_selected("my-user-service-1"),
+        "an unanchored substring match would subscribe a service the operator did not name"
     );
+    assert!(!filter.is_selected("user-service-1x"));
 
-    let key = ServiceKey::new("my-svc", "default_group", "public");
-    assert!(cache.get(&key).is_some());
+    let pre_anchored = ServiceFilter::from_config(Some(r"^order$")).expect("valid pattern");
+    assert!(pre_anchored.is_selected("order"));
+    assert!(!pre_anchored.is_selected("order-2"));
 }
 
+/// Matching is case-sensitive and nothing lowercases the configured pattern. The
+/// production caller hands `is_selected` a `LowerName` label, so a mixed-case
+/// name only reaches here from a test.
 #[test]
-fn listener_stamps_last_push_on_every_event() {
-    let (listener, _cache) = make_listener("default_group", "public");
-    assert_eq!(
-        listener.last_push.load(Ordering::Relaxed),
-        0,
-        "no event yet must read as epoch-0 (never pushed)"
-    );
+fn filter_matching_is_case_sensitive() {
+    let filter = ServiceFilter::from_config(Some("order")).expect("valid pattern");
 
-    fire_event(
-        &listener,
-        "svc-time",
-        Some(vec![make_service_instance("10.0.0.1", 8080, true, true)]),
-    );
-    let first = listener.last_push.load(Ordering::Relaxed);
-    assert!(first > 0, "a push event must stamp unix seconds");
-
-    // Removal events are pushes too — freshness of contact matters, not payload.
-    fire_event(&listener, "svc-time", None);
-    assert!(listener.last_push.load(Ordering::Relaxed) >= first);
-}
-
-/// `service.group.namespace` is ambiguous with plain dots: `a.b` in group `c`
-/// looks like `a` in group `b.c`. The separator is not a DNS label byte, so the
-/// two stay distinct, which is what lets the composite key replace three fields.
-#[test]
-fn service_key_keeps_dotted_shapes_distinct() {
-    let dotted_service = ServiceKey::new("a.b", "c", "d");
-    let dotted_group = ServiceKey::new("a", "b.c", "d");
-
-    assert_eq!(dotted_service.as_str(), "a.b\u{1}c\u{1}d");
-    assert_ne!(
-        dotted_service, dotted_group,
-        "a service name containing dots must not be re-read as a group boundary"
+    assert!(filter.is_selected("order"));
+    assert!(
+        !filter.is_selected("ORDER"),
+        "a lowercase pattern must not silently select a differently-cased name"
     );
 }
 
-/// A Nacos identifier carrying the separator could forge a boundary and alias a
-/// different triple, so the listener refuses to write such a key.
+/// Characterisation of the assumption behind [`DEFAULT_SERVICE_PATTERN`] being
+/// spelled as an ASCII class: with the regex crate's default `unicode` feature,
+/// a `\w` an operator writes here is Unicode-aware, so it does select a CJK
+/// registration. The built-in default must not inherit that breadth.
 #[test]
-fn listener_skips_updates_that_could_alias_another_key() {
-    let (listener, cache) = make_listener("b\u{1}c", "public");
-
-    fire_event(
-        &listener,
-        "a",
-        Some(vec![make_service_instance("10.0.0.1", 8080, true, true)]),
-    );
+fn user_written_word_class_is_unicode_aware() {
+    let filter = ServiceFilter::from_config(Some(r"\w+")).expect("valid pattern");
+    let default = ServiceFilter::from_config(None).expect("the built-in pattern must compile");
 
     assert!(
-        cache.is_empty(),
-        "a separator inside the group must not produce a composite key"
+        filter.is_selected("服务名"),
+        r#""\w" in a configured pattern matches Unicode word characters"#
+    );
+    assert!(
+        !default.is_selected("服务名"),
+        "the built-in rule is ASCII-only regardless of how that could be written"
+    );
+}
+
+/// A pattern that does not compile is a configuration error naming the field and
+/// the text, so the operator sees which plugin line to fix.
+#[test]
+fn invalid_pattern_is_reported_with_the_pattern() {
+    let error = ServiceFilter::from_config(Some("order(")).expect_err("unbalanced group must fail");
+    let message = error.to_string();
+
+    assert!(
+        message.contains("service_pattern"),
+        "the error must name the config field, got: {message}"
+    );
+    assert!(
+        message.contains("order("),
+        "the error must quote the rejected pattern, got: {message}"
+    );
+}
+
+// The clock is a parameter of every call below, so the window's boundaries are
+// asserted exactly rather than slept through.
+
+/// One failure is a query, two are a bad minute, three are an outage worth
+/// stopping for - fewer and a flaky link would shut the remote down.
+#[test]
+fn the_window_opens_on_the_third_consecutive_failure() {
+    let backoff = FailureBackoff::new();
+    let now = 1_700_000_000;
+
+    assert!(
+        !backoff.record_failure(now),
+        "one failure must not open the window"
+    );
+    assert!(
+        !backoff.record_failure(now),
+        "two failures must not open the window"
+    );
+    assert!(
+        backoff.record_failure(now),
+        "the third consecutive failure must open the window"
+    );
+    assert!(
+        backoff.is_open(now),
+        "an opened window covers its own instant"
+    );
+}
+
+/// A success restarts the streak, so intermittent failures that still deliver
+/// answers never accumulate into a window.
+#[test]
+fn a_success_restarts_the_failure_streak() {
+    let backoff = FailureBackoff::new();
+    let now = 1_700_000_000;
+
+    backoff.record_failure(now);
+    backoff.record_failure(now);
+    backoff.record_success();
+
+    assert!(
+        !backoff.record_failure(now),
+        "the streak restarted, so this failure is only the first"
+    );
+    assert!(!backoff.is_open(now), "no window after a restart");
+}
+
+/// The window holds for the whole backoff and lifts at its end, which is when
+/// the next query is allowed to call Nacos again.
+#[test]
+fn the_window_lifts_when_the_backoff_expires() {
+    let backoff = FailureBackoff::new();
+    let opened_at = 1_700_000_000;
+    let backoff_secs = i64::try_from(NACOS_FAILURE_BACKOFF.as_secs()).expect("backoff in seconds");
+    backoff.record_failure(opened_at);
+    backoff.record_failure(opened_at);
+    assert!(backoff.record_failure(opened_at));
+
+    assert!(
+        backoff.is_open(opened_at + backoff_secs - 1),
+        "the last second of the window must still hold"
+    );
+    assert!(
+        !backoff.is_open(opened_at + backoff_secs),
+        "the window must lift at its end, or nothing retries Nacos"
+    );
+}
+
+/// After the window lifts, the next failure opens it again on its own: the
+/// streak is already proven, and making the remote pay the threshold all over
+/// again would spend three more timeouts on a dead server.
+#[test]
+fn one_failure_after_the_window_reopens_it() {
+    let backoff = FailureBackoff::new();
+    let opened_at = 1_700_000_000;
+    let backoff_secs = i64::try_from(NACOS_FAILURE_BACKOFF.as_secs()).expect("backoff in seconds");
+    backoff.record_failure(opened_at);
+    backoff.record_failure(opened_at);
+    backoff.record_failure(opened_at);
+
+    let expired = opened_at + backoff_secs;
+    assert!(!backoff.is_open(expired), "the probe is allowed again");
+    assert!(
+        backoff.record_failure(expired),
+        "one failure after a proven outage must reopen the window"
+    );
+    assert!(backoff.is_open(expired));
+}
+
+/// The threshold is the documented number, not an accident of the tests above.
+#[test]
+fn the_failure_threshold_is_three() {
+    assert_eq!(NACOS_FAILURE_THRESHOLD, 3);
+    assert_eq!(NACOS_FAILURE_BACKOFF, Duration::from_secs(30));
+}
+
+/// A confirmation that got through proves the remote is answering, so the
+/// window it was opened under is no longer true. Without this, a query that was
+/// already in flight when the window opened would leave the window holding for
+/// its full backoff against a server that is demonstrably alive.
+#[test]
+fn a_success_while_the_window_is_open_lifts_it() {
+    let backoff = FailureBackoff::new();
+    let now = 1_700_000_000;
+
+    backoff.record_failure(now);
+    backoff.record_failure(now);
+    assert!(backoff.record_failure(now));
+    assert!(backoff.is_open(now), "the window is open");
+
+    backoff.record_success();
+
+    assert!(
+        !backoff.is_open(now),
+        "a confirmed answer must end the window, not wait for its backoff"
+    );
+    assert!(
+        !backoff.record_failure(now),
+        "the streak restarted too, so the next failure is only the first"
+    );
+}
+
+/// The window is measured in wall-clock seconds, so the clock can step
+/// backwards under it (an NTP correction). The difference has to be read as
+/// "not open" rather than saturating to zero: a negative elapsed time is a
+/// window that has not started yet, and holding it open for the whole jump
+/// would refuse new names for minutes on a clock skew, not on an outage.
+#[test]
+fn a_backwards_clock_step_lifts_the_window() {
+    let backoff = FailureBackoff::new();
+    let opened_at = 1_700_000_000;
+
+    backoff.record_failure(opened_at);
+    backoff.record_failure(opened_at);
+    assert!(backoff.record_failure(opened_at));
+    assert!(backoff.is_open(opened_at), "the window is open");
+
+    assert!(
+        !backoff.is_open(opened_at - 1),
+        "a clock that stepped behind the window's start must not hold it open"
+    );
+    assert!(
+        !backoff.is_open(opened_at - 1_000_000),
+        "a large step back must lift the window, not extend it by the whole jump"
+    );
+}
+
+/// The window ends at its own instant's far edge, and a clock behind the start
+/// is not inside it: only a non-negative elapsed time counts.
+#[test]
+fn the_window_covers_exactly_its_backoff_from_its_start() {
+    let backoff = FailureBackoff::new();
+    let opened_at = 1_700_000_000;
+    let backoff_secs = i64::try_from(NACOS_FAILURE_BACKOFF.as_secs()).expect("backoff in seconds");
+
+    backoff.record_failure(opened_at);
+    backoff.record_failure(opened_at);
+    assert!(backoff.record_failure(opened_at));
+
+    assert!(backoff.is_open(opened_at), "the first second counts");
+    assert!(
+        backoff.is_open(opened_at + backoff_secs - 1),
+        "the last second counts"
+    );
+    assert!(
+        !backoff.is_open(opened_at + backoff_secs),
+        "the window lifts at its end"
     );
 }

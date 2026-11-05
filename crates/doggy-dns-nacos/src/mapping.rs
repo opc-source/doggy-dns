@@ -1,10 +1,10 @@
-use crate::watcher::{CachedInstance, KEY_SEPARATOR, ServiceKey};
+use crate::watcher::CachedInstance;
 use hickory_proto::rr::rdata::{A, AAAA};
 use hickory_proto::rr::{LowerName, Name, RData, Record, RecordType};
 use std::borrow::Cow;
 use std::net::IpAddr;
 
-/// Build the cache key for a `<service>.<group>.<namespace>.<zone>` name.
+/// The Nacos service a `<service>.<group>.<namespace>.<zone>` name asks for.
 ///
 /// `name` is a [`LowerName`], which is what the server hands every zone handler,
 /// so the labels are already lowercase and no `to_lowercase` pass runs per
@@ -12,16 +12,30 @@ use std::net::IpAddr;
 /// `to_lowercase()` calls on values that were already lower.
 ///
 /// The zone suffix is dropped from the **right**, which is what keeps dotted
-/// service names (`com.example.api`) working. Membership is *not* checked here:
+/// service names (`com.example.api`) representable at this layer - the default
+/// `service_pattern` rejects a dot, so a dotted name only reaches Nacos once the
+/// pattern is widened. Membership is *not* checked here:
 /// callers must run [`Name::zone_of`] first, or a sibling like
 /// `evilnacos.local` is read as if it belonged to `nacos.local`.
 ///
-/// `None` means the name has fewer than three labels above the zone or carries a
-/// label that is not UTF-8, contains the key separator, or contains a dot (the
-/// escaped spelling of a dotted service). All are names the old string parser
-/// could not have matched against a Nacos service either, so the authority's
-/// authoritative `NXDOMAIN` is the same answer.
-pub fn service_key_from_name(name: &LowerName, zone: &Name) -> Option<ServiceKey> {
+/// `group` and `namespace` are the values this plugin is configured with. They
+/// are compared, not carried: each handler owns one group and one namespace, so
+/// a name below another group is not this zone's to answer, and the service name
+/// alone is all a catalog needs to look up. Borrowed for the common one-label
+/// service; a dotted service pays one owned join for the labels it stitches.
+///
+/// `None` means the name has fewer than three labels above the zone, carries a
+/// label that is not UTF-8 or contains a control byte or a dot (the escaped
+/// spelling of a dotted service), or sits below a group or namespace this plugin
+/// does not serve. All of them are names the old string parser could not have
+/// matched against a Nacos service either, so the authority's authoritative
+/// `NXDOMAIN` is the same answer.
+pub fn service_name_from_name<'a>(
+    name: &'a LowerName,
+    zone: &Name,
+    group: &str,
+    namespace: &str,
+) -> Option<Cow<'a, str>> {
     let zone_len = zone.iter().count();
     let name_len = name.iter().count();
     if name_len < zone_len + 3 {
@@ -30,8 +44,6 @@ pub fn service_key_from_name(name: &LowerName, zone: &Name) -> Option<ServiceKey
     let service_len = name_len - zone_len - 2;
 
     let mut labels = name.iter();
-    // Borrowed when the service is one label, which is the common case; a
-    // dotted service pays one owned join for itself and one for the key.
     let mut service: Cow<'_, str> = Cow::Borrowed("");
     for (index, label) in labels.by_ref().take(service_len).enumerate() {
         let text = label_text(label)?;
@@ -42,20 +54,34 @@ pub fn service_key_from_name(name: &LowerName, zone: &Name) -> Option<ServiceKey
             service.to_mut().push_str(text);
         }
     }
-    let group = labels.next().and_then(label_text)?;
-    let namespace = labels.next().and_then(label_text)?;
 
-    Some(ServiceKey::new(&service, group, namespace))
+    // The two labels above the zone have to name this plugin's group and
+    // namespace. `LowerName` case-folded them; the config keeps its own spelling
+    // (`DEFAULT_GROUP`), so the comparison ignores case.
+    let matches_group = labels
+        .next()
+        .and_then(label_text)
+        .is_some_and(|text| text.eq_ignore_ascii_case(group));
+    let matches_namespace = labels
+        .next()
+        .and_then(label_text)
+        .is_some_and(|text| text.eq_ignore_ascii_case(namespace));
+    if !matches_group || !matches_namespace {
+        return None;
+    }
+
+    Some(service)
 }
 
 /// A DNS label as text.
 ///
-/// Rejects the composite-key separator byte so a label can never forge a field
-/// boundary, rejects a dot so the escaped single-label spelling of a dotted
-/// service cannot alias the canonical multi-label one, and rejects non-UTF-8
-/// (RFC 1035 binary) labels.
+/// Rejects a label carrying a control byte - no Nacos service, group or
+/// namespace is named with one, and this is untrusted network input heading for
+/// the SDK and the logs - rejects a dot so the escaped single-label spelling of a
+/// dotted service cannot alias the canonical multi-label one, and rejects
+/// non-UTF-8 (RFC 1035 binary) labels.
 fn label_text(label: &[u8]) -> Option<&str> {
-    if label.contains(&(KEY_SEPARATOR as u8)) || label.contains(&b'.') {
+    if label.iter().any(|byte| *byte < 0x20) || label.contains(&b'.') {
         return None;
     }
     std::str::from_utf8(label).ok()
@@ -67,8 +93,13 @@ fn label_text(label: &[u8]) -> Option<&str> {
 /// returns `AAAA` records (and vice versa). The addresses are already parsed -
 /// `CachedInstance` holds an `IpAddr` - so this no longer runs
 /// `IpAddr::from_str` over every instance for every query.
+///
+/// The record owner is the queried name, so it is built per record from the
+/// [`LowerName`] the handler already has: a `Record` owns a `Name`, and the one
+/// owned name the callers used to hand in was an allocation every answer paid
+/// even when the family filter below then produced no record at all.
 pub fn to_dns_records(
-    name: &Name,
+    name: &LowerName,
     instances: &[CachedInstance],
     ttl: u32,
     rtype: RecordType,
@@ -76,11 +107,13 @@ pub fn to_dns_records(
     instances
         .iter()
         .filter_map(|instance| match (instance.ip, rtype) {
-            (IpAddr::V4(ipv4), RecordType::A) => {
-                Some(Record::from_rdata(name.clone(), ttl, RData::A(A(ipv4))))
-            }
+            (IpAddr::V4(ipv4), RecordType::A) => Some(Record::from_rdata(
+                Name::from(name.clone()),
+                ttl,
+                RData::A(A(ipv4)),
+            )),
             (IpAddr::V6(ipv6), RecordType::AAAA) => Some(Record::from_rdata(
-                name.clone(),
+                Name::from(name.clone()),
                 ttl,
                 RData::AAAA(AAAA(ipv6)),
             )),

@@ -5,7 +5,7 @@ use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use dashmap::DashMap;
 use doggy_dns_core::handler::{AnswerRotation, DoggyDnsHandler};
 use doggy_dns_nacos::authority::NacosAuthority;
-use doggy_dns_nacos::watcher::{CachedInstance, ServiceKey};
+use doggy_dns_nacos::watcher::CachedInstance;
 use doggy_dns_plugin::authority_chain::AuthorityChain;
 use hickory_proto::op::{Header, HeaderCounts, Message, MessageType, OpCode, Query};
 use hickory_proto::rr::{Name, Record, RecordType};
@@ -58,14 +58,14 @@ fn make_request(domain: &str) -> Request {
 fn bench_handler_pipeline_nacos_hit(c: &mut Criterion) {
     let cache = Arc::new(DashMap::new());
     cache.insert(
-        ServiceKey::new("my-svc", "default_group", "public"),
+        "my-svc".to_string(),
         vec![CachedInstance {
             ip: "10.0.0.1".parse().unwrap(),
             port: 8080,
             healthy: true,
         }],
     );
-    let authority = NacosAuthority::new(cache, "nacos.local", 60);
+    let authority = NacosAuthority::new(cache, "nacos.local", "DEFAULT_GROUP", "public", 60);
     let chain = Arc::new(AuthorityChain::new(vec![(
         "nacos".to_string(),
         Arc::new(authority),
@@ -104,14 +104,14 @@ fn bench_handler_pipeline_nacos_hit(c: &mut Criterion) {
 fn bench_handler_pipeline_nacos_nxdomain(c: &mut Criterion) {
     let cache = Arc::new(DashMap::new());
     cache.insert(
-        ServiceKey::new("my-svc", "default_group", "public"),
+        "my-svc".to_string(),
         vec![CachedInstance {
             ip: "10.0.0.1".parse().unwrap(),
             port: 8080,
             healthy: true,
         }],
     );
-    let authority = NacosAuthority::new(cache, "nacos.local", 60);
+    let authority = NacosAuthority::new(cache, "nacos.local", "DEFAULT_GROUP", "public", 60);
     let chain = Arc::new(AuthorityChain::new(vec![(
         "nacos".to_string(),
         Arc::new(authority),

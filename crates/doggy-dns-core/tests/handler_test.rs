@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use dashmap::DashMap;
 use doggy_dns_core::handler::{AnswerRotation, DoggyDnsHandler};
 use doggy_dns_nacos::authority::NacosAuthority;
-use doggy_dns_nacos::watcher::{CachedInstance, ServiceKey};
+use doggy_dns_nacos::watcher::CachedInstance;
 use doggy_dns_plugin::authority_chain::AuthorityChain;
 use doggy_dns_plugin::{Middleware, MiddlewareAction, RequestOutcome};
 use hickory_proto::op::{Edns, Message, MessageType, OpCode, Query, ResponseCode};
@@ -258,14 +258,16 @@ impl Middleware for ShortCircuitMiddleware {
     }
 }
 
-fn make_nacos_authority_with_hit() -> NacosAuthority {
+type MapCatalog = DashMap<String, Vec<CachedInstance>>;
+
+fn make_nacos_authority_with_hit() -> NacosAuthority<MapCatalog> {
     make_nacos_authority_with_ips(&["10.0.0.1"])
 }
 
-fn make_nacos_authority_with_ips(ips: &[&str]) -> NacosAuthority {
+fn make_nacos_authority_with_ips(ips: &[&str]) -> NacosAuthority<MapCatalog> {
     let cache = Arc::new(DashMap::new());
     cache.insert(
-        ServiceKey::new("my-svc", "default_group", "public"),
+        "my-svc".to_string(),
         ips.iter()
             .map(|ip| CachedInstance {
                 ip: ip.parse().unwrap(),
@@ -274,7 +276,7 @@ fn make_nacos_authority_with_ips(ips: &[&str]) -> NacosAuthority {
             })
             .collect(),
     );
-    NacosAuthority::new(cache, "nacos.local", 60)
+    NacosAuthority::new(cache, "nacos.local", "DEFAULT_GROUP", "public", 60)
 }
 
 /// Captures the final `RequestOutcome` so tests can inspect the XDP cache payload.

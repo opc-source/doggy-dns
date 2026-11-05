@@ -162,8 +162,7 @@ Returns live runtime signals sampled at call time — the same payload
 {
   "signals": {
     "nacos.nacos.local": {
-      "cachedServices": 42,
-      "lastPushSecondsAgo": 3
+      "subscribedServices": 42
     },
     "xdp": {
       "attached": true
@@ -172,10 +171,11 @@ Returns live runtime signals sampled at call time — the same payload
 }
 ```
 
-`lastPushSecondsAgo` is `null` when no push has ever arrived for that zone.
-`xdp.attached` is only reported by builds with the fast path wired in; the
-flag is fixed after startup because dropping the manager detaches the
-program.
+`subscribedServices` counts the names doggy-dns has subscribed; instance data
+lives in the Nacos client's cache, so the control plane reports no cache size
+or push timestamp. `xdp.attached` is only reported by builds with the fast path
+wired in; the flag is fixed after startup because dropping the manager detaches
+the program.
 
 ## Authentication
 

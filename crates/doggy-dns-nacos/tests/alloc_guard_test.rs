@@ -5,10 +5,10 @@
 //! Timings on a shared runner are easy to wave away; an allocation count is not.
 //! This wraps the system allocator and measures one `lookup` call, which is the
 //! unit of work the hot-path refactor owns. The budgets were measured with a zero
-//! budget on this file's first run, not guessed: one answering instance costs 6
-//! allocations and the in-zone miss costs 2. The composite key, the answer
-//! `Name`, the `Vec<Record>` and the per-record `Name` clone are the sites a
-//! regression would grow; the count is the contract, not a sum of its parts.
+//! budget on this file's first run, not guessed: one answering instance costs 5
+//! allocations and the in-zone miss costs 1. The `Vec<Record>` and the
+//! per-record answer `Name` are the sites a regression
+//! would grow; the count is the contract, not a sum of its parts.
 //!
 //! Both measurements live in one test on purpose: libtest runs tests in a file
 //! concurrently, and a second thread allocating inside the measured window would
@@ -16,7 +16,7 @@
 
 use dashmap::DashMap;
 use doggy_dns_nacos::authority::NacosAuthority;
-use doggy_dns_nacos::watcher::{CachedInstance, ServiceKey};
+use doggy_dns_nacos::watcher::CachedInstance;
 use hickory_proto::rr::{LowerName, Name, RecordType};
 use hickory_server::zone_handler::{LookupControlFlow, LookupOptions, ZoneHandler};
 use std::alloc::{GlobalAlloc, Layout, System};
@@ -46,17 +46,19 @@ unsafe impl GlobalAlloc for Counting {
 #[global_allocator]
 static ALLOCATOR: Counting = Counting;
 
-fn authority() -> NacosAuthority {
+type MapCatalog = DashMap<String, Vec<CachedInstance>>;
+
+fn authority() -> NacosAuthority<MapCatalog> {
     let cache = Arc::new(DashMap::new());
     cache.insert(
-        ServiceKey::new("user-service", "default_group", "public"),
+        "user-service".to_string(),
         vec![CachedInstance {
             ip: IpAddr::from([10, 0, 1, 5]),
             port: 8080,
             healthy: true,
         }],
     );
-    NacosAuthority::new(cache, "nacos.local", 6)
+    NacosAuthority::new(cache, "nacos.local", "DEFAULT_GROUP", "public", 6)
 }
 
 /// Count allocations made by one `lookup` call.
@@ -67,7 +69,7 @@ fn authority() -> NacosAuthority {
 fn measure(
     query: &str,
     runtime: &tokio::runtime::Runtime,
-    authority: &NacosAuthority,
+    authority: &NacosAuthority<MapCatalog>,
     rtype: RecordType,
 ) -> usize {
     let lower = LowerName::from(Name::from_str(query).unwrap());
@@ -104,13 +106,19 @@ fn hit_and_miss_paths_allocate_within_budget() {
         RecordType::A,
     );
 
-    // Measured with a zero budget on this file's first run: 6 allocations for
-    // one answering instance and 2 for the in-zone miss. The budget equals the
-    // measurement - no slack - so the next `to_lowercase`, `format!` or `Vec`
-    // clone on this path fails the suite instead of the next review. Changing
-    // the seed above means re-measuring; that is deliberate, not routine.
-    const HIT_BUDGET: usize = 6;
-    const MISS_BUDGET: usize = 2;
+    // Measured: 5 allocations for one answering instance and 1 for the in-zone
+    // miss. The budget equals the measurement - no slack - so the next
+    // `to_lowercase`, `format!` or extra `Vec` clone on this path fails the suite
+    // instead of the next review. The lookup borrows the service name out of the
+    // `LowerName` it already holds, so a bare application name — the shape the
+    // default `service_pattern` selects — costs no string at all; the composite
+    // key this replaced built one per query. The authority's catalog is generic,
+    // so reading it costs no boxed future; the answer name is built per record
+    // from the `LowerName` the lookup already holds, so a NODATA answer allocates
+    // no name at all. Changing the
+    // seed above means re-measuring; that is deliberate, not routine.
+    const HIT_BUDGET: usize = 5;
+    const MISS_BUDGET: usize = 1;
     assert!(
         hit <= HIT_BUDGET,
         "hit path: {hit} allocations (budget {HIT_BUDGET}) - record the measured count"

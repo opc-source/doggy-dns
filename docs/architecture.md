@@ -45,7 +45,7 @@ Part of [README](../README.md).
 
 | Kind | Description |
 |------|-------------|
-| `nacos` | Resolves service names from Nacos registry via DashMap cache. Format: `<service>.<group>.<namespace>.<zone>.` |
+| `nacos` | Resolves service names from the Nacos client's naming cache. Format: `<service>.<group>.<namespace>.<zone>.` |
 | `native` | Resolves using the OS system resolver (`/etc/resolv.conf`) |
 | `forward` | Resolves using explicit upstream DNS servers. Accepts `IP` or `IP:port` (port defaults to 53) and uses the configured port for both UDP and TCP |
 
@@ -60,17 +60,30 @@ through on lookup failure so a later `forward` plugin can still answer.
 ## Nacos integration
 
 - Connects to Nacos naming service via `nacos-sdk`
-- Subscribes to all services on startup; receives push updates on instance changes
-- Maintains an in-memory `DashMap<ServiceKey, Vec<CachedInstance>>` cache; updates
-  replace the entire `Vec` for a key (immutable update). `ServiceKey` is a single
-  composite lowercase string and `CachedInstance.ip` is an `IpAddr`, so a query builds
-  one key and does no address parsing.
+- A name's first query confirms it with the server (`get_all_instances` with
+  `subscribe = false`) and subscribes it; only names the `service_pattern`
+  selects get that far. Pushes then keep the client's cache current. The ledger
+  entry appears only once `subscribe` returns, so a concurrent first query cannot
+  read the cache for a name the client was not yet subscribed for.
+- Keeps no instance table of its own: a name this process subscribed reads the
+  Nacos client's naming cache (`subscribe = true`), which each push replaces
+  wholesale. `CachedInstance.ip` is an `IpAddr`, so a query does its address
+  parsing once per read list.
+- Three failed calls to Nacos in a row open a 30-second window (`FailureBackoff`)
+  in which a name this process has not confirmed is refused with `SERVFAIL` and
+  no call at all; an answer that did come from the server closes it. The window
+  needs both the timestamp and the streak, and the three-second call bound covers
+  the cache read too.
+- The catalog is keyed by the bare service name. One plugin serves one
+  group/namespace pair and the authority checks those two labels against its own
+  config before asking for it, so the key never has to carry them.
 - The apex `SOA` is built once at authority construction and cached again on the
   authority chain entry, so a negative answer costs no extra lookup after the first.
 - DNS name format: `<service>.<group>.<namespace>.<zone_suffix>.`
 - Example: `dig user-service.DEFAULT_GROUP.public.nacos.local A`
-- The name is split from the right, so service names may contain dots
-  (`com.example.api.DEFAULT_GROUP.public.nacos.local`)
+- The name is split from the right, so the mapping itself accepts dotted service
+  names (`com.example.api.DEFAULT_GROUP.public.nacos.local`) — which the default
+  `service_pattern` rejects, so serving one takes a widened pattern
 - The authority is authoritative for its whole zone: once a name is inside
   `<zone_suffix>`, a miss never falls through to `native`/`forward`. An unknown
   service returns `NXDOMAIN`; a service with no instance of the requested
