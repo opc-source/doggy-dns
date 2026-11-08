@@ -324,12 +324,15 @@ impl NacosServiceWatcher {
     /// `subscribe` is set.
     ///
     /// `subscribe = false` is the only shape nacos-sdk 0.8.3 has that reports a
-    /// failed request: it forwards the error straight out of `request_to_server`.
-    /// With `subscribe = true` the SDK swallows its own fetch failure and returns
-    /// an empty list, which is indistinguishable from a name that does not exist.
-    /// It reads the naming cache when it holds the name; when it does not, the SDK
-    /// subscribes the name and waits for its first fetch, which is why every
-    /// caller bounds this call rather than trusting it to be local.
+    /// failed request: it forwards the error straight out of `request_to_server`,
+    /// touching neither the cache nor the subscription registry, which is what
+    /// makes the answer a confirmation.
+    ///
+    /// With `subscribe = true` the SDK reads the naming cache when it holds the
+    /// name; when it does not, it subscribes the name and waits for its first
+    /// fetch, which is why every caller bounds this call rather than trusting it
+    /// to be local. A failed fetch is swallowed into an empty list, which is
+    /// indistinguishable from a name that does not exist.
     async fn query_naming_service(
         &self,
         service: &str,

@@ -88,6 +88,14 @@ fn dns_request(domain: &str, rtype: RecordType) -> Request {
     query.set_query_type(rtype);
     message.add_query(query);
 
+    encode(message)
+}
+
+fn dns_request_without_question() -> Request {
+    encode(Message::new(1234, MessageType::Query, OpCode::Query))
+}
+
+fn encode(message: Message) -> Request {
     let bytes = message.to_vec().unwrap();
     let src = SocketAddr::from((Ipv4Addr::LOCALHOST, 12345));
     Request::from_bytes(bytes, src, Protocol::Udp).unwrap()
@@ -100,8 +108,10 @@ async fn search_answers_from_lookup_for_the_requests_name_and_type() {
         seen: Arc::clone(&seen),
     };
     let request = dns_request("www.search.local.", RecordType::AAAA);
+    let mut options = LookupOptions::default();
+    options.dnssec_ok = true;
 
-    let (flow, tsig) = search_via_lookup(&handler, &request, LookupOptions::default()).await;
+    let (flow, tsig) = search_via_lookup(&handler, &request, options).await;
 
     assert!(
         matches!(flow, LookupControlFlow::Break(Ok(_))),
@@ -116,8 +126,29 @@ async fn search_answers_from_lookup_for_the_requests_name_and_type() {
             LowerName::from(Name::from_str("www.search.local.").unwrap()),
             RecordType::AAAA,
             true,
-            LookupOptions::default().dnssec_ok,
+            true,
         )],
-        "lookup must receive the request's name, type and options, with request info attached"
+        "lookup must receive the request's name, type, options and request info"
+    );
+}
+
+#[tokio::test]
+async fn search_skips_a_request_without_exactly_one_question() {
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let handler = RecordingHandler {
+        seen: Arc::clone(&seen),
+    };
+    let request = dns_request_without_question();
+
+    let (flow, tsig) = search_via_lookup(&handler, &request, LookupOptions::default()).await;
+
+    assert!(
+        matches!(flow, LookupControlFlow::Skip),
+        "a request without exactly one question cannot be searched"
+    );
+    assert!(tsig.is_none());
+    assert!(
+        seen.lock().unwrap().is_empty(),
+        "lookup must not run for a request the search cannot read"
     );
 }
