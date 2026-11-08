@@ -34,7 +34,9 @@ struct NamedHandler {
     /// it already is for `[[plugins]]` changes.
     ///
     /// Shared, because every negative answer attaches it: cloning the record per
-    /// query would re-copy the name and RDATA for a value that never changes.
+    /// query would re-copy the name and RDATA for a value that never changes. The
+    /// shared value is read-only - the emit path only ever borrows a record - so
+    /// anything that needs to change one must clone it first.
     ///
     /// The first negative answer's `RequestInfo` is the one the fetch sees,
     /// and every later query reuses that record. That is sound only while

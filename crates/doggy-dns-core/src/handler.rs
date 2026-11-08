@@ -161,7 +161,7 @@ impl DoggyDnsHandler {
                     request_id = ctx.request_id,
                     query = %ctx.query,
                     qtype = ?ctx.qtype,
-                    authority = %ctx.authority_name(),
+                    authority = ctx.authority_name(),
                     answers = answer_count,
                     duration_ms = ctx.start.elapsed().as_millis() as u64,
                     response_code = ?ResponseCode::NoError,
@@ -182,7 +182,7 @@ impl DoggyDnsHandler {
                     request_id = ctx.request_id,
                     query = %ctx.query,
                     qtype = ?ctx.qtype,
-                    authority = %ctx.authority_name(),
+                    authority = ctx.authority_name(),
                     error = %e,
                     "failed to send response"
                 );
@@ -227,7 +227,7 @@ impl DoggyDnsHandler {
                 request_id = ctx.request_id,
                 query = %ctx.query,
                 qtype = ?ctx.qtype,
-                authority = %ctx.authority_name(),
+                authority = ctx.authority_name(),
                 error = %error,
                 response_code = ?response_code,
                 "authority returned error"
@@ -237,7 +237,7 @@ impl DoggyDnsHandler {
                 request_id = ctx.request_id,
                 query = %ctx.query,
                 qtype = ?ctx.qtype,
-                authority = %ctx.authority_name(),
+                authority = ctx.authority_name(),
                 response_code = ?response_code,
                 "authority returned negative response"
             );

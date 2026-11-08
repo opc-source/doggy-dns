@@ -161,6 +161,7 @@ Points worth knowing before reading a failure:
 | `crates/doggy-dns-basic/tests/env_test.rs` | 8 | `${ENV_VAR}` expansion across tables and arrays, malformed references |
 | `crates/doggy-dns-basic/tests/net_test.rs` | 5 | IPv4/IPv6 listen-address parsing, bracketed literals, rejects hostnames |
 | `crates/doggy-dns-core/tests/handler_test.rs` | 21 | Handler pipeline: NoError, NXDomain, NODATA, ServFail, Refused, middleware callbacks, EDNS cache admission, AA/RA flags, SOA on negatives, answer rotation |
+| `crates/doggy-dns-core/tests/log_fields_test.rs` | 1 | The handler's rendered tracing fields: event authority keeps its quoted `&str` form, span authority/protocol/response-code keep their display forms |
 | `crates/doggy-dns-core/tests/middleware_test.rs` | 2 | Logging middleware: `before_request` continues, `after_request` completes |
 | `crates/doggy-dns-core/tests/server_test.rs` | 2 | UDP/TCP listener binding for bare and bracketed IPv6 addresses |
 | `crates/doggy-dns-core/tests/wire_golden_test.rs` | 5 | Golden wire bytes for the Nacos paths: hit (name lowercased), NXDOMAIN, NODATA, apex SOA |
