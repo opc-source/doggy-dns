@@ -196,19 +196,7 @@ impl<C: ServiceCatalog + 'static> ZoneHandler for NacosAuthority<C> {
         request: &Request,
         lookup_options: LookupOptions,
     ) -> (LookupControlFlow<AuthLookup>, Option<TSigResponseContext>) {
-        let request_info = match request.request_info() {
-            Ok(info) => info,
-            Err(_) => return (LookupControlFlow::Skip, None),
-        };
-        let result = self
-            .lookup(
-                request_info.query.name(),
-                request_info.query.query_type(),
-                Some(&request_info),
-                lookup_options,
-            )
-            .await;
-        (result, None)
+        doggy_dns_plugin::zone_handler::search_via_lookup(self, request, lookup_options).await
     }
 
     async fn nsec_records(

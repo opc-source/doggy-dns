@@ -248,7 +248,7 @@ impl NacosServiceWatcher {
     async fn answer_from_server(&self, service: &str) -> CatalogAnswer {
         let confirmed = match tokio::time::timeout(
             NACOS_LOOKUP_TIMEOUT,
-            self.confirm_with_server(service),
+            self.query_naming_service(service, false),
         )
         .await
         {
@@ -295,19 +295,23 @@ impl NacosServiceWatcher {
     /// push or the polling updater, and the name would stay out of the ledger to be
     /// probed again on every query.
     async fn answer_from_cache(&self, service: &str) -> Option<CatalogAnswer> {
-        let instances =
-            match tokio::time::timeout(NACOS_CACHE_READ_TIMEOUT, self.fetch_cache(service)).await {
-                Ok(Ok(instances)) => instances,
-                Ok(Err(e)) => {
-                    tracing::debug!(
-                        "the nacos client could not read service '{}': {}",
-                        service,
-                        e
-                    );
-                    return None;
-                }
-                Err(_) => return None,
-            };
+        let instances = match tokio::time::timeout(
+            NACOS_CACHE_READ_TIMEOUT,
+            self.query_naming_service(service, true),
+        )
+        .await
+        {
+            Ok(Ok(instances)) => instances,
+            Ok(Err(e)) => {
+                tracing::debug!(
+                    "the nacos client could not read service '{}': {}",
+                    service,
+                    e
+                );
+                return None;
+            }
+            Err(_) => return None,
+        };
 
         let hit = cache_hit_of(service, &instances);
         if hit.is_some() {
@@ -316,38 +320,27 @@ impl NacosServiceWatcher {
         hit
     }
 
-    /// Ask the server for `service` with no cache read and no subscription.
+    /// Ask the SDK for `service`, reading its naming cache first when
+    /// `subscribe` is set.
     ///
     /// `subscribe = false` is the only shape nacos-sdk 0.8.3 has that reports a
     /// failed request: it forwards the error straight out of `request_to_server`.
     /// With `subscribe = true` the SDK swallows its own fetch failure and returns
     /// an empty list, which is indistinguishable from a name that does not exist.
-    async fn confirm_with_server(
+    /// It reads the naming cache when it holds the name; when it does not, the SDK
+    /// subscribes the name and waits for its first fetch, which is why every
+    /// caller bounds this call rather than trusting it to be local.
+    async fn query_naming_service(
         &self,
         service: &str,
-    ) -> Result<Vec<ServiceInstance>, nacos_sdk::api::error::Error> {
-        self.naming_service
-            .get_all_instances(service.to_string(), Some(self.group.clone()), vec![], false)
-            .await
-    }
-
-    /// Ask the client's own view for `service`.
-    ///
-    /// `subscribe = true` reads the naming cache when it holds the name; when it
-    /// does not, the SDK subscribes the name and waits for its first fetch, which is
-    /// why every caller bounds this call rather than trusting it to be local.
-    async fn fetch_cache(
-        &self,
-        service: &str,
+        subscribe: bool,
     ) -> Result<Vec<ServiceInstance>, nacos_sdk::api::error::Error> {
         self.naming_service
             .get_all_instances(
                 service.to_string(),
                 Some(self.group.clone()),
                 vec![],
-                // Reads the client's cache when it has an entry, which is what
-                // keeps the common query local.
-                true,
+                subscribe,
             )
             .await
     }
@@ -359,8 +352,11 @@ impl NacosServiceWatcher {
     /// moments ago can still miss; the SDK then re-fetches inline, which is a call
     /// that reaches Nacos and is bounded and counted like any other.
     async fn read_client_cache(&self, service: &str) -> CatalogAnswer {
-        let instances = match tokio::time::timeout(NACOS_LOOKUP_TIMEOUT, self.fetch_cache(service))
-            .await
+        let instances = match tokio::time::timeout(
+            NACOS_LOOKUP_TIMEOUT,
+            self.query_naming_service(service, true),
+        )
+        .await
         {
             Ok(Ok(instances)) => instances,
             Ok(Err(e)) => {
