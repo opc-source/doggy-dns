@@ -43,30 +43,14 @@ pub fn validate_config(config: &DoggyDnsConfig) -> anyhow::Result<()> {
     if let Some(tls) = &config.server.tls
         && tls.enabled
     {
-        anyhow::ensure!(
-            std::path::Path::new(&tls.cert_path).exists(),
-            "TLS cert_path does not exist: {}",
-            tls.cert_path
-        );
-        anyhow::ensure!(
-            std::path::Path::new(&tls.key_path).exists(),
-            "TLS key_path does not exist: {}",
-            tls.key_path
-        );
+        ensure_path_exists("TLS cert_path", &tls.cert_path)?;
+        ensure_path_exists("TLS key_path", &tls.key_path)?;
     }
     if let Some(https) = &config.server.https
         && https.enabled
     {
-        anyhow::ensure!(
-            std::path::Path::new(&https.cert_path).exists(),
-            "HTTPS cert_path does not exist: {}",
-            https.cert_path
-        );
-        anyhow::ensure!(
-            std::path::Path::new(&https.key_path).exists(),
-            "HTTPS key_path does not exist: {}",
-            https.key_path
-        );
+        ensure_path_exists("HTTPS cert_path", &https.cert_path)?;
+        ensure_path_exists("HTTPS key_path", &https.key_path)?;
     }
     if config.remote_config.enabled {
         anyhow::ensure!(
@@ -130,6 +114,15 @@ pub fn validate_config(config: &DoggyDnsConfig) -> anyhow::Result<()> {
             );
         }
     }
+    Ok(())
+}
+
+/// Fail with the config field named in `label` when its file is not on disk.
+fn ensure_path_exists(label: &str, path: &str) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        std::path::Path::new(path).exists(),
+        "{label} does not exist: {path}"
+    );
     Ok(())
 }
 
@@ -389,7 +382,7 @@ fn validate_observability_url(
             !value.trim_end_matches('/').ends_with("/v1"),
             "{name} must be the OTLP base URL without /v1"
         );
-        for signal in ["logs", "metrics", "traces", "profiles"] {
+        for signal in crate::OTLP_SIGNAL_PATHS {
             anyhow::ensure!(
                 !value.ends_with(&format!("/v1/{signal}")),
                 "{name} must be the OTLP base URL without /v1/{signal}; use the signal-specific endpoint for a full URL"

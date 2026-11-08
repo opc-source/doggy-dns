@@ -2,45 +2,39 @@ use serde::Deserialize;
 use std::collections::BTreeMap;
 use std::fmt;
 
+/// The OTLP signal path segments, in the order the `/v1/<signal>` URLs spell
+/// them. Both the runtime endpoint guard and config validation reject a base
+/// URL that already carries one, so the list lives here once.
+pub const OTLP_SIGNAL_PATHS: [&str; 4] = ["logs", "metrics", "traces", "profiles"];
+
 /// OTLP export configuration. A single target is supported; fan-out should be
 /// handled by an OTel Collector or Vector in front of the final backend.
+/// Every field is optional: a missing one takes the value `Default` gives, so
+/// `impl Default` below is the single source for all of them.
 #[derive(Clone, Deserialize)]
+#[serde(default)]
 pub struct ObservabilityConfig {
-    #[serde(default)]
     pub enabled: bool,
-    #[serde(default)]
     pub backend: ObservabilityBackend,
     /// OTLP base URL, e.g. `http://127.0.0.1:5080/api/default`. Do not append
     /// `/v1/logs` here; use the signal-specific `endpoint` for a full URL.
-    #[serde(default)]
     pub endpoint: String,
-    #[serde(default)]
     pub protocol: ObservabilityProtocol,
     /// Defaults to `doggy-dns`, then `OTEL_SERVICE_NAME`.
-    #[serde(default)]
     pub service_name: Option<String>,
     /// Mapped to the `deployment.environment.name` resource attribute.
-    #[serde(default)]
     pub environment: Option<String>,
-    #[serde(default = "default_observability_timeout")]
     pub timeout_secs: u64,
     /// Extra OTLP/HTTP headers. Values support `${ENV_VAR}` interpolation.
-    #[serde(default)]
     pub headers: BTreeMap<String, String>,
     /// Convenience for OpenObserve's `Authorization: Basic ...` header.
-    #[serde(default)]
     pub basic_auth: Option<BasicAuthConfig>,
     /// Extra resource attributes. Config values override
     /// `OTEL_RESOURCE_ATTRIBUTES`.
-    #[serde(default)]
     pub resource_attributes: BTreeMap<String, String>,
-    #[serde(default)]
     pub logs: LogsConfig,
-    #[serde(default)]
     pub metrics: MetricsConfig,
-    #[serde(default)]
     pub traces: TracesConfig,
-    #[serde(default)]
     pub profiles: ProfilesConfig,
 }
 
@@ -77,7 +71,7 @@ impl Default for ObservabilityConfig {
             protocol: ObservabilityProtocol::default(),
             service_name: None,
             environment: None,
-            timeout_secs: default_observability_timeout(),
+            timeout_secs: 10,
             headers: BTreeMap::new(),
             basic_auth: None,
             resource_attributes: BTreeMap::new(),
@@ -149,16 +143,13 @@ impl fmt::Debug for BasicAuthConfig {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
 pub struct LogsConfig {
-    #[serde(default = "default_true")]
     pub enabled: bool,
     /// OTLP log level. Independent of the stdout `RUST_LOG` filter.
-    #[serde(default = "default_logs_level")]
     pub level: String,
-    #[serde(default = "default_true")]
     pub stdout: bool,
     /// Full OTLP URL override, e.g. `http://host:4318/v1/logs`.
-    #[serde(default)]
     pub endpoint: Option<String>,
 }
 
@@ -166,7 +157,7 @@ impl Default for LogsConfig {
     fn default() -> Self {
         Self {
             enabled: true,
-            level: default_logs_level(),
+            level: "warn".to_string(),
             stdout: true,
             endpoint: None,
         }
@@ -174,15 +165,12 @@ impl Default for LogsConfig {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
 pub struct MetricsConfig {
-    #[serde(default = "default_true")]
     pub enabled: bool,
-    #[serde(default = "default_metrics_interval")]
     pub interval_secs: u64,
-    #[serde(default)]
     pub temporality: MetricsTemporality,
     /// Full OTLP URL override, e.g. `http://host:4318/v1/metrics`.
-    #[serde(default)]
     pub endpoint: Option<String>,
 }
 
@@ -190,7 +178,7 @@ impl Default for MetricsConfig {
     fn default() -> Self {
         Self {
             enabled: true,
-            interval_secs: default_metrics_interval(),
+            interval_secs: 15,
             temporality: MetricsTemporality::default(),
             endpoint: None,
         }
@@ -198,19 +186,14 @@ impl Default for MetricsConfig {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
 pub struct TracesConfig {
-    #[serde(default = "default_true")]
     pub enabled: bool,
-    #[serde(default = "default_sample_ratio")]
     pub sample_ratio: f64,
-    #[serde(default = "default_trace_queue_size")]
     pub max_queue_size: usize,
-    #[serde(default = "default_trace_batch_size")]
     pub max_export_batch_size: usize,
-    #[serde(default = "default_trace_scheduled_delay")]
     pub scheduled_delay_ms: u64,
     /// Full OTLP URL override, e.g. `http://host:4318/v1/traces`.
-    #[serde(default)]
     pub endpoint: Option<String>,
 }
 
@@ -218,27 +201,23 @@ impl Default for TracesConfig {
     fn default() -> Self {
         Self {
             enabled: true,
-            sample_ratio: default_sample_ratio(),
-            max_queue_size: default_trace_queue_size(),
-            max_export_batch_size: default_trace_batch_size(),
-            scheduled_delay_ms: default_trace_scheduled_delay(),
+            sample_ratio: 0.05,
+            max_queue_size: 8192,
+            max_export_batch_size: 512,
+            scheduled_delay_ms: 2000,
             endpoint: None,
         }
     }
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
 pub struct ProfilesConfig {
-    #[serde(default)]
     pub enabled: bool,
-    #[serde(default = "default_profiles_interval")]
     pub interval_secs: u64,
-    #[serde(default = "default_profiles_duration")]
     pub duration_secs: u64,
-    #[serde(default = "default_profiles_frequency")]
     pub frequency_hz: i32,
     /// Full OTLP URL override, e.g. `http://host:4318/v1/profiles`.
-    #[serde(default)]
     pub endpoint: Option<String>,
 }
 
@@ -246,54 +225,10 @@ impl Default for ProfilesConfig {
     fn default() -> Self {
         Self {
             enabled: false,
-            interval_secs: default_profiles_interval(),
-            duration_secs: default_profiles_duration(),
-            frequency_hz: default_profiles_frequency(),
+            interval_secs: 60,
+            duration_secs: 10,
+            frequency_hz: 99,
             endpoint: None,
         }
     }
-}
-
-fn default_true() -> bool {
-    true
-}
-
-fn default_observability_timeout() -> u64 {
-    10
-}
-
-fn default_logs_level() -> String {
-    "warn".to_string()
-}
-
-fn default_metrics_interval() -> u64 {
-    15
-}
-
-fn default_sample_ratio() -> f64 {
-    0.05
-}
-
-fn default_trace_queue_size() -> usize {
-    8192
-}
-
-fn default_trace_batch_size() -> usize {
-    512
-}
-
-fn default_trace_scheduled_delay() -> u64 {
-    2000
-}
-
-fn default_profiles_interval() -> u64 {
-    60
-}
-
-fn default_profiles_duration() -> u64 {
-    10
-}
-
-fn default_profiles_frequency() -> i32 {
-    99
 }

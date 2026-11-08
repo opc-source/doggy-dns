@@ -1,24 +1,26 @@
 #![allow(clippy::disallowed_methods)]
 
+mod common;
+
 use async_trait::async_trait;
+use common::dns_request;
 use dashmap::DashMap;
 use doggy_dns_core::handler::{AnswerRotation, DoggyDnsHandler};
 use doggy_dns_nacos::authority::NacosAuthority;
 use doggy_dns_nacos::watcher::CachedInstance;
 use doggy_dns_plugin::authority_chain::AuthorityChain;
 use doggy_dns_plugin::{Middleware, MiddlewareAction, RequestOutcome};
-use hickory_proto::op::{Edns, Message, MessageType, OpCode, Query, ResponseCode};
+use hickory_proto::op::{Edns, Message, ResponseCode};
 use hickory_proto::rr::rdata::A;
 use hickory_proto::rr::{Name, RData, Record, RecordType};
 use hickory_proto::serialize::binary::BinEncoder;
 use hickory_server::net::NetError;
 use hickory_server::net::runtime::TokioTime;
-use hickory_server::net::xfer::Protocol;
 use hickory_server::server::{Request, RequestHandler, ResponseHandler, ResponseInfo};
 use hickory_server::zone_handler::{
     AuthLookup, LookupControlFlow, LookupError, LookupOptions, MessageResponse, ZoneHandler,
 };
-use std::net::{Ipv4Addr, SocketAddr};
+use std::net::Ipv4Addr;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -26,30 +28,13 @@ use std::sync::atomic::{AtomicU64, Ordering};
 // --- Helpers ---
 
 fn make_dns_request(domain: &str, rtype: RecordType) -> Request {
-    build_request(domain, rtype, None)
+    dns_request(1234, domain, rtype, None)
 }
 
 fn make_edns_dns_request(domain: &str, rtype: RecordType, max_payload: u16) -> Request {
     let mut edns = Edns::new();
     edns.set_max_payload(max_payload);
-    build_request(domain, rtype, Some(edns))
-}
-
-fn build_request(domain: &str, rtype: RecordType, edns: Option<Edns>) -> Request {
-    let mut message = Message::new(1234, MessageType::Query, OpCode::Query);
-    message.metadata.recursion_desired = true;
-
-    let mut query = Query::new();
-    query.set_name(Name::from_str(domain).unwrap());
-    query.set_query_type(rtype);
-    message.add_query(query);
-    if let Some(edns) = edns {
-        message.set_edns(edns);
-    }
-
-    let bytes = message.to_vec().unwrap();
-    let src = SocketAddr::from((Ipv4Addr::LOCALHOST, 12345));
-    Request::from_bytes(bytes, src, Protocol::Udp).unwrap()
+    dns_request(1234, domain, rtype, Some(edns))
 }
 
 /// Mock ResponseHandler that serializes the response so tests can inspect
@@ -570,6 +555,49 @@ async fn handler_authoritative_nxdomain_is_cached_for_xdp() {
         .expect("authoritative NXDOMAIN should be cached");
     let decoded = Message::from_vec(&bytes).expect("cached bytes must be a valid DNS message");
     assert_eq!(decoded.metadata.response_code, ResponseCode::NXDomain);
+}
+
+/// The all-skip path builds the response and the XDP payload from two different
+/// helpers, so nothing else in this file can see them disagree: one decides
+/// what the client gets, the other decides what the map replays for the rest of
+/// the TTL. One query, both compared.
+#[tokio::test]
+async fn all_skip_xdp_payload_matches_the_sent_response() {
+    let chain = AuthorityChain::new(vec![]);
+    let capture = Arc::new(OutcomeCaptureMiddleware::new());
+    let handler = DoggyDnsHandler::new(
+        vec![capture.clone() as Arc<dyn Middleware>],
+        Arc::new(chain),
+        true,
+        AnswerRotation::new(false),
+    );
+
+    let request = make_dns_request("unknown.example.com.", RecordType::A);
+    let mock = MockResponseHandler::new();
+    let _info = handler
+        .handle_request::<_, TokioTime>(&request, mock.clone())
+        .await;
+
+    let sent = mock.message().expect("response captured");
+    let outcome = capture.outcome().expect("outcome not captured");
+    let bytes = outcome
+        .response_bytes
+        .expect("all-skip NXDOMAIN should be cached for XDP");
+    let cached = Message::from_vec(&bytes).expect("cached bytes must be a valid DNS message");
+
+    assert_eq!(cached.metadata.response_code, ResponseCode::NXDomain);
+    assert_eq!(cached.metadata.authoritative, sent.metadata.authoritative);
+    assert_eq!(
+        cached.metadata.recursion_available,
+        sent.metadata.recursion_available
+    );
+    assert!(
+        !cached.metadata.authoritative,
+        "no authority claimed the name, so nothing owns the answer"
+    );
+    // The distinction from an authority's own NXDOMAIN: no SOA to replay.
+    assert!(cached.answers.is_empty());
+    assert!(cached.authorities.is_empty());
 }
 
 /// A non-authoritative handler that answers every query with one A record.

@@ -1,25 +1,14 @@
 #![allow(clippy::disallowed_methods)]
 
+mod common;
+
+use common::dns_request;
 use doggy_dns_plugin::{Middleware, MiddlewareAction, RequestOutcome};
-use hickory_proto::op::{Message, MessageType, OpCode, Query};
-use hickory_proto::rr::{Name, RecordType};
-use hickory_server::net::xfer::Protocol;
+use hickory_proto::rr::RecordType;
 use hickory_server::server::Request;
-use std::net::{Ipv4Addr, SocketAddr};
-use std::str::FromStr;
 
 fn make_dns_request(domain: &str, rtype: RecordType) -> Request {
-    let mut message = Message::new(1234, MessageType::Query, OpCode::Query);
-    message.metadata.recursion_desired = true;
-
-    let mut query = Query::new();
-    query.set_name(Name::from_str(domain).unwrap());
-    query.set_query_type(rtype);
-    message.add_query(query);
-
-    let bytes = message.to_vec().unwrap();
-    let src = SocketAddr::from((Ipv4Addr::LOCALHOST, 12345));
-    Request::from_bytes(bytes, src, Protocol::Udp).unwrap()
+    dns_request(1234, domain, rtype, None)
 }
 
 #[tokio::test]

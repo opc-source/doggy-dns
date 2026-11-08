@@ -24,8 +24,8 @@ pub use control::{CONTROL_ENDPOINTS, ControlConfig};
 pub use load::load_config;
 pub use middleware::MiddlewareConfig;
 pub use observability::{
-    BasicAuthConfig, LogsConfig, MetricsConfig, MetricsTemporality, ObservabilityBackend,
-    ObservabilityConfig, ObservabilityProtocol, ProfilesConfig, TracesConfig,
+    BasicAuthConfig, LogsConfig, MetricsConfig, MetricsTemporality, OTLP_SIGNAL_PATHS,
+    ObservabilityBackend, ObservabilityConfig, ObservabilityProtocol, ProfilesConfig, TracesConfig,
 };
 pub use plugin::{PluginConfig, PluginKind};
 pub use remote::RemoteConfig;

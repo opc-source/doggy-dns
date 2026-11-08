@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use base64::Engine as _;
 use doggy_dns_basic::ObservabilityConfig;
 use doggy_dns_basic::env::expand_env;
-use reqwest::header::{HeaderName, HeaderValue};
+use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use std::collections::HashMap;
 
 /// Build the OTLP/HTTP headers for every signal.
@@ -82,6 +82,24 @@ fn resolve_with_env(
     }
 
     Ok(headers)
+}
+
+/// The resolved headers as reqwest's own map, for the signal that exports with
+/// reqwest rather than through an OTLP exporter.
+///
+/// [`resolve_with_env`] has already checked every name and value, so these
+/// conversions cannot fail on its output; they still return `Result` rather
+/// than unwrap, because the pair need not have come from there.
+pub(crate) fn to_header_map(headers: HashMap<String, String>) -> Result<HeaderMap> {
+    let mut map = HeaderMap::with_capacity(headers.len());
+    for (name, value) in headers {
+        let name = HeaderName::from_bytes(name.as_bytes())
+            .with_context(|| format!("invalid OTLP header name: {name}"))?;
+        let value = HeaderValue::from_str(&value)
+            .with_context(|| format!("invalid OTLP header value for {name}"))?;
+        map.insert(name, value);
+    }
+    Ok(map)
 }
 
 fn insert_header(headers: &mut HashMap<String, String>, name: &str, value: String) {
@@ -325,6 +343,32 @@ mod tests {
             error
                 .chain()
                 .any(|cause| cause.to_string().contains("header value")),
+            "unexpected error: {error:?}"
+        );
+    }
+
+    #[test]
+    fn header_map_carries_every_resolved_pair() {
+        let mut headers = HashMap::new();
+        headers.insert("x-tenant".to_string(), "acme".to_string());
+
+        let map = to_header_map(headers).unwrap();
+        assert_eq!(map.get("x-tenant").unwrap(), "acme");
+        assert_eq!(map.len(), 1);
+    }
+
+    /// `resolve_with_env` screens its own output, so this is the conversion's
+    /// own contract: a pair assembled elsewhere still cannot reach the wire.
+    #[test]
+    fn header_map_rejects_an_invalid_name() {
+        let mut headers = HashMap::new();
+        headers.insert("bad header".to_string(), "value".to_string());
+
+        let error = to_header_map(headers).unwrap_err();
+        assert!(
+            error
+                .chain()
+                .any(|cause| cause.to_string().contains("header name")),
             "unexpected error: {error:?}"
         );
     }

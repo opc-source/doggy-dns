@@ -1,22 +1,25 @@
 #![allow(clippy::disallowed_methods)]
 
+// The handler benchmark queries the same wire shape the tests build, so it
+// shares their builder; `#[path]` is how a bench target reaches a test module.
+#[path = "../tests/common/mod.rs"]
+mod common;
+
 use async_trait::async_trait;
+use common::dns_request;
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use dashmap::DashMap;
 use doggy_dns_core::handler::{AnswerRotation, DoggyDnsHandler};
 use doggy_dns_nacos::authority::NacosAuthority;
 use doggy_dns_nacos::watcher::CachedInstance;
 use doggy_dns_plugin::authority_chain::AuthorityChain;
-use hickory_proto::op::{Header, HeaderCounts, Message, MessageType, OpCode, Query};
-use hickory_proto::rr::{Name, Record, RecordType};
+use hickory_proto::op::{Header, HeaderCounts};
+use hickory_proto::rr::{Record, RecordType};
 use hickory_server::net::NetError;
 use hickory_server::net::runtime::TokioTime;
-use hickory_server::net::xfer::Protocol;
 use hickory_server::server::{Request, RequestHandler, ResponseHandler, ResponseInfo};
 use hickory_server::zone_handler::MessageResponse;
 use std::hint::black_box;
-use std::net::{Ipv4Addr, SocketAddr};
-use std::str::FromStr;
 use std::sync::Arc;
 
 #[derive(Clone)]
@@ -44,15 +47,7 @@ impl ResponseHandler for NoOpResponseHandler {
 }
 
 fn make_request(domain: &str) -> Request {
-    let mut message = Message::new(1234, MessageType::Query, OpCode::Query);
-    message.metadata.recursion_desired = true;
-    let mut query = Query::new();
-    query.set_name(Name::from_str(domain).unwrap());
-    query.set_query_type(RecordType::A);
-    message.add_query(query);
-    let bytes = message.to_vec().unwrap();
-    let src = SocketAddr::from((Ipv4Addr::LOCALHOST, 12345));
-    Request::from_bytes(bytes, src, Protocol::Udp).unwrap()
+    dns_request(1234, domain, RecordType::A, None)
 }
 
 fn bench_handler_pipeline_nacos_hit(c: &mut Criterion) {

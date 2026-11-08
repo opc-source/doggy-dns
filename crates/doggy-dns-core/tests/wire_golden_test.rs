@@ -8,22 +8,22 @@
 //! before the refactor; if a later task changes one, that task changed the
 //! response, not the expectation.
 
+mod common;
+
 use async_trait::async_trait;
+use common::dns_request;
 use dashmap::DashMap;
 use doggy_dns_core::handler::{AnswerRotation, DoggyDnsHandler};
 use doggy_dns_nacos::authority::NacosAuthority;
 use doggy_dns_nacos::watcher::CachedInstance;
 use doggy_dns_plugin::authority_chain::AuthorityChain;
-use hickory_proto::op::{Message, MessageType, OpCode, Query};
-use hickory_proto::rr::{Name, Record, RecordType};
+use hickory_proto::op::Message;
+use hickory_proto::rr::{Record, RecordType};
 use hickory_proto::serialize::binary::BinEncoder;
 use hickory_server::net::NetError;
 use hickory_server::net::runtime::TokioTime;
-use hickory_server::net::xfer::Protocol;
 use hickory_server::server::{Request, RequestHandler, ResponseHandler, ResponseInfo};
 use hickory_server::zone_handler::MessageResponse;
-use std::net::{Ipv4Addr, SocketAddr};
-use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 
 /// ResponseHandler that serialises the response exactly as the server would and
@@ -58,15 +58,8 @@ impl ResponseHandler for ByteCapturingHandler {
 }
 
 fn make_request(domain: &str, rtype: RecordType) -> Request {
-    let mut message = Message::new(0x1234, MessageType::Query, OpCode::Query);
-    message.metadata.recursion_desired = true;
-    let mut query = Query::new();
-    query.set_name(Name::from_str(domain).unwrap());
-    query.set_query_type(rtype);
-    message.add_query(query);
-    let bytes = message.to_vec().unwrap();
-    let src = SocketAddr::from((Ipv4Addr::LOCALHOST, 12345));
-    Request::from_bytes(bytes, src, Protocol::Udp).unwrap()
+    // The golden bytes start with this id, so it is part of what is pinned.
+    dns_request(0x1234, domain, rtype, None)
 }
 
 /// One A instance under `my-svc.default_group.public`, so a v6 query on the

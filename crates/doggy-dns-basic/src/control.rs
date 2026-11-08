@@ -5,22 +5,17 @@ use serde::Deserialize;
 /// The centralized admin UI lives in the separate doggy-dns-console project,
 /// which consumes these endpoints.
 #[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
 pub struct ControlConfig {
-    #[serde(default)]
     pub enabled: bool,
-    #[serde(default = "default_control_listen_addr")]
     pub listen_addr: String,
-    #[serde(default = "default_control_port")]
     pub port: u16,
     /// Bearer token guarding the `/mcp` endpoint only; health endpoints
     /// never require it.
-    #[serde(default)]
     pub token: Option<String>,
-    #[serde(default)]
     pub allowed_hosts: Vec<String>,
     /// Which endpoints the listener serves. Allowed values: `mcp`,
     /// `healthz`, `readyz`. Validated only when the plane is enabled.
-    #[serde(default = "default_control_endpoints")]
     pub endpoints: Vec<String>,
 }
 
@@ -31,23 +26,11 @@ impl Default for ControlConfig {
     fn default() -> Self {
         Self {
             enabled: false,
-            listen_addr: default_control_listen_addr(),
-            port: default_control_port(),
+            listen_addr: "127.0.0.1".to_string(),
+            port: 19090,
             token: None,
             allowed_hosts: Vec::new(),
-            endpoints: default_control_endpoints(),
+            endpoints: CONTROL_ENDPOINTS.iter().map(|s| s.to_string()).collect(),
         }
     }
-}
-
-fn default_control_listen_addr() -> String {
-    "127.0.0.1".to_string()
-}
-
-fn default_control_port() -> u16 {
-    19090
-}
-
-fn default_control_endpoints() -> Vec<String> {
-    CONTROL_ENDPOINTS.iter().map(|s| s.to_string()).collect()
 }

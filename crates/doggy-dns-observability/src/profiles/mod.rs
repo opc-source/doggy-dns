@@ -6,7 +6,7 @@ use anyhow::{Context, Result};
 use doggy_dns_basic::ObservabilityConfig;
 use opentelemetry_sdk::Resource;
 use prost::Message as _;
-use reqwest::header::{CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue};
+use reqwest::header::{CONTENT_TYPE, HeaderMap, HeaderValue};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 use tokio::task::JoinHandle;
@@ -77,16 +77,7 @@ pub(crate) struct ProfileExporter {
 impl ProfileExporter {
     pub(crate) fn new(config: &ObservabilityConfig, resource: &Resource) -> Result<Self> {
         let url = endpoint::resolve_signal_endpoint(config, Signal::Profiles)?;
-        let resolved_headers = auth::resolve_headers(config)?;
-
-        let mut headers = HeaderMap::new();
-        for (name, value) in resolved_headers {
-            let name = HeaderName::from_bytes(name.as_bytes())
-                .with_context(|| format!("invalid OTLP header name: {name}"))?;
-            let value = HeaderValue::from_str(&value)
-                .with_context(|| format!("invalid OTLP header value for {name}"))?;
-            headers.insert(name, value);
-        }
+        let mut headers = auth::to_header_map(auth::resolve_headers(config)?)?;
         // Profiles must always be protobuf; override a user-supplied content type.
         headers.insert(
             CONTENT_TYPE,
