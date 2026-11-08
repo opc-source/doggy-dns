@@ -34,6 +34,15 @@ const BACKGROUND_TASK_SHUTDOWN_GRACE: Duration = Duration::from_secs(2);
 /// unset and when no `[[plugins]]` section exists at all.
 const DEFAULT_FORWARD_UPSTREAM: [&str; 2] = ["8.8.8.8:53", "1.1.1.1:53"];
 
+/// [`DEFAULT_FORWARD_UPSTREAM`] in the owned shape `ForwardAuthority::new`
+/// takes, so neither fallback site repeats the conversion.
+fn default_forward_upstreams() -> Vec<String> {
+    DEFAULT_FORWARD_UPSTREAM
+        .iter()
+        .map(|upstream| upstream.to_string())
+        .collect()
+}
+
 /// Cache size and TTLs of the forward plugin `main` builds when no
 /// `[[plugins]]` section is configured. Nothing reads the `[[plugins]]` field
 /// defaults (`cache_size` 4096, `min_ttl` 10, `max_ttl` 300) for this built-in,
@@ -277,10 +286,7 @@ async fn build_authority_chain(
     if config.plugins.is_empty() {
         tracing::info!("no plugins configured, defaulting to forward");
         let forward = ForwardAuthority::new(
-            DEFAULT_FORWARD_UPSTREAM
-                .iter()
-                .map(|s| s.to_string())
-                .collect(),
+            default_forward_upstreams(),
             DEFAULT_FORWARD_CACHE_SIZE,
             DEFAULT_FORWARD_MIN_TTL,
             DEFAULT_FORWARD_MAX_TTL,
@@ -325,12 +331,10 @@ async fn build_authority_chain(
                 tracing::info!(plugin = %name, "loaded plugin");
             }
             PluginKind::Forward => {
-                let addrs = plugin.upstream.clone().unwrap_or_else(|| {
-                    DEFAULT_FORWARD_UPSTREAM
-                        .iter()
-                        .map(|s| s.to_string())
-                        .collect()
-                });
+                let addrs = plugin
+                    .upstream
+                    .clone()
+                    .unwrap_or_else(default_forward_upstreams);
                 let name = format!("forward[{}]", addrs.join(","));
                 let authority = ForwardAuthority::new(
                     addrs,
