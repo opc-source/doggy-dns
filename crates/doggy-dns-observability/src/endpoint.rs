@@ -113,7 +113,7 @@ fn ensure_base_endpoint(base: &str) -> Result<()> {
         "OTLP base endpoint must not include /v1; \
          use the signal-specific endpoint for a full URL"
     );
-    for signal in ["logs", "metrics", "traces", "profiles"] {
+    for signal in doggy_dns_basic::OTLP_SIGNAL_PATHS {
         anyhow::ensure!(
             !base.ends_with(&format!("/v1/{signal}")),
             "OTLP base endpoint must not include /v1/{signal}; \

@@ -1,24 +1,26 @@
 #![allow(clippy::disallowed_methods)]
 
+mod common;
+
 use async_trait::async_trait;
+use common::dns_request;
 use dashmap::DashMap;
 use doggy_dns_core::handler::{AnswerRotation, DoggyDnsHandler};
 use doggy_dns_nacos::authority::NacosAuthority;
 use doggy_dns_nacos::watcher::CachedInstance;
 use doggy_dns_plugin::authority_chain::AuthorityChain;
 use doggy_dns_plugin::{Middleware, MiddlewareAction, RequestOutcome};
-use hickory_proto::op::{Edns, Message, MessageType, OpCode, Query, ResponseCode};
+use hickory_proto::op::{Edns, Message, ResponseCode};
 use hickory_proto::rr::rdata::A;
 use hickory_proto::rr::{Name, RData, Record, RecordType};
 use hickory_proto::serialize::binary::BinEncoder;
 use hickory_server::net::NetError;
 use hickory_server::net::runtime::TokioTime;
-use hickory_server::net::xfer::Protocol;
 use hickory_server::server::{Request, RequestHandler, ResponseHandler, ResponseInfo};
 use hickory_server::zone_handler::{
     AuthLookup, LookupControlFlow, LookupError, LookupOptions, MessageResponse, ZoneHandler,
 };
-use std::net::{Ipv4Addr, SocketAddr};
+use std::net::Ipv4Addr;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -26,30 +28,13 @@ use std::sync::atomic::{AtomicU64, Ordering};
 // --- Helpers ---
 
 fn make_dns_request(domain: &str, rtype: RecordType) -> Request {
-    build_request(domain, rtype, None)
+    dns_request(1234, domain, rtype, None)
 }
 
 fn make_edns_dns_request(domain: &str, rtype: RecordType, max_payload: u16) -> Request {
     let mut edns = Edns::new();
     edns.set_max_payload(max_payload);
-    build_request(domain, rtype, Some(edns))
-}
-
-fn build_request(domain: &str, rtype: RecordType, edns: Option<Edns>) -> Request {
-    let mut message = Message::new(1234, MessageType::Query, OpCode::Query);
-    message.metadata.recursion_desired = true;
-
-    let mut query = Query::new();
-    query.set_name(Name::from_str(domain).unwrap());
-    query.set_query_type(rtype);
-    message.add_query(query);
-    if let Some(edns) = edns {
-        message.set_edns(edns);
-    }
-
-    let bytes = message.to_vec().unwrap();
-    let src = SocketAddr::from((Ipv4Addr::LOCALHOST, 12345));
-    Request::from_bytes(bytes, src, Protocol::Udp).unwrap()
+    dns_request(1234, domain, rtype, Some(edns))
 }
 
 /// Mock ResponseHandler that serializes the response so tests can inspect

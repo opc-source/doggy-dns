@@ -2,10 +2,10 @@ use async_trait::async_trait;
 use doggy_dns_plugin::authority_chain::AuthorityChain;
 use doggy_dns_plugin::{Middleware, MiddlewareAction, RequestOutcome};
 use hickory_proto::op::{Header, HeaderCounts, MessageType, Metadata, OpCode, ResponseCode};
-use hickory_proto::rr::Record;
+use hickory_proto::rr::{Record, RecordType};
 use hickory_proto::serialize::binary::BinEncoder;
 use hickory_server::net::xfer::Protocol;
-use hickory_server::server::{Request, RequestHandler, ResponseHandler, ResponseInfo};
+use hickory_server::server::{Request, RequestHandler, RequestInfo, ResponseHandler, ResponseInfo};
 use hickory_server::zone_handler::{
     AuthLookup, LookupControlFlow, LookupError, LookupRecords, MessageResponseBuilder,
 };
@@ -54,6 +54,17 @@ impl AnswerRotation {
     }
 }
 
+/// The per-query facts every response path logs and reports, fixed once the
+/// authority has answered.
+struct QueryContext<'a> {
+    request_id: u16,
+    query: &'a str,
+    qtype: RecordType,
+    handler_name: &'a str,
+    authoritative: bool,
+    start: Instant,
+}
+
 pub struct DoggyDnsHandler {
     middlewares: Vec<Arc<dyn Middleware>>,
     authority_chain: Arc<AuthorityChain>,
@@ -90,6 +101,186 @@ impl DoggyDnsHandler {
                 .after_request(request, duration_ms, outcome)
                 .await;
         }
+    }
+
+    /// Send a successful lookup. Rotation happens before anything reads the
+    /// order, so the response, the XDP cache payload and the answer count all
+    /// see one sequence.
+    async fn send_ok<R: ResponseHandler>(
+        &self,
+        request: &Request,
+        response_handle: &mut R,
+        lookup: AuthLookup,
+        ctx: &QueryContext<'_>,
+    ) -> (ResponseInfo, RequestOutcome) {
+        let mut records = take_answer_records(lookup);
+        self.rotation.apply(&mut records);
+        let answer_count = records.len();
+
+        // AA marks data the server owns; RA only when the answer
+        // came from a recursive backend (forward/native).
+        let metadata = response_metadata(request, ResponseCode::NoError, ctx.authoritative);
+
+        let resp_bytes = if self.xdp_enabled {
+            serialize_for_xdp(request, |probe| {
+                let b = MessageResponseBuilder::from_message_request(request);
+                b.build(metadata, records.iter(), &[], &[], &[])
+                    .destructive_emit(probe)
+                    .is_ok()
+            })
+        } else {
+            None
+        };
+
+        let min_ttl = if self.xdp_enabled {
+            min_ttl_from_records(&records)
+        } else {
+            None
+        };
+
+        let send_builder = MessageResponseBuilder::from_message_request(request);
+        let response = send_builder.build(metadata, records.iter(), &[], &[], &[]);
+
+        match response_handle.send_response(response).await {
+            Ok(info) => {
+                tracing::info!(
+                    request_id = ctx.request_id,
+                    query = %ctx.query,
+                    qtype = ?ctx.qtype,
+                    authority = ctx.handler_name,
+                    answers = answer_count,
+                    duration_ms = ctx.start.elapsed().as_millis() as u64,
+                    response_code = ?ResponseCode::NoError,
+                    "query resolved"
+                );
+                (
+                    info,
+                    RequestOutcome::success(
+                        ctx.handler_name.to_string(),
+                        answer_count,
+                        resp_bytes,
+                        min_ttl,
+                    ),
+                )
+            }
+            Err(e) => {
+                tracing::error!(
+                    request_id = ctx.request_id,
+                    query = %ctx.query,
+                    qtype = ?ctx.qtype,
+                    authority = ctx.handler_name,
+                    error = %e,
+                    "failed to send response"
+                );
+                (
+                    send_error(
+                        request,
+                        response_handle,
+                        ResponseCode::ServFail,
+                        false,
+                        None,
+                    )
+                    .await,
+                    RequestOutcome::authority_error(
+                        ResponseCode::ServFail,
+                        ctx.handler_name.to_string(),
+                    ),
+                )
+            }
+        }
+    }
+
+    /// Send the answer an authority could not produce. Only a negative one is
+    /// worth caching, and only a SERVFAIL is worth a warning.
+    async fn send_lookup_error<R: ResponseHandler>(
+        &self,
+        request: &Request,
+        response_handle: &mut R,
+        error: &LookupError,
+        soa: Option<&Record>,
+        ctx: &QueryContext<'_>,
+    ) -> (ResponseInfo, RequestOutcome) {
+        let response_code = response_code_for_lookup_error(error);
+        let negative_cacheable = matches!(
+            response_code,
+            ResponseCode::NoError | ResponseCode::NXDomain
+        );
+        let resp_bytes = if self.xdp_enabled && negative_cacheable {
+            xdp_error_payload(request, response_code, ctx.authoritative, soa)
+        } else {
+            None
+        };
+
+        if response_code == ResponseCode::ServFail {
+            tracing::warn!(
+                request_id = ctx.request_id,
+                query = %ctx.query,
+                qtype = ?ctx.qtype,
+                authority = ctx.handler_name,
+                error = %error,
+                response_code = ?response_code,
+                "authority returned error"
+            );
+        } else {
+            tracing::debug!(
+                request_id = ctx.request_id,
+                query = %ctx.query,
+                qtype = ?ctx.qtype,
+                authority = ctx.handler_name,
+                response_code = ?response_code,
+                "authority returned negative response"
+            );
+        }
+
+        let mut outcome =
+            RequestOutcome::authority_error(response_code, ctx.handler_name.to_string());
+        outcome.response_bytes = resp_bytes;
+        (
+            send_error(
+                request,
+                response_handle,
+                response_code,
+                ctx.authoritative,
+                soa,
+            )
+            .await,
+            outcome,
+        )
+    }
+
+    /// Send the `NXDOMAIN` for a query that no authority in the chain claimed.
+    /// There is no answering authority to name and nothing recursive about the
+    /// refusal, so both the log and the response leave those out.
+    async fn send_unhandled<R: ResponseHandler>(
+        &self,
+        request: &Request,
+        response_handle: &mut R,
+        ctx: &QueryContext<'_>,
+    ) -> (ResponseInfo, RequestOutcome) {
+        let resp_bytes = if self.xdp_enabled {
+            xdp_error_payload(request, ResponseCode::NXDomain, false, None)
+        } else {
+            None
+        };
+
+        tracing::info!(
+            request_id = ctx.request_id,
+            query = %ctx.query,
+            qtype = ?ctx.qtype,
+            response_code = ?ResponseCode::NXDomain,
+            "no authority handled query"
+        );
+        (
+            send_error(
+                request,
+                response_handle,
+                ResponseCode::NXDomain,
+                false,
+                None,
+            )
+            .await,
+            RequestOutcome::nxdomain(resp_bytes),
+        )
     }
 }
 
@@ -165,25 +356,7 @@ impl RequestHandler for DoggyDnsHandler {
                 }
             };
 
-            span_for_body.record(
-                "dns.question.name",
-                tracing::field::display(request_info.query.name()),
-            );
-            span_for_body.record(
-                "dns.question.type",
-                tracing::field::display(request_info.query.query_type()),
-            );
-            span_for_body.record(
-                "network.protocol.name",
-                tracing::field::display(
-                    format!("{:?}", request_info.protocol).to_ascii_lowercase(),
-                ),
-            );
-            span_for_body.record(
-                "client.address",
-                tracing::field::display(request_info.src.ip()),
-            );
-            span_for_body.record("client.port", request_info.src.port());
+            record_query_fields(&span_for_body, &request_info);
 
             // Resolve through authority chain. `query.name()` is the `LowerName`
             // the server already lowercased once at parse time, so it goes to the
@@ -211,186 +384,29 @@ impl RequestHandler for DoggyDnsHandler {
                 tracing::field::display(handler_name.to_string()),
             );
 
+            // What every response path logs and reports, fixed once the
+            // authority has answered.
+            let ctx = QueryContext {
+                request_id,
+                query: &query_display,
+                qtype: query_type,
+                handler_name,
+                authoritative,
+                start,
+            };
+
             let (response_info, outcome) = match resolve_result.outcome {
                 LookupControlFlow::Continue(Ok(lookup)) | LookupControlFlow::Break(Ok(lookup)) => {
-                    let mut records = take_answer_records(lookup);
-                    // Before anything reads the order: the response, the XDP
-                    // cache payload, and the answer count all see one sequence.
-                    self.rotation.apply(&mut records);
-                    let answer_count = records.len();
-
-                    let mut metadata = Metadata::response_from_request(&request.metadata);
-                    metadata.message_type = MessageType::Response;
-                    metadata.op_code = OpCode::Query;
-                    metadata.response_code = ResponseCode::NoError;
-                    // AA marks data the server owns; RA only when the answer
-                    // came from a recursive backend (forward/native).
-                    metadata.authoritative = authoritative;
-                    metadata.recursion_available = !authoritative;
-
-                    let resp_bytes = if self.xdp_enabled {
-                        serialize_for_xdp(request, |probe| {
-                            let b = MessageResponseBuilder::from_message_request(request);
-                            b.build(metadata, records.iter(), &[], &[], &[])
-                                .destructive_emit(probe)
-                                .is_ok()
-                        })
-                    } else {
-                        None
-                    };
-
-                    let min_ttl = if self.xdp_enabled {
-                        min_ttl_from_records(&records)
-                    } else {
-                        None
-                    };
-
-                    let send_builder = MessageResponseBuilder::from_message_request(request);
-                    let response = send_builder.build(metadata, records.iter(), &[], &[], &[]);
-
-                    match response_handle.send_response(response).await {
-                        Ok(info) => {
-                            tracing::info!(
-                                request_id = request_id,
-                                query = %query_display,
-                                qtype = ?query_type,
-                                authority = handler_name,
-                                answers = answer_count,
-                                duration_ms = start.elapsed().as_millis() as u64,
-                                response_code = ?ResponseCode::NoError,
-                                "query resolved"
-                            );
-                            (
-                                info,
-                                RequestOutcome::success(
-                                    handler_name.to_string(),
-                                    answer_count,
-                                    resp_bytes,
-                                    min_ttl,
-                                ),
-                            )
-                        }
-                        Err(e) => {
-                            tracing::error!(
-                                request_id = request_id,
-                                query = %query_display,
-                                qtype = ?query_type,
-                                authority = handler_name,
-                                error = %e,
-                                "failed to send response"
-                            );
-                            (
-                                send_error(
-                                    request,
-                                    &mut response_handle,
-                                    ResponseCode::ServFail,
-                                    false,
-                                    None,
-                                )
-                                .await,
-                                RequestOutcome::authority_error(
-                                    ResponseCode::ServFail,
-                                    handler_name.to_string(),
-                                ),
-                            )
-                        }
-                    }
+                    self.send_ok(request, &mut response_handle, lookup, &ctx)
+                        .await
                 }
                 LookupControlFlow::Continue(Err(e)) | LookupControlFlow::Break(Err(e)) => {
-                    let response_code = response_code_for_lookup_error(&e);
-                    let negative_cacheable = matches!(
-                        response_code,
-                        ResponseCode::NoError | ResponseCode::NXDomain
-                    );
-                    let resp_bytes = if self.xdp_enabled && negative_cacheable {
-                        serialize_for_xdp(request, |probe| {
-                            let b = MessageResponseBuilder::from_message_request(request);
-                            b.build(
-                                error_metadata(request, response_code, authoritative),
-                                std::iter::empty::<&Record>(),
-                                &[],
-                                soa.iter(),
-                                &[],
-                            )
-                            .destructive_emit(probe)
-                            .is_ok()
-                        })
-                    } else {
-                        None
-                    };
-
-                    if response_code == ResponseCode::ServFail {
-                        tracing::warn!(
-                            request_id = request_id,
-                            query = %query_display,
-                            qtype = ?query_type,
-                            authority = handler_name,
-                            error = %e,
-                            response_code = ?response_code,
-                            "authority returned error"
-                        );
-                    } else {
-                        tracing::debug!(
-                            request_id = request_id,
-                            query = %query_display,
-                            qtype = ?query_type,
-                            authority = handler_name,
-                            response_code = ?response_code,
-                            "authority returned negative response"
-                        );
-                    }
-
-                    let mut outcome =
-                        RequestOutcome::authority_error(response_code, handler_name.to_string());
-                    outcome.response_bytes = resp_bytes;
-                    (
-                        send_error(
-                            request,
-                            &mut response_handle,
-                            response_code,
-                            authoritative,
-                            soa.as_ref(),
-                        )
-                        .await,
-                        outcome,
-                    )
+                    self.send_lookup_error(request, &mut response_handle, &e, soa.as_ref(), &ctx)
+                        .await
                 }
                 LookupControlFlow::Skip => {
-                    let resp_bytes = if self.xdp_enabled {
-                        serialize_for_xdp(request, |probe| {
-                            let b = MessageResponseBuilder::from_message_request(request);
-                            b.build(
-                                error_metadata(request, ResponseCode::NXDomain, false),
-                                std::iter::empty::<&Record>(),
-                                &[],
-                                std::iter::empty::<&Record>(),
-                                &[],
-                            )
-                            .destructive_emit(probe)
-                            .is_ok()
-                        })
-                    } else {
-                        None
-                    };
-
-                    tracing::info!(
-                        request_id = request_id,
-                        query = %query_display,
-                        qtype = ?query_type,
-                        response_code = ?ResponseCode::NXDomain,
-                        "no authority handled query"
-                    );
-                    (
-                        send_error(
-                            request,
-                            &mut response_handle,
-                            ResponseCode::NXDomain,
-                            false,
-                            None,
-                        )
-                        .await,
-                        RequestOutcome::nxdomain(resp_bytes),
-                    )
+                    self.send_unhandled(request, &mut response_handle, &ctx)
+                        .await
                 }
             };
 
@@ -413,6 +429,26 @@ fn response_code_for_lookup_error(error: &LookupError) -> ResponseCode {
         LookupError::NetError(e) if e.is_no_records_found() => ResponseCode::NoError,
         _ => ResponseCode::ServFail,
     }
+}
+
+/// Attach the query, transport and client to the request span. These are the
+/// attributes every response path shares, so they are recorded once here,
+/// before the authority is asked.
+fn record_query_fields(span: &tracing::Span, info: &RequestInfo<'_>) {
+    span.record(
+        "dns.question.name",
+        tracing::field::display(info.query.name()),
+    );
+    span.record(
+        "dns.question.type",
+        tracing::field::display(info.query.query_type()),
+    );
+    span.record(
+        "network.protocol.name",
+        tracing::field::display(format!("{:?}", info.protocol).to_ascii_lowercase()),
+    );
+    span.record("client.address", tracing::field::display(info.src.ip()));
+    span.record("client.port", info.src.port());
 }
 
 fn record_outcome(span: &tracing::Span, outcome: &RequestOutcome, duration_ms: u64) {
@@ -500,6 +536,29 @@ fn serialize_for_xdp(
     Some(bytes)
 }
 
+/// The XDP cache payload for a response that carries no answer records: the
+/// negative and all-skipped paths share this shape, and only the SOA in the
+/// authority section tells them apart.
+fn xdp_error_payload(
+    request: &Request,
+    response_code: ResponseCode,
+    authoritative: bool,
+    soa: Option<&Record>,
+) -> Option<Vec<u8>> {
+    serialize_for_xdp(request, |probe| {
+        MessageResponseBuilder::from_message_request(request)
+            .build(
+                response_metadata(request, response_code, authoritative),
+                std::iter::empty::<&Record>(),
+                &[],
+                soa,
+                &[],
+            )
+            .destructive_emit(probe)
+            .is_ok()
+    })
+}
+
 /// Move the answer records out of a zone lookup instead of cloning them.
 ///
 /// The authorities we own build answers as `LookupRecords::Section`, an owned
@@ -540,7 +599,11 @@ fn max_message_size(protocol: Protocol, edns: Option<&hickory_proto::op::Edns>) 
 /// Build response metadata with the AA/RA flags that match the answering
 /// authority: authoritative zones set AA and clear RA, recursive backends do
 /// the opposite.
-fn error_metadata(request: &Request, response_code: ResponseCode, authoritative: bool) -> Metadata {
+fn response_metadata(
+    request: &Request,
+    response_code: ResponseCode,
+    authoritative: bool,
+) -> Metadata {
     let mut metadata = Metadata::response_from_request(&request.metadata);
     metadata.message_type = MessageType::Response;
     metadata.op_code = OpCode::Query;
@@ -559,7 +622,7 @@ async fn send_error<R: ResponseHandler>(
 ) -> ResponseInfo {
     let builder = MessageResponseBuilder::from_message_request(request);
     let response = builder.build(
-        error_metadata(request, response_code, authoritative),
+        response_metadata(request, response_code, authoritative),
         std::iter::empty::<&Record>(),
         &[],
         soa,
@@ -573,10 +636,8 @@ async fn send_error<R: ResponseHandler>(
                 error = %e,
                 "failed to send error response"
             );
-            let mut metadata = error_metadata(request, ResponseCode::ServFail, false);
-            metadata.response_code = ResponseCode::ServFail;
             Header {
-                metadata,
+                metadata: response_metadata(request, ResponseCode::ServFail, false),
                 counts: HeaderCounts::default(),
             }
             .into()

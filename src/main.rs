@@ -25,6 +25,23 @@ mod xdp;
 #[path = "xdp/stub.rs"]
 mod xdp;
 
+/// Grace a background task gets to finish its own shutdown before we stop
+/// waiting for it. `server.shutdown_timeout` bounds the DNS drain; this bounds
+/// the poller and control plane behind it.
+const BACKGROUND_TASK_SHUTDOWN_GRACE: Duration = Duration::from_secs(2);
+
+/// The upstreams a forward plugin falls back to when `[[plugins]].upstream` is
+/// unset and when no `[[plugins]]` section exists at all.
+const DEFAULT_FORWARD_UPSTREAM: [&str; 2] = ["8.8.8.8:53", "1.1.1.1:53"];
+
+/// Cache size and TTLs of the forward plugin `main` builds when no
+/// `[[plugins]]` section is configured. Nothing reads the `[[plugins]]` field
+/// defaults (`cache_size` 4096, `min_ttl` 10, `max_ttl` 300) for this built-in,
+/// so they live here instead.
+const DEFAULT_FORWARD_CACHE_SIZE: u64 = 1024;
+const DEFAULT_FORWARD_MIN_TTL: Duration = Duration::from_secs(30);
+const DEFAULT_FORWARD_MAX_TTL: Duration = Duration::from_secs(600);
+
 fn main() -> Result<()> {
     // Load config before initializing tracing so log format and OTLP settings
     // are available to the subscriber.
@@ -242,10 +259,12 @@ where
     F: Future<Output = std::result::Result<(), E>>,
     E: std::fmt::Display,
 {
-    match tokio::time::timeout(Duration::from_secs(2), task).await {
+    match tokio::time::timeout(BACKGROUND_TASK_SHUTDOWN_GRACE, task).await {
         Ok(Ok(())) => tracing::info!("{label} shut down"),
         Ok(Err(error)) => tracing::warn!(%error, "{label} task failed during shutdown"),
-        Err(_) => tracing::warn!("{label} shutdown timed out after 2s"),
+        Err(_) => {
+            tracing::warn!("{label} shutdown timed out after {BACKGROUND_TASK_SHUTDOWN_GRACE:?}")
+        }
     }
 }
 
@@ -256,13 +275,15 @@ async fn build_authority_chain(
     let mut watchers: Vec<(String, Arc<NacosServiceWatcher>)> = Vec::new();
 
     if config.plugins.is_empty() {
-        // Default: forward to 8.8.8.8 and 1.1.1.1
         tracing::info!("no plugins configured, defaulting to forward");
         let forward = ForwardAuthority::new(
-            vec!["8.8.8.8:53".to_string(), "1.1.1.1:53".to_string()],
-            1024,
-            Duration::from_secs(30),
-            Duration::from_secs(600),
+            DEFAULT_FORWARD_UPSTREAM
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
+            DEFAULT_FORWARD_CACHE_SIZE,
+            DEFAULT_FORWARD_MIN_TTL,
+            DEFAULT_FORWARD_MAX_TTL,
         )
         .await?;
         handlers.push(("forward[default]".to_string(), Arc::new(forward)));
@@ -304,10 +325,12 @@ async fn build_authority_chain(
                 tracing::info!(plugin = %name, "loaded plugin");
             }
             PluginKind::Forward => {
-                let addrs = plugin
-                    .upstream
-                    .clone()
-                    .unwrap_or_else(|| vec!["8.8.8.8:53".to_string(), "1.1.1.1:53".to_string()]);
+                let addrs = plugin.upstream.clone().unwrap_or_else(|| {
+                    DEFAULT_FORWARD_UPSTREAM
+                        .iter()
+                        .map(|s| s.to_string())
+                        .collect()
+                });
                 let name = format!("forward[{}]", addrs.join(","));
                 let authority = ForwardAuthority::new(
                     addrs,

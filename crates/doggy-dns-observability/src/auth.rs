@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use base64::Engine as _;
 use doggy_dns_basic::ObservabilityConfig;
 use doggy_dns_basic::env::expand_env;
-use reqwest::header::{HeaderName, HeaderValue};
+use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use std::collections::HashMap;
 
 /// Build the OTLP/HTTP headers for every signal.
@@ -82,6 +82,24 @@ fn resolve_with_env(
     }
 
     Ok(headers)
+}
+
+/// The resolved headers as reqwest's own map, for the signal that exports with
+/// reqwest rather than through an OTLP exporter.
+///
+/// [`resolve_with_env`] has already checked every name and value, so these
+/// conversions cannot fail on its output; they still return `Result` rather
+/// than unwrap, because the pair need not have come from there.
+pub(crate) fn to_header_map(headers: HashMap<String, String>) -> Result<HeaderMap> {
+    let mut map = HeaderMap::with_capacity(headers.len());
+    for (name, value) in headers {
+        let name = HeaderName::from_bytes(name.as_bytes())
+            .with_context(|| format!("invalid OTLP header name: {name}"))?;
+        let value = HeaderValue::from_str(&value)
+            .with_context(|| format!("invalid OTLP header value for {name}"))?;
+        map.insert(name, value);
+    }
+    Ok(map)
 }
 
 fn insert_header(headers: &mut HashMap<String, String>, name: &str, value: String) {
