@@ -9,16 +9,20 @@ use std::sync::{Arc, OnceLock};
 pub struct ResolveResult {
     pub outcome: LookupControlFlow<AuthLookup>,
     /// Name of the handler that produced the result, or `None` if all skipped.
-    pub handler_name: Option<String>,
+    ///
+    /// Shared rather than owned: the name belongs to the chain, and the handler
+    /// copies it onward into every query's [`RequestOutcome`](crate::RequestOutcome),
+    /// so a clone here is a refcount bump instead of an allocation per query.
+    pub handler_name: Option<Arc<str>>,
     /// Whether the responding handler owns its zone (AA flag).
     pub authoritative: bool,
     /// Apex SOA to attach to negative answers for downstream caching.
-    pub soa: Option<Record>,
+    pub soa: Option<Arc<Record>>,
 }
 
 /// Named handler entry in the chain.
 struct NamedHandler {
-    name: String,
+    name: Arc<str>,
     handler: Arc<dyn ZoneHandler>,
     /// Apex SOA for this handler's negative answers, fetched once.
     ///
@@ -29,6 +33,9 @@ struct NamedHandler {
     /// hot-reloadable - the chain is rebuilt with the config in that case, as
     /// it already is for `[[plugins]]` changes.
     ///
+    /// Shared, because every negative answer attaches it: cloning the record per
+    /// query would re-copy the name and RDATA for a value that never changes.
+    ///
     /// The first negative answer's `RequestInfo` is the one the fetch sees,
     /// and every later query reuses that record. That is sound only while
     /// `<handler>.lookup(origin, SOA, ..)` does not vary by request: every
@@ -36,7 +43,7 @@ struct NamedHandler {
     /// discards it), and the `ZoneType::External` handlers never reach this
     /// code. A future view/ACL-per-client handler would have to key this cache
     /// by client - note that in the comment if you add one.
-    apex_soa: OnceLock<Option<Record>>,
+    apex_soa: OnceLock<Option<Arc<Record>>>,
 }
 
 /// Iterates through a chain of ZoneHandlers.
@@ -50,7 +57,7 @@ impl AuthorityChain {
         let handlers = handlers
             .into_iter()
             .map(|(name, handler)| NamedHandler {
-                name,
+                name: Arc::from(name),
                 handler,
                 apex_soa: OnceLock::new(),
             })
@@ -100,10 +107,11 @@ impl AuthorityChain {
                                 // from every later negative for the rest of
                                 // the process; a miss retries, as the
                                 // uncached code did.
-                                if fetched.is_some() {
-                                    let _ = entry.apex_soa.set(fetched.clone());
-                                }
-                                fetched
+                                fetched.map(|record| {
+                                    let record = Arc::new(record);
+                                    let _ = entry.apex_soa.set(Some(Arc::clone(&record)));
+                                    record
+                                })
                             }
                         }
                     } else {
@@ -112,7 +120,7 @@ impl AuthorityChain {
 
                     return ResolveResult {
                         outcome: result,
-                        handler_name: Some(entry.name.clone()),
+                        handler_name: Some(Arc::clone(&entry.name)),
                         authoritative,
                         soa,
                     };

@@ -1,6 +1,7 @@
 use async_trait::async_trait;
 use hickory_proto::op::ResponseCode;
 use hickory_server::server::Request;
+use std::sync::Arc;
 
 /// Result of middleware processing.
 pub enum MiddlewareAction {
@@ -21,7 +22,10 @@ pub struct RequestOutcome {
     /// Response code sent to the client.
     pub response_code: ResponseCode,
     /// Authority that handled the query, e.g. `native` or `forward[8.8.8.8:53]`.
-    pub authority: Option<String>,
+    ///
+    /// Shared with the authority chain so recording it costs a refcount bump,
+    /// not an allocation per query.
+    pub authority: Option<Arc<str>>,
     /// Number of answer records in the response.
     pub answers: usize,
     /// Raw DNS response wire format. `None` when XDP cache is disabled.
@@ -43,7 +47,7 @@ impl RequestOutcome {
     }
 
     /// Error outcome attributed to a specific authority (e.g. ServFail from upstream).
-    pub fn authority_error(response_code: ResponseCode, authority: String) -> Self {
+    pub fn authority_error(response_code: ResponseCode, authority: Arc<str>) -> Self {
         Self {
             response_code,
             authority: Some(authority),
@@ -55,7 +59,7 @@ impl RequestOutcome {
 
     /// Successful resolution outcome.
     pub fn success(
-        authority: String,
+        authority: Arc<str>,
         answers: usize,
         response_bytes: Option<Vec<u8>>,
         min_answer_ttl: Option<u32>,

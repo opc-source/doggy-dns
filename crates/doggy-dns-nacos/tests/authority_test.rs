@@ -366,7 +366,7 @@ async fn apex_soa_matches_the_record_a_negative_answer_carries() {
     let attached = chain.resolve(&missing, RecordType::A, None).await.soa;
 
     assert!(
-        published.is_some() && attached == published,
+        published.is_some() && attached.as_deref() == published.as_ref(),
         "the chain must attach the same SOA the zone publishes"
     );
 }
