@@ -50,7 +50,7 @@ async fn exports_logs_metrics_and_traces_with_openobserve_headers() {
         .after_request(
             &request,
             3,
-            &RequestOutcome::success("native".to_string(), 1, None, None),
+            &RequestOutcome::success("native".into(), 1, None, None),
         )
         .await;
 

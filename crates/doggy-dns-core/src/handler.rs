@@ -2,13 +2,14 @@ use async_trait::async_trait;
 use doggy_dns_plugin::authority_chain::AuthorityChain;
 use doggy_dns_plugin::{Middleware, MiddlewareAction, RequestOutcome};
 use hickory_proto::op::{Header, HeaderCounts, MessageType, Metadata, OpCode, ResponseCode};
-use hickory_proto::rr::{Record, RecordType};
+use hickory_proto::rr::{LowerName, Record, RecordType};
 use hickory_proto::serialize::binary::BinEncoder;
 use hickory_server::net::xfer::Protocol;
 use hickory_server::server::{Request, RequestHandler, RequestInfo, ResponseHandler, ResponseInfo};
 use hickory_server::zone_handler::{
     AuthLookup, LookupControlFlow, LookupError, LookupRecords, MessageResponseBuilder,
 };
+use std::borrow::Cow;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use tokio::time::Instant;
@@ -58,11 +59,24 @@ impl AnswerRotation {
 /// authority has answered.
 struct QueryContext<'a> {
     request_id: u16,
-    query: &'a str,
+    query: &'a LowerName,
     qtype: RecordType,
-    handler_name: &'a str,
+    /// The handler that answered, or `None` when the chain skipped everything.
+    authority: Option<&'a Arc<str>>,
     authoritative: bool,
     start: Instant,
+}
+
+impl QueryContext<'_> {
+    /// The name the logs print; "none" when no handler claimed the query.
+    fn authority_name(&self) -> &str {
+        self.authority.map_or("none", |name| &**name)
+    }
+
+    /// The same name for [`RequestOutcome`], which keeps its own handle.
+    fn authority_owned(&self) -> Arc<str> {
+        self.authority.cloned().unwrap_or_else(|| Arc::from("none"))
+    }
 }
 
 pub struct DoggyDnsHandler {
@@ -147,7 +161,7 @@ impl DoggyDnsHandler {
                     request_id = ctx.request_id,
                     query = %ctx.query,
                     qtype = ?ctx.qtype,
-                    authority = ctx.handler_name,
+                    authority = ctx.authority_name(),
                     answers = answer_count,
                     duration_ms = ctx.start.elapsed().as_millis() as u64,
                     response_code = ?ResponseCode::NoError,
@@ -156,7 +170,7 @@ impl DoggyDnsHandler {
                 (
                     info,
                     RequestOutcome::success(
-                        ctx.handler_name.to_string(),
+                        ctx.authority_owned(),
                         answer_count,
                         resp_bytes,
                         min_ttl,
@@ -168,7 +182,7 @@ impl DoggyDnsHandler {
                     request_id = ctx.request_id,
                     query = %ctx.query,
                     qtype = ?ctx.qtype,
-                    authority = ctx.handler_name,
+                    authority = ctx.authority_name(),
                     error = %e,
                     "failed to send response"
                 );
@@ -181,10 +195,7 @@ impl DoggyDnsHandler {
                         None,
                     )
                     .await,
-                    RequestOutcome::authority_error(
-                        ResponseCode::ServFail,
-                        ctx.handler_name.to_string(),
-                    ),
+                    RequestOutcome::authority_error(ResponseCode::ServFail, ctx.authority_owned()),
                 )
             }
         }
@@ -216,7 +227,7 @@ impl DoggyDnsHandler {
                 request_id = ctx.request_id,
                 query = %ctx.query,
                 qtype = ?ctx.qtype,
-                authority = ctx.handler_name,
+                authority = ctx.authority_name(),
                 error = %error,
                 response_code = ?response_code,
                 "authority returned error"
@@ -226,14 +237,13 @@ impl DoggyDnsHandler {
                 request_id = ctx.request_id,
                 query = %ctx.query,
                 qtype = ?ctx.qtype,
-                authority = ctx.handler_name,
+                authority = ctx.authority_name(),
                 response_code = ?response_code,
                 "authority returned negative response"
             );
         }
 
-        let mut outcome =
-            RequestOutcome::authority_error(response_code, ctx.handler_name.to_string());
+        let mut outcome = RequestOutcome::authority_error(response_code, ctx.authority_owned());
         outcome.response_bytes = resp_bytes;
         (
             send_error(
@@ -360,37 +370,36 @@ impl RequestHandler for DoggyDnsHandler {
 
             // Resolve through authority chain. `query.name()` is the `LowerName`
             // the server already lowercased once at parse time, so it goes to the
-            // chain by reference; the log string is the only owned copy.
+            // chain by reference and the spans print it by reference too.
             let query_type = request_info.query.query_type();
-            let query_display = request_info.query.name().to_string();
+            let query_name = request_info.query.name();
             let resolve_span = tracing::info_span!(
                 "dns.resolve",
-                "dns.question.name" = %query_display,
+                "dns.question.name" = %query_name,
                 "dns.question.type" = tracing::field::display(query_type),
                 "dns.authority" = tracing::field::Empty,
                 "dns.answers" = tracing::field::Empty,
             );
             let resolve_result = self
                 .authority_chain
-                .resolve(request_info.query.name(), query_type, Some(&request_info))
+                .resolve(query_name, query_type, Some(&request_info))
                 .instrument(resolve_span.clone())
                 .await;
 
             let authoritative = resolve_result.authoritative;
             let soa = resolve_result.soa;
-            let handler_name = resolve_result.handler_name.as_deref().unwrap_or("none");
             resolve_span.record(
                 "dns.authority",
-                tracing::field::display(handler_name.to_string()),
+                tracing::field::display(resolve_result.handler_name.as_deref().unwrap_or("none")),
             );
 
             // What every response path logs and reports, fixed once the
             // authority has answered.
             let ctx = QueryContext {
                 request_id,
-                query: &query_display,
+                query: query_name,
                 qtype: query_type,
-                handler_name,
+                authority: resolve_result.handler_name.as_ref(),
                 authoritative,
                 start,
             };
@@ -401,7 +410,7 @@ impl RequestHandler for DoggyDnsHandler {
                         .await
                 }
                 LookupControlFlow::Continue(Err(e)) | LookupControlFlow::Break(Err(e)) => {
-                    self.send_lookup_error(request, &mut response_handle, &e, soa.as_ref(), &ctx)
+                    self.send_lookup_error(request, &mut response_handle, &e, soa.as_deref(), &ctx)
                         .await
                 }
                 LookupControlFlow::Skip => {
@@ -431,6 +440,35 @@ fn response_code_for_lookup_error(error: &LookupError) -> ResponseCode {
     }
 }
 
+/// The lowercase transport name `network.protocol.name` carries.
+///
+/// UDP and TCP — everything a plain DNS listener sees — answer with a static
+/// string; the feature-gated transports keep the derived spelling.
+fn protocol_name(protocol: Protocol) -> Cow<'static, str> {
+    match protocol {
+        Protocol::Udp => Cow::Borrowed("udp"),
+        Protocol::Tcp => Cow::Borrowed("tcp"),
+        _ => Cow::Owned(format!("{protocol:?}").to_ascii_lowercase()),
+    }
+}
+
+/// The uppercase mnemonic `dns.response.code` carries.
+///
+/// The codes a query actually ends in are static, so the common paths format
+/// nothing; anything rarer keeps the derived `Debug` spelling.
+fn response_code_name(code: ResponseCode) -> Cow<'static, str> {
+    let name = match code {
+        ResponseCode::NoError => "NOERROR",
+        ResponseCode::FormErr => "FORMERR",
+        ResponseCode::ServFail => "SERVFAIL",
+        ResponseCode::NXDomain => "NXDOMAIN",
+        ResponseCode::NotImp => "NOTIMP",
+        ResponseCode::Refused => "REFUSED",
+        _ => return Cow::Owned(format!("{code:?}").to_ascii_uppercase()),
+    };
+    Cow::Borrowed(name)
+}
+
 /// Attach the query, transport and client to the request span. These are the
 /// attributes every response path shares, so they are recorded once here,
 /// before the authority is asked.
@@ -445,15 +483,15 @@ fn record_query_fields(span: &tracing::Span, info: &RequestInfo<'_>) {
     );
     span.record(
         "network.protocol.name",
-        tracing::field::display(format!("{:?}", info.protocol).to_ascii_lowercase()),
+        tracing::field::display(protocol_name(info.protocol)),
     );
     span.record("client.address", tracing::field::display(info.src.ip()));
     span.record("client.port", info.src.port());
 }
 
 fn record_outcome(span: &tracing::Span, outcome: &RequestOutcome, duration_ms: u64) {
-    let code = format!("{:?}", outcome.response_code).to_ascii_uppercase();
-    span.record("dns.response.code", tracing::field::display(&code));
+    let code = response_code_name(outcome.response_code);
+    span.record("dns.response.code", tracing::field::display(code));
     span.record("dns.duration_ms", duration_ms);
     span.record(
         "dns.authority",

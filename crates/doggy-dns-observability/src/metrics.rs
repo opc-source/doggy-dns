@@ -166,10 +166,7 @@ fn outcome_attributes(request: &Request, outcome: &RequestOutcome) -> Vec<KeyVal
         ),
         KeyValue::new(
             "dns.authority",
-            outcome
-                .authority
-                .clone()
-                .unwrap_or_else(|| "none".to_string()),
+            outcome.authority.as_deref().unwrap_or("none").to_string(),
         ),
     ]
 }
@@ -213,7 +210,7 @@ mod tests {
     #[test]
     fn attributes_contain_low_cardinality_dns_dimensions() {
         let request = make_request();
-        let outcome = RequestOutcome::success("native".to_string(), 2, None, None);
+        let outcome = RequestOutcome::success("native".into(), 2, None, None);
 
         let attributes = outcome_attributes(&request, &outcome);
         assert_eq!(attribute(&attributes, "dns.question.type"), Some("AAAA"));
