@@ -557,6 +557,49 @@ async fn handler_authoritative_nxdomain_is_cached_for_xdp() {
     assert_eq!(decoded.metadata.response_code, ResponseCode::NXDomain);
 }
 
+/// The all-skip path builds the response and the XDP payload from two different
+/// helpers, so nothing else in this file can see them disagree: one decides
+/// what the client gets, the other decides what the map replays for the rest of
+/// the TTL. One query, both compared.
+#[tokio::test]
+async fn all_skip_xdp_payload_matches_the_sent_response() {
+    let chain = AuthorityChain::new(vec![]);
+    let capture = Arc::new(OutcomeCaptureMiddleware::new());
+    let handler = DoggyDnsHandler::new(
+        vec![capture.clone() as Arc<dyn Middleware>],
+        Arc::new(chain),
+        true,
+        AnswerRotation::new(false),
+    );
+
+    let request = make_dns_request("unknown.example.com.", RecordType::A);
+    let mock = MockResponseHandler::new();
+    let _info = handler
+        .handle_request::<_, TokioTime>(&request, mock.clone())
+        .await;
+
+    let sent = mock.message().expect("response captured");
+    let outcome = capture.outcome().expect("outcome not captured");
+    let bytes = outcome
+        .response_bytes
+        .expect("all-skip NXDOMAIN should be cached for XDP");
+    let cached = Message::from_vec(&bytes).expect("cached bytes must be a valid DNS message");
+
+    assert_eq!(cached.metadata.response_code, ResponseCode::NXDomain);
+    assert_eq!(cached.metadata.authoritative, sent.metadata.authoritative);
+    assert_eq!(
+        cached.metadata.recursion_available,
+        sent.metadata.recursion_available
+    );
+    assert!(
+        !cached.metadata.authoritative,
+        "no authority claimed the name, so nothing owns the answer"
+    );
+    // The distinction from an authority's own NXDOMAIN: no SOA to replay.
+    assert!(cached.answers.is_empty());
+    assert!(cached.authorities.is_empty());
+}
+
 /// A non-authoritative handler that answers every query with one A record.
 struct ExternalAnswerHandler;
 

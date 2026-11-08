@@ -348,6 +348,32 @@ mod tests {
     }
 
     #[test]
+    fn header_map_carries_every_resolved_pair() {
+        let mut headers = HashMap::new();
+        headers.insert("x-tenant".to_string(), "acme".to_string());
+
+        let map = to_header_map(headers).unwrap();
+        assert_eq!(map.get("x-tenant").unwrap(), "acme");
+        assert_eq!(map.len(), 1);
+    }
+
+    /// `resolve_with_env` screens its own output, so this is the conversion's
+    /// own contract: a pair assembled elsewhere still cannot reach the wire.
+    #[test]
+    fn header_map_rejects_an_invalid_name() {
+        let mut headers = HashMap::new();
+        headers.insert("bad header".to_string(), "value".to_string());
+
+        let error = to_header_map(headers).unwrap_err();
+        assert!(
+            error
+                .chain()
+                .any(|cause| cause.to_string().contains("header name")),
+            "unexpected error: {error:?}"
+        );
+    }
+
+    #[test]
     fn config_header_overrides_env_header_case_insensitively() {
         let mut config = ObservabilityConfig::default();
         config

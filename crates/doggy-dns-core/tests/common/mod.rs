@@ -1,4 +1,4 @@
-#![allow(dead_code, clippy::disallowed_methods)]
+#![allow(clippy::disallowed_methods)]
 
 //! Wire-level query builders shared by the `doggy-dns-core` test targets and
 //! the handler benchmark.
