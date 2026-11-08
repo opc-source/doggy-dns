@@ -245,10 +245,10 @@ neither, because it says nothing about whether the server is up. A window whose 
 has restarted is closed, so a failure counted beside a confirmed answer cannot keep it
 open, and a clock stepping behind the window's start lifts it instead of extending it by
 the whole jump. One failure after a window expires reopens it — the outage is already
-proven. The bounds, the threshold and the window are constants in
-`crates/doggy-dns-nacos/src/watcher.rs` (`NACOS_LOOKUP_TIMEOUT`,
-`NACOS_CACHE_READ_TIMEOUT`, `NACOS_FAILURE_THRESHOLD`, `NACOS_FAILURE_BACKOFF`), not
-config knobs.
+proven. The bounds, the threshold and the window are constants, not config knobs:
+`NACOS_LOOKUP_TIMEOUT` and `NACOS_CACHE_READ_TIMEOUT` in
+`crates/doggy-dns-nacos/src/watcher.rs`, `NACOS_FAILURE_THRESHOLD` and
+`NACOS_FAILURE_BACKOFF` in `crates/doggy-dns-nacos/src/backoff.rs`.
 
 One limit follows from the SDK rather than this design: the naming cache is written
 only by a push or the periodic refresh, so a name subscribed moments ago can still miss
