@@ -174,6 +174,7 @@ Points worth knowing before reading a failure:
 | `crates/doggy-dns-plugin/tests/request_outcome_test.rs` | 3 | `RequestOutcome` construction: success, response bytes, NXDOMAIN TTL |
 | `crates/doggy-dns-plugin/tests/system_dns_test.rs` | 1 | Native resolver (requires network) |
 | `crates/doggy-dns-plugin/tests/wire_query_name_test.rs` | 2 | The wire-name handoff both fallback authorities use: label bytes survive, and the `&str` path's underscore rejection stays a premise |
+| `crates/doggy-dns-plugin/tests/zone_handler_test.rs` | 2 | The search handoff the three authorities share: `lookup` receives the request's name, type, forwarded options and request info; TSIG stays absent; a request without exactly one question skips |
 | `crates/doggy-dns-xdp/tests/*` | 22 + 6 ignored | Userspace cache/interface/middleware/stats; XDP attach tests need root + Linux |
 | `crates/doggy-dns-control/tests/*` | 27 | Control plane: HTTP contract, endpoint selection, token scoping, live signals, state snapshots, redaction |
 | `tests/integration_test.rs` | 3 | End-to-end chain: Nacos hit, outside-zone fallthrough, in-zone miss stays authoritative |
