@@ -137,9 +137,10 @@ counts; against one that answers with an error, the SDK swallows it into an empt
 list, and the query reads `NXDOMAIN` uncounted.
 
 `ServiceFilter` gates names before any Nacos call (`service_pattern`, a regex
-wrapped in whole-name anchors, default `[A-Za-z0-9_-]+` = bare application
-names). A name the filter rejects is never cached or subscribed, so it resolves
-to authoritative `NXDOMAIN` like any unknown service.
+wrapped in whole-name anchors when configured; when omitted, a byte-wise
+built-in rule equivalent to `[A-Za-z0-9_-]+` = bare application names). A name
+the filter rejects is never cached or subscribed, so it resolves to
+authoritative `NXDOMAIN` like any unknown service.
 
 The subscription carries a no-op listener: instance data stays in the client's
 cache (written before the SDK notifies anyone), so the listener exists only to
@@ -161,7 +162,7 @@ DNS name format: `<service>.<group>.<namespace>.<zone_suffix>.` (zone membership
 right so service names may contain dots and the two labels below it must equal the
 configured group and namespace). That function returns a `Cow<str>` and the catalog
 is keyed by the service name alone: a single-label name — the shape the default
-`service_pattern` selects — borrows straight out of the `LowerName` instead of
+filter selects — borrows straight out of the `LowerName` instead of
 building a key, and one plugin serves one group/namespace pair, so nothing needs to
 distinguish them at the key. `CachedInstance.ip` is an `IpAddr`, parsed
 when a query reads the list; the authority never lowercases or re-parses per query because

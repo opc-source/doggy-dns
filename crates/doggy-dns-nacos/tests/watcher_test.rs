@@ -7,6 +7,7 @@ use doggy_dns_nacos::watcher::{
     entry_of, usable_instances,
 };
 use nacos_sdk::api::naming::ServiceInstance;
+use regex::Regex;
 use std::collections::HashMap;
 use std::net::IpAddr;
 use std::time::Duration;
@@ -62,14 +63,14 @@ fn cached_instance_rejects_a_non_address() {
     );
 }
 
-/// The built-in pattern is the application-name rule: word characters, `-`, no
+/// The built-in rule is the application-name rule: word characters, `-`, no
 /// dots. A dot means the registration is not a bare application name (a
 /// `com.foo.Bar` style identifier, or the `group@@service` form some Nacos
 /// versions return), and those are exactly the entries a deployment does not
 /// want pushed to it.
 #[test]
 fn default_filter_selects_bare_application_names() {
-    let filter = ServiceFilter::from_config(None).expect("the built-in pattern must compile");
+    let filter = ServiceFilter::from_config(None).expect("the built-in rule is infallible");
 
     for selected in ["order-service", "ORDER_svc-1", "a1"] {
         assert!(
@@ -89,6 +90,66 @@ fn default_filter_selects_bare_application_names() {
         assert!(
             !filter.is_selected(rejected),
             "{rejected:?} is not a bare application name and must not be subscribed"
+        );
+    }
+}
+
+/// The built-in rule is a byte-wise shortcut for the anchored
+/// `[A-Za-z0-9_-]+` pattern. Pin the two against a reference regex over every
+/// ASCII byte and the multi-byte/punctuation shapes a Nacos name can carry, so
+/// the shortcut cannot quietly widen or narrow what an operator configured.
+#[test]
+fn default_filter_matches_the_ascii_class_exactly() {
+    let reference = Regex::new("^(?:[A-Za-z0-9_-]+)$").expect("reference pattern");
+    let default = ServiceFilter::from_config(None).expect("the built-in rule");
+    let configured = ServiceFilter::from_config(Some("[A-Za-z0-9_-]+"))
+        .expect("the explicit default pattern compiles");
+
+    let mut cases: Vec<String> = (0u8..=127)
+        .map(|byte| char::from(byte).to_string())
+        .collect();
+    // Cover every UTF-8 lead and continuation byte the table can see, not just
+    // the ASCII half: each BMP scalar between ASCII characters, then one code
+    // point from each astral lead range.
+    cases.extend(
+        (0x80u32..=0xFFFF)
+            .filter_map(char::from_u32)
+            .map(|c| format!("a{c}b")),
+    );
+    cases.extend(
+        [
+            "\u{10000}",
+            "\u{40000}",
+            "\u{80000}",
+            "\u{C0000}",
+            "\u{10FFFF}",
+        ]
+        .map(|c| format!("a{c}b")),
+    );
+    cases.extend([
+        "order-service".to_string(),
+        "ORDER_svc-1".to_string(),
+        "a1".to_string(),
+        "com.foo.Bar".to_string(),
+        "DEFAULT_GROUP@@order".to_string(),
+        "服务名".to_string(),
+        "café".to_string(),
+        "order service".to_string(),
+        String::new(),
+        "abc\0def".to_string(),
+    ]);
+
+    for case in cases {
+        let expected = reference.is_match(&case);
+        assert_eq!(
+            default.is_selected(&case),
+            expected,
+            "the built-in rule diverged from the anchored ASCII class on {case:?}"
+        );
+        assert_eq!(
+            configured.is_selected(&case),
+            expected,
+            "the regex path diverged from the reference on {case:?}"
         );
     }
 }
@@ -126,14 +187,14 @@ fn filter_matching_is_case_sensitive() {
     );
 }
 
-/// Characterisation of the assumption behind [`DEFAULT_SERVICE_PATTERN`] being
-/// spelled as an ASCII class: with the regex crate's default `unicode` feature,
-/// a `\w` an operator writes here is Unicode-aware, so it does select a CJK
-/// registration. The built-in default must not inherit that breadth.
+/// Characterisation of why the built-in rule is spelled as explicit ASCII bytes
+/// rather than `\w`: with the regex crate's default `unicode` feature, a `\w` an
+/// operator writes here is Unicode-aware, so it does select a CJK registration.
+/// The built-in default must not inherit that breadth.
 #[test]
 fn user_written_word_class_is_unicode_aware() {
     let filter = ServiceFilter::from_config(Some(r"\w+")).expect("valid pattern");
-    let default = ServiceFilter::from_config(None).expect("the built-in pattern must compile");
+    let default = ServiceFilter::from_config(None).expect("the built-in rule is infallible");
 
     assert!(
         filter.is_selected("服务名"),

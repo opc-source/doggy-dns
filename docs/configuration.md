@@ -72,7 +72,8 @@ namespace = "public"
 group = "DEFAULT_GROUP"
 dns_zone = "nacos.local"
 ttl = 6
-service_pattern = "[A-Za-z0-9_-]+"   # default; which services may reach Nacos — see "Nacos subscription"
+# Omit service_pattern for the built-in bare-application-name rule. Setting it to
+# "[A-Za-z0-9_-]+" selects the same names but takes the regex path.
 
 [[plugins]]
 kind = "native"
@@ -202,16 +203,18 @@ refreshes; the gain is that an outage at boot resolves names instead of answerin
 `SERVFAIL`. An empty list is never served from the cache. The confirmed path costs one
 list clone plus address parsing per query and one round trip per new name.
 
-`service_pattern` selects which names may reach Nacos at all. The pattern is a
-regex wrapped in whole-name anchors (`order-service` therefore cannot match
-`legacy-order-service`), matched case-sensitively against the service label as
-the query asks for it — a `LowerName` label, so already lowercase, and a pattern
-with capitals in it selects nothing. The default `[A-Za-z0-9_-]+` keeps bare
-application names: it rejects dotted identifiers (`com.foo.Bar`), non-ASCII
-names and the `DEFAULT_GROUP@@order` form, so on a registry whose server does
-return that prefixed form the pattern has to be widened. A name the pattern
-rejects is never subscribed or fetched, and since the authority owns its zone,
-querying it answers `NXDOMAIN` rather than falling through to `native`/`forward`.
+`service_pattern` selects which names may reach Nacos at all. A configured
+pattern is a regex wrapped in whole-name anchors (`order-service` therefore
+cannot match `legacy-order-service`), matched case-sensitively against the
+service label as the query asks for it — a `LowerName` label, so already
+lowercase, and a pattern with capitals in it selects nothing. With the field
+omitted, the built-in rule accepts the same names as `[A-Za-z0-9_-]+` (bare
+application names) without running a regex: it rejects dotted identifiers
+(`com.foo.Bar`), non-ASCII names and the `DEFAULT_GROUP@@order` form, so on a
+registry whose server does return that prefixed form the filter has to be
+widened. A name the filter rejects is never subscribed or fetched, and since
+the authority owns its zone, querying it answers `NXDOMAIN` rather than
+falling through to `native`/`forward`.
 
 The query that first answers a name also subscribes it — once per name, because the
 SDK keeps every listener it is handed. A service registered after doggy-dns started
