@@ -1,0 +1,13 @@
+[package]
+name = "doggy-dns-xdp-abi"
+version = "0.1.0"
+edition = "2024"
+
+# Only the userspace loader marks the layouts `aya::Pod` (orphan rule: the
+# impls must live with the types). Gating on the target rather than a feature
+# keeps `aya` out of the eBPF build, which targets `bpfel-unknown-none`.
+# Spelled out rather than `workspace = true` because this crate is a member of
+# the `xdp/` workspace, which has no `[workspace.dependencies]`; keep the pin
+# in sync with the root workspace's `aya` entry.
+[target.'cfg(target_os = "linux")'.dependencies]
+aya = { git = "https://github.com/aya-rs/aya", tag = "aya-v0.16.0" }

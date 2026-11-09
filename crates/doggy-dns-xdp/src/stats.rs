@@ -33,13 +33,21 @@ impl XdpStatsDelta {
     }
 }
 
-impl XdpStats {
+/// Delta math for [`XdpStats`] snapshots.
+///
+/// `XdpStats` is defined in `doggy-dns-xdp-abi`, so this stays a trait: an
+/// inherent `impl` on a foreign type would break the orphan rule.
+pub trait XdpStatsExt {
     /// Subtract a previous snapshot, handling counter resets per field.
     ///
     /// A field that went backwards is treated as a freshly recreated map: the
     /// current value becomes the delta instead of underflowing, and `reset` is
     /// set so the caller can log it.
-    pub fn delta_from(&self, previous: &XdpStats) -> XdpStatsDelta {
+    fn delta_from(&self, previous: &XdpStats) -> XdpStatsDelta;
+}
+
+impl XdpStatsExt for XdpStats {
+    fn delta_from(&self, previous: &XdpStats) -> XdpStatsDelta {
         fn step(current: u64, previous: u64) -> (u64, bool) {
             if current >= previous {
                 (current - previous, false)

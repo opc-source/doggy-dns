@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+doggy-dns-xdp-abi = { path = "../doggy-dns-xdp-abi" }
 aya-ebpf = "0.3"
 aya-log-ebpf = "0.3"
 

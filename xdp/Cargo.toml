@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["doggy-dns-xdp-ebpf"]
+members = ["doggy-dns-xdp-abi", "doggy-dns-xdp-ebpf"]
 
 # Profiles must live at the workspace root; the member-level copy used to be
 # silently ignored by cargo.

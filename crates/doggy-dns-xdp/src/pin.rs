@@ -13,15 +13,7 @@ use std::fmt;
 
 use crate::types::{CacheKey, CacheValue};
 
-/// Layout version of the cache entries, written into the pin path.
-///
-/// A restart reuses the pinned map, so entries survive it. That is the point,
-/// but it also means a build whose `CacheKey` or `CacheValue` layout changed
-/// would otherwise read entries its predecessor wrote. Bump this constant in
-/// the same commit as such a layout change: the next start then creates a fresh
-/// (cold) map under the new path rather than misreading the old one. The
-/// previous path is left in bpffs and is safe to remove by hand.
-pub const CACHE_FORMAT_VERSION: u32 = 1;
+pub use doggy_dns_xdp_abi::CACHE_FORMAT_VERSION;
 
 /// The bpffs path the loader pins and reuses: the configured path with the
 /// cache layout version appended, so `/sys/fs/bpf/doggy-dns/dns_cache` holds

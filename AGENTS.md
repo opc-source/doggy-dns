@@ -53,9 +53,11 @@ doggy-dns (binary)
   ├── doggy-dns-plugin          (traits, authority chain, built-in authorities — leaf crate)
   └── doggy-dns-xdp (optional, feature = "xdp")
         ├── doggy-dns-basic
-        └── doggy-dns-plugin
+        ├── doggy-dns-plugin
+        └── doggy-dns-xdp-abi
 
 xdp/
+├── doggy-dns-xdp-abi   (BPF map layouts, no_std; also used by doggy-dns-xdp)
 └── doggy-dns-xdp-ebpf  (eBPF program, separate workspace, target = bpfel-unknown-none)
 ```
 

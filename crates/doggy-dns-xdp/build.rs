@@ -21,7 +21,7 @@ fn last_modified(dir: &Path) -> Option<SystemTime> {
 /// lockfile). Without this, a changed source next to an existing ELF would
 /// silently embed the previous program. A zero-byte ELF is the placeholder
 /// written by a failed build (e.g. macOS host) and never counts as up to date.
-fn needs_rebuild(elf_path: &Path, ebpf_dir: &Path) -> bool {
+fn needs_rebuild(elf_path: &Path, ebpf_dir: &Path, abi_dir: &Path) -> bool {
     let Ok(meta) = elf_path.metadata() else {
         return true;
     };
@@ -38,13 +38,17 @@ fn needs_rebuild(elf_path: &Path, ebpf_dir: &Path) -> bool {
         // The eBPF program is a member of the `xdp/` workspace, so its
         // lockfile lives one level above the crate directory.
         || newer_than_elf(&ebpf_dir.join("../Cargo.lock"))
+        // The map layouts come from this sibling crate.
+        || newer_than_elf(&abi_dir.join("src"))
+        || newer_than_elf(&abi_dir.join("Cargo.toml"))
 }
 
 fn main() {
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let ebpf_dir = manifest_dir.join("../../xdp/doggy-dns-xdp-ebpf");
+    let abi_dir = ebpf_dir.with_file_name("doggy-dns-xdp-abi");
 
-    // Tell cargo to rerun if any eBPF source changes
+    // Tell cargo to rerun if any eBPF or shared-ABI source changes
     println!("cargo:rerun-if-changed={}", ebpf_dir.join("src").display());
     println!(
         "cargo:rerun-if-changed={}",
@@ -54,12 +58,17 @@ fn main() {
         "cargo:rerun-if-changed={}",
         ebpf_dir.join("../Cargo.lock").display()
     );
+    println!("cargo:rerun-if-changed={}", abi_dir.join("src").display());
+    println!(
+        "cargo:rerun-if-changed={}",
+        abi_dir.join("Cargo.toml").display()
+    );
 
     // Build the eBPF program
     let target_dir = manifest_dir.join("../../xdp/target/bpfel-unknown-none/release");
     let elf_path = target_dir.join("doggy-dns-xdp-ebpf");
 
-    if needs_rebuild(&elf_path, &ebpf_dir) {
+    if needs_rebuild(&elf_path, &ebpf_dir, &abi_dir) {
         let status = std::process::Command::new("cargo")
             .current_dir(&ebpf_dir)
             .args([
