@@ -31,8 +31,8 @@ const DNS_HDR_LEN: usize = 12;
 // single question ever match the cache, so anything above this is passed on.
 const MAX_UDP_DNS_LEN: usize = 1500;
 // The shortest possible positive reply: header, a one-byte QNAME (the root)
-// and QTYPE/QCLASS. The 16-byte copy chunk relies on this, because it always
-// writes a whole chunk even when the reply length is not a multiple of it.
+// and QTYPE/QCLASS. Entries below this are diagnosed as poisoned before the
+// resize; the tail copy guards its whole-chunk writes on its own.
 const MIN_POSITIVE_LEN: usize = DNS_HDR_LEN + 1 + 4;
 
 /// Why a packet fetched or matched nothing in the cache.
@@ -124,6 +124,13 @@ fn try_dns_xdp(ctx: &XdpContext) -> Result<(u32, Option<Outcome>), ()> {
     if ip_hdr_len < 20 || data + ip_offset + ip_hdr_len > end {
         return Ok((xdp_action::XDP_PASS, None));
     }
+    // A fragmented datagram is not a DNS query we can answer: non-first
+    // fragments carry no UDP header, and a first fragment must not be
+    // answered with the MF/offset bits still set. Pass the whole thing.
+    let frag_off = read_u16_be((data + ip_offset) as *const u8, 6);
+    if frag_off & 0x3FFF != 0 {
+        return Ok((xdp_action::XDP_PASS, None));
+    }
 
     // 3. Parse UDP header
     let udp_offset = ip_offset + ip_hdr_len;
@@ -201,11 +208,20 @@ fn try_dns_xdp(ctx: &XdpContext) -> Result<(u32, Option<Outcome>), ()> {
     } else {
         // The duplicate bound inside `write_positive` exists for the verifier
         // and stays silent; this is the diagnostic site for a poisoned entry.
-        if resp_len < MIN_POSITIVE_LEN || resp_len > MAX_RESPONSE_SIZE {
+        //
+        // A cached reply shorter than this query's own question can only come
+        // from another name's entry under a hash collision: copying it would
+        // leave QDCOUNT=1 above a truncated question. Treat it like the other
+        // poisoned lengths and let userspace answer.
+        if resp_len < MIN_POSITIVE_LEN
+            || resp_len > MAX_RESPONSE_SIZE
+            || resp_len < DNS_HDR_LEN + question_len
+        {
             warn!(
                 ctx,
-                "cached response length out of range: {} (txid {:x}, hash {:x})",
+                "cached response length out of range: {} for question length {} (txid {:x}, hash {:x})",
                 resp_len as u64,
+                question_len as u64,
                 txid as u64,
                 name_hash
             );
@@ -258,7 +274,7 @@ fn try_dns_xdp(ctx: &XdpContext) -> Result<(u32, Option<Outcome>), ()> {
     if negative {
         write_nxdomain(ctx, dns, end, txid)?;
     } else {
-        write_positive(ctx, dns, end, entry, resp_len, txid)?;
+        write_positive(ctx, dns, end, entry, resp_len, question_len)?;
     }
 
     // 9. Swap headers for reply, fix lengths, and recompute checksums.
@@ -453,9 +469,18 @@ fn write_nxdomain(ctx: &XdpContext, dns: usize, end: usize, txid: u16) -> Result
     Ok(())
 }
 
-/// Copy the cached reply into the packet, keeping the query's transaction id.
+/// Copy the cached reply into the packet, keeping the query's transaction id
+/// and question section intact.
 ///
-/// The copy runs in [`COPY_CHUNK`]-sized pieces, each guarded by a
+/// The cache key hashes lowercased wire bytes, so a hit matches any 0x20 case
+/// of the name — and hash equality means the cached question has exactly the
+/// incoming `question_len` wire bytes. Only the cached header words (minus the
+/// id at offset 0) and the tail after the question are copied; the question
+/// itself is left as the query wrote it, so a case-validating client sees its
+/// own case echoed back. `bpf_xdp_adjust_tail` preserves the front of the
+/// frame, so the incoming question is still there after the resize.
+///
+/// The tail copy runs in [`COPY_CHUNK`]-sized pieces, each guarded by a
 /// `p + COPY_CHUNK > end` comparison. The constant addend is what makes the
 /// guard useful to the verifier: it derives a packet range from the pointer's
 /// fixed offset, and a chunk larger than one byte keeps the compiler from
@@ -467,7 +492,7 @@ fn write_positive(
     end: usize,
     entry: &CacheValue,
     resp_len: usize,
-    txid: u16,
+    question_len: usize,
 ) -> Result<(), ()> {
     // Verifier bound only: the poisoned-entry case is diagnosed and passed
     // before the resize, and reaching this point means the frame was resized
@@ -476,45 +501,68 @@ fn write_positive(
         return Err(());
     }
 
+    // A constant offset keeps the packet register's id, so the range proven
+    // by this comparison also covers every header-word access below.
+    if dns + DNS_HDR_LEN > end {
+        error!(ctx, "positive header does not fit after resize");
+        return Err(());
+    }
+
     let src = entry.resp_data.as_ptr();
+    // Copy the cached header words, but not offset 0: the incoming query's
+    // transaction id is already there and must survive the replay.
+    write_u16_be(dns as *mut u8, 2, read_u16_be(src, 2));
+    write_u16_be(dns as *mut u8, 4, read_u16_be(src, 4));
+    write_u16_be(dns as *mut u8, 6, read_u16_be(src, 6));
+    write_u16_be(dns as *mut u8, 8, read_u16_be(src, 8));
+    write_u16_be(dns as *mut u8, 10, read_u16_be(src, 10));
+
+    // [DNS_HDR_LEN, DNS_HDR_LEN + question_len) is the incoming question:
+    // leave it untouched, case intact. A real cached response always reaches
+    // at least that far (a NODATA positive ends exactly there); a shorter
+    // entry has no tail to copy.
+    let s = DNS_HDR_LEN + question_len;
+    if resp_len <= s {
+        return Ok(());
+    }
+    let tail_len = resp_len - s;
+
+    if tail_len < COPY_CHUNK {
+        // Short tail: a byte loop bounded by the constant chunk size, each
+        // write re-proving its own range against data_end.
+        for k in 0..tail_len {
+            if dns + s + k + 1 > end {
+                error!(ctx, "truncated frame while copying cached response tail");
+                return Err(());
+            }
+            // Safety: the comparison above proves one writable byte, and
+            // `s + k < resp_len <= MAX_RESPONSE_SIZE` stays inside resp_data.
+            unsafe { *((dns + s + k) as *mut u8) = *src.add(s + k) };
+        }
+        return Ok(());
+    }
+
     // Copy the leading chunk so that the loop below is aligned to it and ends
-    // exactly at resp_len. resp_len >= MIN_POSITIVE_LEN, so a full chunk is
-    // always available even when resp_len is not a multiple of it.
-    let lead = resp_len & (COPY_CHUNK - 1);
-    let mut i = lead;
+    // exactly at resp_len. tail_len >= COPY_CHUNK, so a full chunk is always
+    // available even when tail_len is not a multiple of it.
+    let lead = tail_len & (COPY_CHUNK - 1);
     if lead != 0 {
-        if dns + COPY_CHUNK > end {
-            error!(
-                ctx,
-                "truncated frame while copying cached response (txid {:x})", txid as u64
-            );
+        if dns + s + COPY_CHUNK > end {
+            error!(ctx, "truncated frame while copying cached response tail");
             return Err(());
         }
-        copy_chunk(dns, src, 0);
+        copy_chunk(dns + s, src, s);
     }
+    let mut i = s + lead;
     while i < resp_len {
         let p = dns + i;
         if p + COPY_CHUNK > end {
-            error!(
-                ctx,
-                "truncated frame while copying cached response (txid {:x})", txid as u64
-            );
+            error!(ctx, "truncated frame while copying cached response tail");
             return Err(());
         }
         copy_chunk(p, src, i);
         i += COPY_CHUNK;
     }
-
-    // The cached reply carries the transaction id of the query that populated
-    // the cache; overwrite it with the current query's id.
-    if dns + 2 > end {
-        error!(
-            ctx,
-            "truncated frame while writing transaction id (txid {:x})", txid as u64
-        );
-        return Err(());
-    }
-    write_u16_be(dns as *mut u8, 0, txid);
 
     Ok(())
 }

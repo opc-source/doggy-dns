@@ -18,8 +18,8 @@ mod linux_tests {
     use doggy_dns_xdp::stats::XdpStatsReader;
     use doggy_dns_xdp::types::XdpStats;
     use hickory_proto::op::{Message, MessageType, OpCode, Query, ResponseCode};
-    use hickory_proto::rr::{Name, RecordType};
-    use std::net::UdpSocket;
+    use hickory_proto::rr::{Name, RData, Record, RecordType, rdata::A};
+    use std::net::{Ipv4Addr, UdpSocket};
     use std::str::FromStr;
     use std::time::Duration;
 
@@ -336,9 +336,10 @@ mod linux_tests {
         let pin = pin_path("edges", port);
         let _ = std::fs::remove_file(pinned_file(&pin));
 
-        /// The kernel copies a cached reply verbatim and patches only the
-        /// transaction id, so the copy paths only care about the length; the
-        /// bytes below need not parse as a DNS message.
+        /// The kernel copies the cached header words and the tail after the
+        /// question, keeping the query's transaction id and question bytes,
+        /// so the tail bytes below need not parse as DNS records; only the
+        /// length matters to the copy paths.
         fn synthetic_reply(len: usize) -> Vec<u8> {
             let mut reply = vec![0u8; len];
             reply[..2].copy_from_slice(&CACHED_ID.to_be_bytes());
@@ -357,13 +358,29 @@ mod linux_tests {
         //    follow the QNAME start: the kernel takes its byte-at-a-time
         //    fallback instead of the 8-byte block scan, and the reply is
         //    exactly MIN_POSITIVE_LEN (17), the shortest the copy admits.
-        // 2. 32 bytes is a whole number of 16-byte chunks, so no lead chunk is
-        //    written.
-        let cases: [(&Name, Vec<u8>); 3] = [
+        // 2. A named question longer than the minimum, with a reply that ends
+        //    exactly at the question: the no-tail path, header words only.
+        // 3. A tail of exactly one copy chunk after the question, so `lead`
+        //    is zero and no leading chunk is written before the loop.
+        let mut cases: Vec<(&Name, Vec<u8>)> = vec![
             (&root, response_for(&root, ResponseCode::NoError)),
-            (&seventeen, synthetic_reply(17)),
-            (&aligned, synthetic_reply(32)),
+            (&seventeen, response_for(&seventeen, ResponseCode::NoError)),
+            (&aligned, {
+                let mut reply = response_for(&aligned, ResponseCode::NoError);
+                reply.extend_from_slice(&[0xA5; 16]);
+                reply
+            }),
         ];
+        // 3. Tails of every copy shape after a real question: shorter than a
+        //    chunk (byte loop), exactly one chunk, and chunk-plus-lead with
+        //    and without alignment.
+        let tail_name = Name::from_str("tail.example.").expect("name");
+        let question_only = response_for(&tail_name, ResponseCode::NoError);
+        for tail_len in [1usize, 15, 16, 17, 31, 32] {
+            let mut reply = question_only.clone();
+            reply.extend_from_slice(&vec![0xA5; tail_len]);
+            cases.push((&tail_name, reply));
+        }
 
         let socket = UdpSocket::bind("127.0.0.1:0").expect("bind sender");
         for (index, (name, reply)) in cases.iter().enumerate() {
@@ -380,13 +397,19 @@ mod linux_tests {
             cache.insert(&key, &value).expect("insert edge entry");
 
             let query_id = 0x9000 + index as u16;
+            let query = query_for(name, query_id);
             socket
-                .send_to(&query_for(name, query_id), ("127.0.0.1", port))
+                .send_to(&query, ("127.0.0.1", port))
                 .expect("send query");
             let answered = recv_datagram(&socket).expect("edge-length reply not answered in time");
 
+            // The replay keeps the query's id and question bytes; everything
+            // else comes from the cached reply. A reply shorter than the
+            // question only carries the question's leading bytes.
             let mut expected = reply.clone();
             expected[..2].copy_from_slice(&query_id.to_be_bytes());
+            let question_end = query.len().min(reply.len());
+            expected[12..question_end].copy_from_slice(&query[12..question_end]);
             assert_eq!(
                 answered,
                 expected,
@@ -395,8 +418,38 @@ mod linux_tests {
             );
         }
 
-        let snapshot = wait_for_stats(&stats, |snapshot| snapshot.hit >= 3);
-        assert_eq!(snapshot.hit, 3, "hit counter: {snapshot:?}");
+        let expected_hits = cases.len() as u64;
+        let snapshot = wait_for_stats(&stats, |snapshot| snapshot.hit >= expected_hits);
+        assert_eq!(snapshot.hit, expected_hits, "hit counter: {snapshot:?}");
+
+        // A cached reply shorter than the query's own question can only be
+        // another name's entry under a hash collision. Replaying it would leave
+        // QDCOUNT=1 above a truncated question, so the kernel must pass the
+        // query and leave the hit counter alone.
+        let short_name = Name::from_str("short.example.").expect("name");
+        let (key, value) = compute_cache_entry(
+            &short_name,
+            1,
+            1,
+            ResponseCode::NoError,
+            &synthetic_reply(17),
+            Some(60),
+            30,
+            now_ktime_ns(),
+        );
+        cache.insert(&key, &value).expect("insert short entry");
+        socket
+            .send_to(&query_for(&short_name, 0x9FFF), ("127.0.0.1", port))
+            .expect("send short-reply query");
+        assert!(
+            recv_datagram(&socket).is_none(),
+            "a cached reply shorter than the question must not be replayed"
+        );
+        let snapshot = wait_for_stats(&stats, |snapshot| snapshot.hit > expected_hits);
+        assert_eq!(
+            snapshot.hit, expected_hits,
+            "short reply counted a hit: {snapshot:?}"
+        );
 
         drop(cache);
         drop(attach);
@@ -794,5 +847,377 @@ mod linux_tests {
         drop(cache);
         drop(attach);
         let _ = std::fs::remove_file(&on_disk);
+    }
+
+    /// A positive reply for `name` whose answer section holds one A record,
+    /// so a replay has bytes beyond the question to copy. hickory emits the
+    /// question in canonical lowercase; a caller wanting a specific 0x20 case
+    /// stamps it onto the QNAME wire bytes afterwards.
+    fn positive_response_with_answer(name: &Name) -> Vec<u8> {
+        let mut message = Message::new(CACHED_ID, MessageType::Response, OpCode::Query);
+        let mut query = Query::new();
+        query.set_name(name.clone());
+        query.set_query_type(RecordType::A);
+        message.add_query(query);
+        message.add_answer(Record::from_rdata(
+            name.clone(),
+            60,
+            RData::A(A(Ipv4Addr::new(203, 0, 113, 9))),
+        ));
+        message.to_vec().expect("serialize response")
+    }
+
+    #[test]
+    #[ignore] // Requires root, Linux, and XDP support on lo.
+    fn positive_hit_preserves_query_case() {
+        let port: u16 = 5543;
+        let pin = pin_path("case", port);
+        let _ = std::fs::remove_file(pinned_file(&pin));
+
+        let mut attach = attach_lo(&config_for(&pin), port);
+        let mut cache = attach.manager.take_cache();
+        let stats = attach.manager.take_stats();
+
+        // The cache writer's question uses one case of the name. hickory
+        // emits names in canonical (lowercase) form, so the exact 0x20 case
+        // is stamped onto the question's QNAME wire bytes after serialising;
+        // the key hashes lowercased bytes and is unaffected.
+        let writer_name = Name::from_str("test.example.").expect("name");
+        let mut cached = positive_response_with_answer(&writer_name);
+        let writer_case = b"\x04TeSt\x07ExAmPlE\x00";
+        cached[12..12 + writer_case.len()].copy_from_slice(writer_case);
+        let (key, value) = compute_cache_entry(
+            &writer_name,
+            1,
+            1,
+            ResponseCode::NoError,
+            &cached,
+            Some(60),
+            30,
+            now_ktime_ns(),
+        );
+        cache.insert(&key, &value).expect("insert positive entry");
+
+        // ...and the querying client (DNS 0x20) uses another case of the same
+        // name. The key hashes lowercased wire bytes, so this is a cache hit.
+        let query_id: u16 = 0x5A5A;
+        let mut query = query_for(&writer_name, query_id);
+        let query_case = b"\x04tEsT\x07eXaMpLe\x00";
+        query[12..12 + query_case.len()].copy_from_slice(query_case);
+        // The query carries only a question section, so everything after the
+        // header is the question, and hash equality means the cached reply's
+        // question has exactly the same wire length.
+        let question_len = query.len() - 12;
+        assert_ne!(
+            &cached[12..12 + question_len],
+            &query[12..],
+            "test setup: the two cases must actually differ"
+        );
+
+        let socket = UdpSocket::bind("127.0.0.1:0").expect("bind sender");
+        socket
+            .send_to(&query, ("127.0.0.1", port))
+            .expect("send query");
+        let reply = recv_datagram(&socket).expect("cached reply not answered in time");
+
+        assert_eq!(
+            &reply[..2],
+            &query_id.to_be_bytes(),
+            "transaction id must be the query's"
+        );
+        assert_eq!(
+            &reply[12..12 + question_len],
+            &query[12..],
+            "question must echo the query's own case: got {:?}, want {:?}",
+            String::from_utf8_lossy(&reply[12..12 + question_len]),
+            String::from_utf8_lossy(&query[12..])
+        );
+        let mut expected = cached;
+        expected[..2].copy_from_slice(&query_id.to_be_bytes());
+        expected[12..12 + question_len].copy_from_slice(&query[12..]);
+        assert_eq!(
+            reply, expected,
+            "header words and answer records must still match the cached reply"
+        );
+
+        // Exactly one query was sent on this test's private stats map.
+        let snapshot = wait_for_stats(&stats, |snapshot| snapshot.hit >= 1);
+        assert_eq!(snapshot.hit, 1, "hit counter: {snapshot:?}");
+
+        drop(cache);
+        drop(attach);
+        let _ = std::fs::remove_file(pinned_file(&pin));
+    }
+
+    /// One's-complement checksum over an IPv4 header whose check field is zero.
+    fn ipv4_header_checksum(header: &[u8]) -> u16 {
+        let mut sum = 0u32;
+        for pair in header.chunks_exact(2) {
+            sum += u16::from_be_bytes([pair[0], pair[1]]) as u32;
+        }
+        while sum >> 16 != 0 {
+            sum = (sum & 0xFFFF) + (sum >> 16);
+        }
+        !(sum as u16)
+    }
+
+    /// Hand-build an Ethernet + IPv4 + UDP frame carrying `payload`, with the
+    /// IPv4 fragment field set verbatim. The UDP checksum stays zero (optional
+    /// for IPv4); the IP header checksum is computed so the stack accepts the
+    /// frame when XDP passes it on.
+    fn fragmented_udp_frame(
+        src_port: u16,
+        dst_port: u16,
+        ip_id: u16,
+        frag_off: u16,
+        payload: &[u8],
+    ) -> Vec<u8> {
+        let udp_len = 8 + payload.len();
+        let mut frame = vec![0u8; 14 + 20 + udp_len];
+        // Ethernet: loopback ignores the addresses; only the type matters.
+        frame[12..14].copy_from_slice(&0x0800u16.to_be_bytes());
+        let ip = &mut frame[14..34];
+        ip[0] = 0x45; // IPv4, 20-byte header
+        ip[2..4].copy_from_slice(&((20 + udp_len) as u16).to_be_bytes());
+        ip[4..6].copy_from_slice(&ip_id.to_be_bytes());
+        ip[6..8].copy_from_slice(&frag_off.to_be_bytes());
+        ip[8] = 64; // TTL
+        ip[9] = 17; // UDP
+        ip[12..16].copy_from_slice(&[127, 0, 0, 1]);
+        ip[16..20].copy_from_slice(&[127, 0, 0, 1]);
+        let check = ipv4_header_checksum(ip);
+        ip[10..12].copy_from_slice(&check.to_be_bytes());
+        let udp = &mut frame[34..];
+        udp[0..2].copy_from_slice(&src_port.to_be_bytes());
+        udp[2..4].copy_from_slice(&dst_port.to_be_bytes());
+        udp[4..6].copy_from_slice(&(udp_len as u16).to_be_bytes());
+        udp[8..].copy_from_slice(payload);
+        frame
+    }
+
+    /// Inject one raw Ethernet frame on `lo` via AF_PACKET, so the IPv4
+    /// fragment field reaches XDP exactly as built (a UDP socket cannot set
+    /// it). The frame takes the same loopback receive path as ordinary
+    /// traffic, which is where the XDP program runs.
+    fn send_frame_on_lo(frame: &[u8]) {
+        // Safety: a zeroed sockaddr_ll is a valid initialised value, and the
+        // pointers below stay live for the duration of each call.
+        unsafe {
+            let fd = libc::socket(
+                libc::AF_PACKET,
+                libc::SOCK_RAW,
+                (libc::ETH_P_IP as u16).to_be() as i32,
+            );
+            assert!(
+                fd >= 0,
+                "open AF_PACKET socket: {}",
+                std::io::Error::last_os_error()
+            );
+            let ifindex = libc::if_nametoindex(b"lo\0".as_ptr() as *const libc::c_char);
+            assert!(
+                ifindex != 0,
+                "look up lo: {}",
+                std::io::Error::last_os_error()
+            );
+            let mut addr: libc::sockaddr_ll = std::mem::zeroed();
+            addr.sll_family = libc::AF_PACKET as u16;
+            addr.sll_protocol = (libc::ETH_P_IP as u16).to_be();
+            addr.sll_ifindex = ifindex as i32;
+            addr.sll_halen = 6;
+            let sent = libc::sendto(
+                fd,
+                frame.as_ptr() as *const libc::c_void,
+                frame.len(),
+                0,
+                &addr as *const libc::sockaddr_ll as *const libc::sockaddr,
+                std::mem::size_of::<libc::sockaddr_ll>() as libc::socklen_t,
+            );
+            libc::close(fd);
+            assert_eq!(
+                sent,
+                frame.len() as isize,
+                "inject frame: {}",
+                std::io::Error::last_os_error()
+            );
+        }
+    }
+
+    /// Open a non-blocking AF_PACKET tap on `lo` that sees every frame the
+    /// interface receives (injected queries and XDP_TX replies alike). It is
+    /// needed because loopback does not deliver an XDP_TX reply to an
+    /// AF_PACKET-injected query back to a UDP socket: the reply is on the wire
+    /// (and counted as a hit) but never reaches `recv_from`. Open the tap
+    /// before sending the query; the caller closes the fd with `libc::close`.
+    fn open_lo_sniffer() -> libc::c_int {
+        // Safety: a zeroed sockaddr_ll is a valid initialised value, and the
+        // pointers below stay live for the duration of each call.
+        unsafe {
+            let fd = libc::socket(
+                libc::AF_PACKET,
+                libc::SOCK_RAW,
+                (libc::ETH_P_ALL as u16).to_be() as i32,
+            );
+            assert!(
+                fd >= 0,
+                "open lo sniffer: {}",
+                std::io::Error::last_os_error()
+            );
+            let ifindex = libc::if_nametoindex(b"lo\0".as_ptr() as *const libc::c_char);
+            assert!(
+                ifindex != 0,
+                "look up lo: {}",
+                std::io::Error::last_os_error()
+            );
+            let mut addr: libc::sockaddr_ll = std::mem::zeroed();
+            addr.sll_family = libc::AF_PACKET as u16;
+            addr.sll_protocol = (libc::ETH_P_ALL as u16).to_be();
+            addr.sll_ifindex = ifindex as i32;
+            let bound = libc::bind(
+                fd,
+                &addr as *const libc::sockaddr_ll as *const libc::sockaddr,
+                std::mem::size_of::<libc::sockaddr_ll>() as libc::socklen_t,
+            );
+            assert_eq!(
+                bound,
+                0,
+                "bind lo sniffer: {}",
+                std::io::Error::last_os_error()
+            );
+            let flags = libc::fcntl(fd, libc::F_GETFL, 0);
+            assert!(
+                flags >= 0,
+                "read sniffer flags: {}",
+                std::io::Error::last_os_error()
+            );
+            assert_eq!(
+                libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK),
+                0,
+                "set sniffer nonblock: {}",
+                std::io::Error::last_os_error()
+            );
+            fd
+        }
+    }
+
+    /// Receive one tapped frame, or `None` when none is queued right now.
+    fn recv_tapped_frame(fd: libc::c_int) -> Option<Vec<u8>> {
+        let mut buf = [0u8; 2048];
+        // Safety: `buf` is live for the call and `fd` is a valid open socket.
+        let n = unsafe { libc::recv(fd, buf.as_mut_ptr() as *mut libc::c_void, buf.len(), 0) };
+        if n > 0 {
+            Some(buf[..n as usize].to_vec())
+        } else {
+            None
+        }
+    }
+
+    /// The DNS payload of a tapped Ethernet + IPv4 + UDP frame, if it is one.
+    fn tapped_dns_payload(frame: &[u8]) -> Option<&[u8]> {
+        if frame.len() < 14 + 20 + 8 {
+            return None;
+        }
+        if u16::from_be_bytes([frame[12], frame[13]]) != 0x0800 {
+            return None;
+        }
+        let ip = &frame[14..];
+        if ip[9] != 17 {
+            return None;
+        }
+        let ip_hdr_len = (ip[0] & 0x0f) as usize * 4;
+        if ip.len() < ip_hdr_len + 8 {
+            return None;
+        }
+        Some(&ip[ip_hdr_len + 8..])
+    }
+
+    #[test]
+    #[ignore] // Requires root, Linux, and XDP support on lo.
+    fn fragmented_query_passes() {
+        let port: u16 = 5544;
+        let pin = pin_path("frag", port);
+        let _ = std::fs::remove_file(pinned_file(&pin));
+
+        let mut attach = attach_lo(&config_for(&pin), port);
+        let mut cache = attach.manager.take_cache();
+        let stats = attach.manager.take_stats();
+
+        // Hold a cacheable answer for the payload's question, so a program
+        // that parses past the fragment check would answer (and count a hit)
+        // instead of passing.
+        let name = "fragmented.example.";
+        let cached = response_bytes(name, ResponseCode::NoError);
+        let (key, value) = compute_cache_entry(
+            &Name::from_str(name).expect("name"),
+            1,
+            1,
+            ResponseCode::NoError,
+            &cached,
+            Some(60),
+            30,
+            now_ktime_ns(),
+        );
+        cache.insert(&key, &value).expect("insert positive entry");
+
+        let socket = UdpSocket::bind("127.0.0.1:0").expect("bind sender");
+        let src_port = socket.local_addr().expect("sender addr").port();
+        let payload = query_bytes(name);
+
+        // A first fragment (MF set, offset 0) and a non-first fragment
+        // (offset 8 bytes). Distinct IP ids keep the kernel's reassembly
+        // queues separate so the frames can never complete a datagram.
+        for (ip_id, frag_off) in [(0x0F01u16, 0x2000u16), (0x0F02, 0x0001)] {
+            let frame = fragmented_udp_frame(src_port, port, ip_id, frag_off, &payload);
+            send_frame_on_lo(&frame);
+            assert!(
+                recv_datagram(&socket).is_none(),
+                "fragment field {frag_off:#06x} must not be answered with XDP_TX"
+            );
+        }
+
+        // Positive control: DF alone (no MF, offset 0) is a complete,
+        // unfragmented datagram and must still be answered. The fragment
+        // mask is 0x3FFF (MF + offset); an over-broad 0x7FFF would also
+        // catch DF and pass this frame, leaving the hit counter at zero.
+        // Loopback never delivers the XDP_TX reply to an injected query back
+        // to a UDP socket, so tap the wire for it instead of `recv_datagram`:
+        // the reply is a response (QR=1), the injected query a query (QR=0).
+        let sniffer = open_lo_sniffer();
+        let frame = fragmented_udp_frame(src_port, port, 0x0F03, 0x4000, &payload);
+        send_frame_on_lo(&frame);
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        let reply = loop {
+            if let Some(tapped) = recv_tapped_frame(sniffer) {
+                if let Some(dns) = tapped_dns_payload(&tapped) {
+                    if dns.len() >= 12 && dns[2] & 0x80 != 0 {
+                        break Some(dns.to_vec());
+                    }
+                }
+            }
+            if tokio::time::Instant::now() >= deadline {
+                break None;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        // Safety: `sniffer` is a valid open fd returned by `open_lo_sniffer`.
+        unsafe { libc::close(sniffer) };
+        let reply = reply.expect("DF-set query must produce an XDP_TX reply on the wire");
+        // The query and the cached reply share the helpers' txid and canonical
+        // question case, so the replayed answer equals the cached bytes.
+        assert_eq!(reply, cached, "DF-set query must get the cached reply");
+
+        // The receive timeouts above give the kernel ample time to run XDP
+        // and update the per-CPU counters: the two fragments leave every
+        // counter untouched, and only the DF-set query counts one hit.
+        let snapshot = wait_for_stats(&stats, |snapshot| snapshot.hit >= 1);
+        assert_eq!(snapshot.hit, 1, "hit counter: {snapshot:?}");
+        assert_eq!(
+            snapshot.negative_hit + snapshot.miss + snapshot.expired + snapshot.drop,
+            0,
+            "fragments must pass without touching the other cache counters: {snapshot:?}"
+        );
+
+        drop(cache);
+        drop(attach);
+        let _ = std::fs::remove_file(pinned_file(&pin));
     }
 }
