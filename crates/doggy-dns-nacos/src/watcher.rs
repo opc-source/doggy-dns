@@ -187,7 +187,7 @@ impl ServiceCatalog for NacosServiceWatcher {
     async fn instances(&self, service: &str) -> CatalogAnswer {
         if !self.filter.is_selected(service) {
             tracing::debug!(
-                "nacos service '{}' left unsubscribed: service_pattern did not select it",
+                "nacos service '{}' left unsubscribed: the service filter did not select it",
                 service
             );
             return CatalogAnswer::Unknown;

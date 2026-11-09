@@ -63,14 +63,14 @@ fn cached_instance_rejects_a_non_address() {
     );
 }
 
-/// The built-in pattern is the application-name rule: word characters, `-`, no
+/// The built-in rule is the application-name rule: word characters, `-`, no
 /// dots. A dot means the registration is not a bare application name (a
 /// `com.foo.Bar` style identifier, or the `group@@service` form some Nacos
 /// versions return), and those are exactly the entries a deployment does not
 /// want pushed to it.
 #[test]
 fn default_filter_selects_bare_application_names() {
-    let filter = ServiceFilter::from_config(None).expect("the built-in pattern must compile");
+    let filter = ServiceFilter::from_config(None).expect("the built-in rule is infallible");
 
     for selected in ["order-service", "ORDER_svc-1", "a1"] {
         assert!(
@@ -108,6 +108,24 @@ fn default_filter_matches_the_ascii_class_exactly() {
     let mut cases: Vec<String> = (0u8..=127)
         .map(|byte| char::from(byte).to_string())
         .collect();
+    // Cover every UTF-8 lead and continuation byte the table can see, not just
+    // the ASCII half: each BMP scalar between ASCII characters, then one code
+    // point from each astral lead range.
+    cases.extend(
+        (0x80u32..=0xFFFF)
+            .filter_map(char::from_u32)
+            .map(|c| format!("a{c}b")),
+    );
+    cases.extend(
+        [
+            "\u{10000}",
+            "\u{40000}",
+            "\u{80000}",
+            "\u{C0000}",
+            "\u{10FFFF}",
+        ]
+        .map(|c| format!("a{c}b")),
+    );
     cases.extend([
         "order-service".to_string(),
         "ORDER_svc-1".to_string(),
@@ -176,7 +194,7 @@ fn filter_matching_is_case_sensitive() {
 #[test]
 fn user_written_word_class_is_unicode_aware() {
     let filter = ServiceFilter::from_config(Some(r"\w+")).expect("valid pattern");
-    let default = ServiceFilter::from_config(None).expect("the built-in pattern must compile");
+    let default = ServiceFilter::from_config(None).expect("the built-in rule is infallible");
 
     assert!(
         filter.is_selected("服务名"),
