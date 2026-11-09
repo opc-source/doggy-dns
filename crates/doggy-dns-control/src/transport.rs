@@ -12,6 +12,7 @@ use axum::{
 use rmcp::transport::streamable_http_server::{
     StreamableHttpServerConfig, StreamableHttpService, session::local::LocalSessionManager,
 };
+use serde::Serialize;
 use serde_json::Value;
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
@@ -208,11 +209,15 @@ fn has_endpoint(cfg: &ControlConfig, name: &str) -> bool {
     cfg.endpoints.iter().any(|e| e == name)
 }
 
+/// `/healthz` body.
+#[derive(Serialize)]
+struct HealthBody {
+    status: &'static str,
+}
+
 /// Liveness: the process is up and this route is wired.
-async fn healthz() -> Json<Value> {
-    let mut body = serde_json::Map::new();
-    body.insert("status".to_string(), Value::from("ok"));
-    Json(Value::Object(body))
+async fn healthz() -> Json<HealthBody> {
+    Json(HealthBody { status: "ok" })
 }
 
 /// Readiness as a pure report: always 200, live signals in the body.

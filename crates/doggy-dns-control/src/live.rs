@@ -1,7 +1,32 @@
-use serde_json::{Map, Value};
+use serde::Serialize;
+use serde_json::Value;
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 type Probe = dyn Fn() -> Value + Send + Sync;
+
+/// Standard signal shape for one Nacos zone.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct NacosZoneSignal {
+    subscribed_services: u64,
+}
+
+/// Fast-path signal shape for the XDP program.
+#[derive(Serialize)]
+struct XdpSignal {
+    attached: bool,
+}
+
+/// Whole-snapshot envelope. The signals are keyed by registered name, so this
+/// is the one object whose keys are not statically known; a `BTreeMap` keeps
+/// the emitted order stable (sorted by name, as the hand-built map was — that
+/// map sorted only because serde_json's default map is a `BTreeMap`, i.e. no
+/// `preserve_order` feature in this workspace).
+#[derive(Serialize)]
+struct RuntimeSnapshot {
+    signals: BTreeMap<String, Value>,
+}
 
 /// Registry of live runtime signals behind the control plane's `/readyz`
 /// endpoint and the MCP `get_runtime_status` tool.
@@ -39,34 +64,30 @@ impl LiveState {
         subscribed_services: impl Fn() -> u64 + Send + Sync + 'static,
     ) {
         self.register(format!("nacos.{zone}"), move || {
-            // Built by hand: `json!` expands through `Result::unwrap`, which
-            // .clippy.toml disallows.
-            let mut signal = Map::new();
-            signal.insert(
-                "subscribedServices".to_string(),
-                Value::from(subscribed_services()),
-            );
-            Value::Object(signal)
+            serde_json::to_value(NacosZoneSignal {
+                subscribed_services: subscribed_services(),
+            })
+            .expect("zone signal is serializable")
         });
     }
 
     /// Fast-path signal: `{"attached": bool}` for the XDP program.
     pub fn register_xdp(&mut self, attached: impl Fn() -> bool + Send + Sync + 'static) {
         self.register("xdp", move || {
-            let mut signal = Map::new();
-            signal.insert("attached".to_string(), Value::from(attached()));
-            Value::Object(signal)
+            serde_json::to_value(XdpSignal {
+                attached: attached(),
+            })
+            .expect("xdp signal is serializable")
         });
     }
 
     /// Evaluate every probe once. Shape: `{"signals": {name: value, ...}}`.
     pub fn snapshot(&self) -> Value {
-        let mut signals = Map::new();
-        for (name, probe) in &self.probes {
-            signals.insert(name.clone(), probe());
-        }
-        let mut root = Map::new();
-        root.insert("signals".to_string(), Value::Object(signals));
-        Value::Object(root)
+        let signals = self
+            .probes
+            .iter()
+            .map(|(name, probe)| (name.clone(), probe()))
+            .collect();
+        serde_json::to_value(RuntimeSnapshot { signals }).expect("runtime snapshot is serializable")
     }
 }
