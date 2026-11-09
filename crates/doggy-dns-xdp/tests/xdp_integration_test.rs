@@ -547,6 +547,77 @@ mod linux_tests {
 
     #[test]
     #[ignore] // Requires root, Linux, and XDP support on lo.
+    fn xdp_duplicated_cache_handles_share_one_map() {
+        use doggy_dns_xdp::cache::DnsCacheMap;
+
+        /// Write one real positive entry for `name` through `cache`.
+        fn insert_named(cache: &mut DnsCacheMap, name: &str, now: u64) {
+            let (key, value) = compute_cache_entry(
+                &Name::from_str(name).expect("name"),
+                1,
+                1,
+                ResponseCode::NoError,
+                &response_bytes(name, ResponseCode::NoError),
+                Some(60),
+                30,
+                now,
+            );
+            cache.insert(&key, &value).expect("insert entry");
+        }
+
+        /// Assert that `name` is present when read through `cache`.
+        fn assert_held(cache: &mut DnsCacheMap, name: &str) {
+            let key = make_cache_key(&Name::from_str(name).expect("name"), 1, 1);
+            assert!(
+                cache.get(&key).expect("lookup entry").is_some(),
+                "{name} missing when read back through this handle"
+            );
+        }
+
+        let port: u16 = 5543;
+        let pin = pin_path("dup", port);
+        let _ = std::fs::remove_file(pinned_file(&pin));
+
+        let mut attach = attach_lo(&config_for(&pin), port);
+        let mut cache = attach.manager.take_cache();
+        let now = now_ktime_ns();
+
+        // A duplicate is a second descriptor on the one kernel map, so what is
+        // written through it must be visible through the original — in both
+        // directions, since either handle is the same map.
+        let mut duplicate = cache.try_clone().expect("duplicate the cache handle");
+        insert_named(&mut duplicate, "dup-clone.example.", now);
+        assert_held(&mut cache, "dup-clone.example.");
+        insert_named(&mut cache, "dup-original.example.", now);
+        assert_held(&mut duplicate, "dup-original.example.");
+
+        // The shape the middleware uses: each worker duplicates the template
+        // itself and writes through its own handle, with no lock between them.
+        const WRITERS: usize = 4;
+        let names: Vec<String> = (0..WRITERS)
+            .map(|index| format!("dup-worker-{index}.example."))
+            .collect();
+        let template = &cache;
+        std::thread::scope(|scope| {
+            for name in &names {
+                scope.spawn(move || {
+                    let mut own = template.try_clone().expect("duplicate the cache handle");
+                    insert_named(&mut own, name, now);
+                });
+            }
+        });
+        for name in &names {
+            assert_held(&mut cache, name);
+        }
+
+        drop(duplicate);
+        drop(cache);
+        drop(attach);
+        let _ = std::fs::remove_file(pinned_file(&pin));
+    }
+
+    #[test]
+    #[ignore] // Requires root, Linux, and XDP support on lo.
     fn xdp_kernel_logs_reach_userspace() {
         // The pipeline proof anchors on a warn-level path that the default
         // level always forwards: a poisoned cache entry whose `resp_len`
