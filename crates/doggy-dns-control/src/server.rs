@@ -5,9 +5,10 @@ use rmcp::{
     model::{CallToolResult, ContentBlock, ErrorData, ServerCapabilities, ServerConfig},
     tool, tool_handler, tool_router,
 };
-use serde_json::Value;
+use serde::Serialize;
 
 use crate::ConfigSnapshot;
+use crate::PluginSnapshot;
 use crate::live::LiveState;
 use crate::state::McpState;
 
@@ -15,6 +16,49 @@ use crate::state::McpState;
 pub struct DoggyMcpServer {
     state: Arc<McpState>,
     live: Arc<LiveState>,
+}
+
+/// `get_status` body.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct StatusResponse<'a> {
+    instance_id: &'a str,
+    host: &'a str,
+    version: &'a str,
+    pid: u32,
+    uptime_seconds: u64,
+    started_at: String,
+    listen_addr: &'a str,
+    protocols: &'a [String],
+    status: &'static str,
+}
+
+/// `list_plugins` body.
+#[derive(Serialize)]
+struct PluginsResponse<'a> {
+    plugins: &'a [PluginSnapshot],
+}
+
+/// `get_config` body for a successfully captured config.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ConfigResponse<'a> {
+    format: &'static str,
+    content: &'a str,
+    redacted_keys: &'a [String],
+}
+
+/// `error` member of a failed tool result.
+#[derive(Serialize)]
+struct ErrorDetail<'a> {
+    code: &'a str,
+    message: &'a str,
+}
+
+/// Body returned when the config could not be captured at startup.
+#[derive(Serialize)]
+struct ErrorBody<'a> {
+    error: ErrorDetail<'a>,
 }
 
 impl DoggyMcpServer {
@@ -43,36 +87,19 @@ impl DoggyMcpServer {
     pub async fn get_status(&self) -> Result<CallToolResult, ErrorData> {
         let now = chrono::Utc::now();
         let uptime = (now - self.state.started_at).num_seconds().max(0) as u64;
-        let mut map = serde_json::Map::new();
-        map.insert(
-            "instanceId".into(),
-            Value::String(self.state.instance_id.clone()),
-        );
-        map.insert("host".into(), Value::String(self.state.host.clone()));
-        map.insert("version".into(), Value::String(self.state.version.clone()));
-        map.insert("pid".into(), Value::from(self.state.pid));
-        map.insert("uptimeSeconds".into(), Value::from(uptime));
-        map.insert(
-            "startedAt".into(),
-            Value::String(self.state.started_at.to_rfc3339()),
-        );
-        map.insert(
-            "listenAddr".into(),
-            Value::String(self.state.listen_addr.clone()),
-        );
-        map.insert(
-            "protocols".into(),
-            Value::Array(
-                self.state
-                    .protocols
-                    .iter()
-                    .map(|p| Value::String(p.clone()))
-                    .collect(),
-            ),
-        );
-        map.insert("status".into(), Value::String("running".into()));
+        let body = StatusResponse {
+            instance_id: &self.state.instance_id,
+            host: &self.state.host,
+            version: &self.state.version,
+            pid: self.state.pid,
+            uptime_seconds: uptime,
+            started_at: self.state.started_at.to_rfc3339(),
+            listen_addr: &self.state.listen_addr,
+            protocols: &self.state.protocols,
+            status: "running",
+        };
         Ok(CallToolResult::success(vec![ContentBlock::text(
-            Value::Object(map).to_string(),
+            serde_json::to_string(&body).expect("status response is serializable"),
         )]))
     }
 
@@ -88,16 +115,11 @@ impl DoggyMcpServer {
         )
     )]
     pub async fn list_plugins(&self) -> Result<CallToolResult, ErrorData> {
-        let plugins: Vec<Value> = self
-            .state
-            .plugins
-            .iter()
-            .map(|p| serde_json::to_value(p).expect("PluginSnapshot is serializable"))
-            .collect();
-        let mut map = serde_json::Map::new();
-        map.insert("plugins".into(), Value::Array(plugins));
+        let body = PluginsResponse {
+            plugins: &self.state.plugins,
+        };
         Ok(CallToolResult::success(vec![ContentBlock::text(
-            Value::Object(map).to_string(),
+            serde_json::to_string(&body).expect("plugin list is serializable"),
         )]))
     }
 
@@ -117,16 +139,12 @@ impl DoggyMcpServer {
             ConfigSnapshot::Redacted {
                 content,
                 redacted_keys,
-            } => {
-                let mut map = serde_json::Map::new();
-                map.insert("format".into(), Value::String("toml".into()));
-                map.insert("content".into(), Value::String(content.clone()));
-                map.insert(
-                    "redactedKeys".into(),
-                    Value::Array(redacted_keys.iter().cloned().map(Value::String).collect()),
-                );
-                Value::Object(map).to_string()
-            }
+            } => serde_json::to_string(&ConfigResponse {
+                format: "toml",
+                content,
+                redacted_keys,
+            })
+            .expect("config response is serializable"),
             ConfigSnapshot::Error { code, message } => error_json(code, message),
         };
         Ok(CallToolResult::success(vec![ContentBlock::text(json)]))
@@ -151,12 +169,10 @@ impl DoggyMcpServer {
 }
 
 fn error_json(code: &str, message: &str) -> String {
-    let mut error = serde_json::Map::new();
-    error.insert("code".into(), Value::String(code.into()));
-    error.insert("message".into(), Value::String(message.into()));
-    let mut map = serde_json::Map::new();
-    map.insert("error".into(), Value::Object(error));
-    Value::Object(map).to_string()
+    let body = ErrorBody {
+        error: ErrorDetail { code, message },
+    };
+    serde_json::to_string(&body).expect("error body is serializable")
 }
 
 #[tool_handler(name = "doggy-dns-control", version = "0.1.0")]

@@ -4,6 +4,20 @@ use chrono::Utc;
 use doggy_dns_basic::PluginConfig;
 use doggy_dns_control::state::McpState;
 
+/// Sorted keys of a `details` object. Comparing the whole set pins the emitted
+/// contract: an added, dropped or renamed key fails even if every asserted
+/// value still reads back.
+fn detail_keys(details: &serde_json::Value) -> Vec<&str> {
+    let mut keys: Vec<&str> = details
+        .as_object()
+        .expect("details is a JSON object")
+        .keys()
+        .map(String::as_str)
+        .collect();
+    keys.sort_unstable();
+    keys
+}
+
 #[test]
 fn instance_id_contains_host_and_pid() {
     let state = McpState::from_parts(
@@ -65,18 +79,38 @@ kind = "native"
     assert_eq!(snapshots[0].order, 0);
     assert_eq!(snapshots[0].kind, "nacos");
     assert!(!snapshots[0].enabled);
+    assert_eq!(
+        detail_keys(&snapshots[0].details),
+        ["dnsZone", "group", "namespace", "serverAddr", "ttl"],
+        "nacos details keys"
+    );
     assert_eq!(snapshots[0].details["serverAddr"], "127.0.0.1:8848");
+    assert_eq!(snapshots[0].details["namespace"], "public");
+    assert_eq!(snapshots[0].details["group"], "DEFAULT_GROUP");
     assert_eq!(snapshots[0].details["dnsZone"], "nacos.local");
     assert_eq!(snapshots[0].details["ttl"], 6);
 
     assert_eq!(snapshots[1].kind, "forward");
+    assert_eq!(
+        detail_keys(&snapshots[1].details),
+        ["cacheSize", "maxTtl", "minTtl", "upstream"],
+        "forward details keys"
+    );
     assert_eq!(snapshots[1].details["upstream"][0], "8.8.8.8:53");
+    assert_eq!(snapshots[1].details["cacheSize"], 4096);
     assert_eq!(snapshots[1].details["maxTtl"], 600);
     assert_eq!(snapshots[1].details["minTtl"], 10);
 
     assert_eq!(snapshots[2].order, 2);
     assert_eq!(snapshots[2].kind, "native");
+    assert_eq!(
+        detail_keys(&snapshots[2].details),
+        ["cacheSize", "maxTtl", "minTtl"],
+        "native details keys"
+    );
     assert_eq!(snapshots[2].details["cacheSize"], 4096);
+    assert_eq!(snapshots[2].details["minTtl"], 10);
+    assert_eq!(snapshots[2].details["maxTtl"], 300);
 }
 
 #[test]

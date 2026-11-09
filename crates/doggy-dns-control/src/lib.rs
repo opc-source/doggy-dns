@@ -69,69 +69,94 @@ pub fn snapshots_from(plugins: &[PluginConfig]) -> Vec<PluginSnapshot> {
         .collect()
 }
 
+/// Details object of a [`PluginSnapshot`], one struct per plugin kind.
+///
+/// The structs declare each kind's emitted keys and value types once; the
+/// snapshot still stores the result as a `serde_json::Value` because the
+/// `details` field is public and callers construct snapshots directly. That
+/// round-trip also sorts the keys: `serde_json::Value`'s map is a `BTreeMap`
+/// (no `preserve_order`), so `details` stays alphabetical, unlike the typed
+/// envelopes that serialize in declaration order.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct NacosDetails {
+    server_addr: String,
+    namespace: String,
+    group: String,
+    dns_zone: String,
+    ttl: u32,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct NativeDetails {
+    cache_size: u32,
+    min_ttl: u32,
+    max_ttl: u32,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ForwardDetails {
+    upstream: Vec<String>,
+    cache_size: u32,
+    min_ttl: u32,
+    max_ttl: u32,
+}
+
+/// Untagged so `details` stays a plain object with exactly the kind's keys.
+#[derive(Serialize)]
+#[serde(untagged)]
+enum PluginDetails {
+    Nacos(NacosDetails),
+    Native(NativeDetails),
+    Forward(ForwardDetails),
+}
+
 impl PluginSnapshot {
     pub fn from_config(order: usize, p: &PluginConfig) -> Self {
-        use serde_json::Value;
-
-        fn str_val(s: &str) -> Value {
-            Value::String(s.to_string())
-        }
-
         let kind = format!("{:?}", p.kind).to_ascii_lowercase();
         let details = match p.kind {
-            PluginKind::Nacos => {
-                let mut map = serde_json::Map::new();
-                map.insert(
-                    "serverAddr".into(),
-                    str_val(
-                        p.server_addr
-                            .as_deref()
-                            .unwrap_or(NACOS_DEFAULT_SERVER_ADDR),
-                    ),
-                );
-                map.insert(
-                    "namespace".into(),
-                    str_val(p.namespace.as_deref().unwrap_or(NACOS_DEFAULT_NAMESPACE)),
-                );
-                map.insert(
-                    "group".into(),
-                    str_val(p.group.as_deref().unwrap_or(NACOS_DEFAULT_GROUP)),
-                );
-                map.insert(
-                    "dnsZone".into(),
-                    str_val(p.dns_zone.as_deref().unwrap_or(NACOS_DEFAULT_DNS_ZONE)),
-                );
-                map.insert("ttl".into(), Value::from(p.ttl));
-                Value::Object(map)
-            }
-            PluginKind::Native => {
-                let mut map = serde_json::Map::new();
-                map.insert("cacheSize".into(), Value::from(p.cache_size));
-                map.insert("minTtl".into(), Value::from(p.min_ttl));
-                map.insert("maxTtl".into(), Value::from(p.max_ttl));
-                Value::Object(map)
-            }
-            PluginKind::Forward => {
-                let mut map = serde_json::Map::new();
-                let upstream: Vec<Value> = p
-                    .upstream
+            PluginKind::Nacos => PluginDetails::Nacos(NacosDetails {
+                server_addr: p
+                    .server_addr
                     .as_deref()
-                    .unwrap_or(&[])
-                    .iter()
-                    .map(|s| str_val(s))
-                    .collect();
-                map.insert("upstream".into(), Value::Array(upstream));
-                map.insert("cacheSize".into(), Value::from(p.cache_size));
-                map.insert("minTtl".into(), Value::from(p.min_ttl));
-                map.insert("maxTtl".into(), Value::from(p.max_ttl));
-                Value::Object(map)
-            }
+                    .unwrap_or(NACOS_DEFAULT_SERVER_ADDR)
+                    .to_string(),
+                namespace: p
+                    .namespace
+                    .as_deref()
+                    .unwrap_or(NACOS_DEFAULT_NAMESPACE)
+                    .to_string(),
+                group: p
+                    .group
+                    .as_deref()
+                    .unwrap_or(NACOS_DEFAULT_GROUP)
+                    .to_string(),
+                dns_zone: p
+                    .dns_zone
+                    .as_deref()
+                    .unwrap_or(NACOS_DEFAULT_DNS_ZONE)
+                    .to_string(),
+                ttl: p.ttl,
+            }),
+            PluginKind::Native => PluginDetails::Native(NativeDetails {
+                cache_size: p.cache_size,
+                min_ttl: p.min_ttl,
+                max_ttl: p.max_ttl,
+            }),
+            PluginKind::Forward => PluginDetails::Forward(ForwardDetails {
+                upstream: p.upstream.as_deref().unwrap_or(&[]).to_vec(),
+                cache_size: p.cache_size,
+                min_ttl: p.min_ttl,
+                max_ttl: p.max_ttl,
+            }),
         };
         Self {
             order,
             kind,
             enabled: p.enabled,
-            details,
+            details: serde_json::to_value(details).expect("plugin details are serializable"),
         }
     }
 }
