@@ -26,7 +26,7 @@ cargo tarpaulin --config tarpaulin.toml        # Coverage (XML + HTML reports)
 cargo tarpaulin --workspace --out Stdout       # Coverage quick summary
 DOGGY_NACOS_ADDR=127.0.0.1:8848 cargo test --test nacos_e2e_test -- --ignored  # Live-Nacos e2e (needs a standalone Nacos server)
 cargo build --features xdp                 # Build with XDP support (requires Linux + bpf-linker)
-cd xdp && cargo build --target bpfel-unknown-none --release  # Build eBPF program
+cd xdp && cargo build --target bpfel-unknown-none --release  # eBPF crate only; userspace embeds build.rs's $OUT_DIR/ebpf copy
 cargo test -p doggy-dns-xdp                # Test XDP userspace crate
 cargo bench -p doggy-dns-xdp               # Benchmark XDP components
 sudo env "PATH=$PATH" cargo test -p doggy-dns-xdp --test xdp_integration_test -- --ignored  # XDP integration tests (requires root)

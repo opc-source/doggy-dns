@@ -225,6 +225,10 @@ sudo env "PATH=$PATH" RUST_LOG=debug cargo test -p doggy-dns-xdp --test xdp_inte
 cargo bench -p doggy-dns-xdp                    # component benchmarks
 ```
 
+The `cd xdp` line builds the eBPF crate on its own, for inspecting or iterating
+on it; `crates/doggy-dns-xdp` embeds the ELF that its `build.rs` builds under
+`$OUT_DIR/ebpf`, not the one in the `xdp` workspace's target directory.
+
 The BPF map layout (`CacheKey`, `CacheValue`, `XdpStats`, `XdpRuntimeConfig`)
 lives in `xdp/doggy-dns-xdp-abi`, which both the eBPF program and
 `crates/doggy-dns-xdp` depend on, so the two sides cannot drift apart; the
