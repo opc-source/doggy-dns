@@ -25,6 +25,7 @@ on:
       - 'scripts/perf_ab.py'
       - 'scripts/perf_upstream.c'
       - '.github/workflows/perf-bundle.yml'
+      - '.github/actions/**'
 
 permissions:
   contents: read
@@ -53,12 +54,11 @@ jobs:
             xdp -> xdp/target
 
       - name: Install bpf-linker
-        run: |
-          curl -sSL https://github.com/aya-rs/bpf-linker/releases/download/v0.12.0/bpf-linker-x86_64-unknown-linux-musl.tar.zst | tar -xI zstd -C ~/.cargo/bin/
+        uses: ./.github/actions/setup-bpf
 
-      # build.rs embeds the object at compile time, so it must exist before the
-      # XDP binary is built. It rebuilds through the pinned nightly toolchain in
-      # xdp/rust-toolchain.toml.
+      # Builds the eBPF program with the pinned nightly toolchain in
+      # xdp/rust-toolchain.toml, before the XDP binary is built. It leaves the
+      # object in xdp/target; build.rs decides what gets embedded.
       - name: Build eBPF program
         run: cd xdp && cargo build -Z build-std=core,alloc --release --target bpfel-unknown-none
 
@@ -88,7 +88,10 @@ jobs:
 
       # Must come before the manifest is written, which records the version.
       - name: Install dnsperf
-        run: sudo apt-get update && sudo apt-get install -y dnsperf
+        uses: ./.github/actions/dnsperf-run
+        with:
+          install: true
+          run: false
 
       - name: Assemble bundle
         run: |

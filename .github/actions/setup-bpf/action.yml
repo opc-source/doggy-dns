@@ -1,0 +1,17 @@
+name: Setup bpf-linker
+description: >-
+  Install the aya-rs bpf-linker release binary (x86_64 musl) into ~/.cargo/bin,
+  the linker the bpfel-unknown-none eBPF target needs. Shared by the XDP CI jobs
+  and the perf bundle so the download URL and version live in one place.
+inputs:
+  bpf-linker-version:
+    description: Release tag of bpf-linker to download.
+    required: false
+    default: v0.12.0
+runs:
+  using: composite
+  steps:
+    - name: Install bpf-linker
+      shell: bash
+      run: |
+        curl -sSL https://github.com/aya-rs/bpf-linker/releases/download/${{ inputs.bpf-linker-version }}/bpf-linker-x86_64-unknown-linux-musl.tar.zst | tar -xI zstd -C ~/.cargo/bin/
