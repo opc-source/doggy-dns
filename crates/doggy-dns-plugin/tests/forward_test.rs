@@ -12,7 +12,7 @@ use tokio::net::UdpSocket;
 #[tokio::test]
 async fn forward_resolves_known_domain() {
     let authority = ForwardAuthority::new(
-        vec!["8.8.8.8:53".to_string()],
+        vec!["8.8.8.8:53".parse().expect("valid upstream")],
         1024,
         Duration::from_secs(30),
         Duration::from_secs(600),
@@ -79,7 +79,7 @@ async fn spawn_mock_dns(rcode: ResponseCode, answer: Option<(Ipv4Addr, u32)>) ->
 
 async fn forward_to(upstream: SocketAddr) -> ForwardAuthority {
     ForwardAuthority::new(
-        vec![upstream.to_string()],
+        vec![upstream],
         128,
         Duration::from_secs(1),
         Duration::from_secs(60),
@@ -115,30 +115,6 @@ async fn forward_rejects_empty_upstream_list() {
     let result =
         ForwardAuthority::new(vec![], 128, Duration::from_secs(1), Duration::from_secs(60)).await;
     assert!(result.is_err(), "an empty upstream list must be rejected");
-}
-
-#[tokio::test]
-async fn forward_rejects_invalid_upstream() {
-    let result = ForwardAuthority::new(
-        vec!["not-an-ip".to_string()],
-        128,
-        Duration::from_secs(1),
-        Duration::from_secs(60),
-    )
-    .await;
-    assert!(result.is_err(), "a non-IP upstream must be rejected");
-}
-
-#[tokio::test]
-async fn forward_accepts_bare_ip() {
-    let result = ForwardAuthority::new(
-        vec!["8.8.8.8".to_string()],
-        128,
-        Duration::from_secs(1),
-        Duration::from_secs(60),
-    )
-    .await;
-    assert!(result.is_ok(), "a bare IP should default to port 53");
 }
 
 #[tokio::test]

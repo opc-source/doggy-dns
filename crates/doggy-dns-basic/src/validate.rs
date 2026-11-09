@@ -4,7 +4,6 @@ use crate::DoggyDnsConfig;
 use crate::observability::ObservabilityConfig;
 use crate::plugin::{PluginConfig, PluginKind};
 use std::collections::HashSet;
-use std::net::{IpAddr, SocketAddr};
 
 pub fn validate_config(config: &DoggyDnsConfig) -> anyhow::Result<()> {
     anyhow::ensure!(
@@ -236,7 +235,7 @@ fn validate_upstream(label: &str, plugin: &PluginConfig) -> anyhow::Result<()> {
     );
     for address in upstream {
         anyhow::ensure!(
-            address.parse::<SocketAddr>().is_ok() || address.parse::<IpAddr>().is_ok(),
+            crate::net::parse_upstream(address).is_ok(),
             "{label}.upstream entry '{address}' is not an IP address or IP:port"
         );
     }
@@ -374,20 +373,7 @@ fn validate_observability_url(
         "{name} must not contain whitespace"
     );
     if !allow_signal_path {
-        anyhow::ensure!(
-            !value.contains(['?', '#']),
-            "{name} must not contain a query string or fragment"
-        );
-        anyhow::ensure!(
-            !value.trim_end_matches('/').ends_with("/v1"),
-            "{name} must be the OTLP base URL without /v1"
-        );
-        for signal in crate::OTLP_SIGNAL_PATHS {
-            anyhow::ensure!(
-                !value.ends_with(&format!("/v1/{signal}")),
-                "{name} must be the OTLP base URL without /v1/{signal}; use the signal-specific endpoint for a full URL"
-            );
-        }
+        crate::observability::validate_otlp_base_url(name, value)?;
     }
     Ok(())
 }

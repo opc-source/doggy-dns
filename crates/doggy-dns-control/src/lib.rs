@@ -13,7 +13,10 @@ pub use transport::{BIND_RETRY_INTERVAL, ControlPlaneHandle, start, start_retryi
 
 use serde::{Deserialize, Serialize};
 
-use doggy_dns_basic::{PluginConfig, PluginKind};
+use doggy_dns_basic::{
+    NACOS_DEFAULT_DNS_ZONE, NACOS_DEFAULT_GROUP, NACOS_DEFAULT_NAMESPACE,
+    NACOS_DEFAULT_SERVER_ADDR, PluginConfig, PluginKind,
+};
 
 pub use doggy_dns_basic::ControlConfig;
 
@@ -80,19 +83,23 @@ impl PluginSnapshot {
                 let mut map = serde_json::Map::new();
                 map.insert(
                     "serverAddr".into(),
-                    str_val(p.server_addr.as_deref().unwrap_or("127.0.0.1:8848")),
+                    str_val(
+                        p.server_addr
+                            .as_deref()
+                            .unwrap_or(NACOS_DEFAULT_SERVER_ADDR),
+                    ),
                 );
                 map.insert(
                     "namespace".into(),
-                    str_val(p.namespace.as_deref().unwrap_or("public")),
+                    str_val(p.namespace.as_deref().unwrap_or(NACOS_DEFAULT_NAMESPACE)),
                 );
                 map.insert(
                     "group".into(),
-                    str_val(p.group.as_deref().unwrap_or("DEFAULT_GROUP")),
+                    str_val(p.group.as_deref().unwrap_or(NACOS_DEFAULT_GROUP)),
                 );
                 map.insert(
                     "dnsZone".into(),
-                    str_val(p.dns_zone.as_deref().unwrap_or("nacos.local")),
+                    str_val(p.dns_zone.as_deref().unwrap_or(NACOS_DEFAULT_DNS_ZONE)),
                 );
                 map.insert("ttl".into(), Value::from(p.ttl));
                 Value::Object(map)

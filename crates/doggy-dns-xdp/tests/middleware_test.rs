@@ -17,7 +17,7 @@ fn compute_cache_entry_positive() {
         1, // A
         1, // IN
         ResponseCode::NoError,
-        resp_bytes.clone(),
+        &resp_bytes,
         Some(300),
         30,
         1_000_000_000, // fake now
@@ -38,7 +38,7 @@ fn compute_cache_entry_nx_domain() {
         1,
         1,
         ResponseCode::NXDomain,
-        resp_bytes,
+        &resp_bytes,
         None,
         60,
         2_000_000_000,
@@ -55,7 +55,7 @@ fn compute_cache_entry_serv_fail_not_cached() {
         1,
         1,
         ResponseCode::ServFail,
-        vec![],
+        &[],
         None,
         30,
         0,
@@ -72,7 +72,7 @@ fn compute_cache_entry_truncates_large_response() {
         1,
         1,
         ResponseCode::NoError,
-        resp_bytes,
+        &resp_bytes,
         Some(60),
         30,
         0,

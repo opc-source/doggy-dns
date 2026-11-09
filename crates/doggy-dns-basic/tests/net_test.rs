@@ -1,6 +1,6 @@
 #![allow(clippy::disallowed_methods)]
 
-use doggy_dns_basic::net::socket_addr;
+use doggy_dns_basic::net::{parse_upstream, socket_addr};
 use std::net::SocketAddr;
 
 #[test]
@@ -44,4 +44,34 @@ fn trims_surrounding_whitespace() {
         socket_addr(" 127.0.0.1 ", 5353).unwrap(),
         "127.0.0.1:5353".parse::<SocketAddr>().unwrap()
     );
+}
+
+#[test]
+fn upstream_defaults_to_port_53() {
+    assert_eq!(
+        parse_upstream("8.8.8.8").unwrap(),
+        "8.8.8.8:53".parse::<SocketAddr>().unwrap()
+    );
+    assert_eq!(
+        parse_upstream("2001:db8::1").unwrap(),
+        "[2001:db8::1]:53".parse::<SocketAddr>().unwrap()
+    );
+}
+
+#[test]
+fn upstream_keeps_an_explicit_port() {
+    assert_eq!(
+        parse_upstream("8.8.8.8:5353").unwrap(),
+        "8.8.8.8:5353".parse::<SocketAddr>().unwrap()
+    );
+    assert_eq!(
+        parse_upstream("[2001:db8::1]:5353").unwrap(),
+        "[2001:db8::1]:5353".parse::<SocketAddr>().unwrap()
+    );
+}
+
+#[test]
+fn upstream_rejects_hostnames() {
+    assert!(parse_upstream("dns.google").is_err());
+    assert!(parse_upstream("").is_err());
 }

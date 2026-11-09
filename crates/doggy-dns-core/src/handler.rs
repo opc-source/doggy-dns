@@ -1,5 +1,6 @@
 use async_trait::async_trait;
 use doggy_dns_plugin::authority_chain::AuthorityChain;
+use doggy_dns_plugin::naming::{protocol_name, response_code_name};
 use doggy_dns_plugin::{Middleware, MiddlewareAction, RequestOutcome};
 use hickory_proto::op::{Header, HeaderCounts, MessageType, Metadata, OpCode, ResponseCode};
 use hickory_proto::rr::{LowerName, Record, RecordType};
@@ -9,7 +10,6 @@ use hickory_server::server::{Request, RequestHandler, RequestInfo, ResponseHandl
 use hickory_server::zone_handler::{
     AuthLookup, LookupControlFlow, LookupError, LookupRecords, MessageResponseBuilder,
 };
-use std::borrow::Cow;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use tokio::time::Instant;
@@ -438,35 +438,6 @@ fn response_code_for_lookup_error(error: &LookupError) -> ResponseCode {
         LookupError::NetError(e) if e.is_no_records_found() => ResponseCode::NoError,
         _ => ResponseCode::ServFail,
     }
-}
-
-/// The lowercase transport name `network.protocol.name` carries.
-///
-/// UDP and TCP — everything a plain DNS listener sees — answer with a static
-/// string; the feature-gated transports keep the derived spelling.
-fn protocol_name(protocol: Protocol) -> Cow<'static, str> {
-    match protocol {
-        Protocol::Udp => Cow::Borrowed("udp"),
-        Protocol::Tcp => Cow::Borrowed("tcp"),
-        _ => Cow::Owned(format!("{protocol:?}").to_ascii_lowercase()),
-    }
-}
-
-/// The uppercase mnemonic `dns.response.code` carries.
-///
-/// The codes a query actually ends in are static, so the common paths format
-/// nothing; anything rarer keeps the derived `Debug` spelling.
-fn response_code_name(code: ResponseCode) -> Cow<'static, str> {
-    let name = match code {
-        ResponseCode::NoError => "NOERROR",
-        ResponseCode::FormErr => "FORMERR",
-        ResponseCode::ServFail => "SERVFAIL",
-        ResponseCode::NXDomain => "NXDOMAIN",
-        ResponseCode::NotImp => "NOTIMP",
-        ResponseCode::Refused => "REFUSED",
-        _ => return Cow::Owned(format!("{code:?}").to_ascii_uppercase()),
-    };
-    Cow::Borrowed(name)
 }
 
 /// Attach the query, transport and client to the request span. These are the

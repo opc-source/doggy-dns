@@ -7,6 +7,32 @@ use std::fmt;
 /// URL that already carries one, so the list lives here once.
 pub const OTLP_SIGNAL_PATHS: [&str; 4] = ["logs", "metrics", "traces", "profiles"];
 
+/// Reject a base endpoint that already names a signal.
+///
+/// Joining `/v1/<signal>` onto such a value would produce `/v1/logs/v1/logs`,
+/// so both config validation and the runtime endpoint resolver run this before
+/// joining. `name` is the config key or setting the message should point at.
+pub fn validate_otlp_base_url(name: &str, value: &str) -> anyhow::Result<()> {
+    let value = value.trim();
+    anyhow::ensure!(
+        !value.contains(['?', '#']),
+        "{name} must not contain a query string or fragment"
+    );
+    let value = value.trim_end_matches('/');
+    anyhow::ensure!(
+        !value.ends_with("/v1"),
+        "{name} must not include /v1; use the signal-specific endpoint for a full URL"
+    );
+    for signal in OTLP_SIGNAL_PATHS {
+        anyhow::ensure!(
+            !value.ends_with(&format!("/v1/{signal}")),
+            "{name} must not include /v1/{signal}; \
+             use the signal-specific endpoint for a full URL"
+        );
+    }
+    Ok(())
+}
+
 /// OTLP export configuration. A single target is supported; fan-out should be
 /// handled by an OTel Collector or Vector in front of the final backend.
 /// Every field is optional: a missing one takes the value `Default` gives, so

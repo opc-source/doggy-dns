@@ -18,7 +18,7 @@ pub fn compute_cache_entry(
     qtype: u16,
     qclass: u16,
     response_code: ResponseCode,
-    resp_bytes: Vec<u8>,
+    resp_bytes: &[u8],
     min_answer_ttl: Option<u32>,
     negative_ttl: u64,
     now_ns: u64,
@@ -35,9 +35,9 @@ pub fn compute_cache_entry(
     let expires_at = now_ns + ttl * 1_000_000_000;
 
     let value = if is_negative {
-        CacheValue::new_negative(&resp_bytes, expires_at)
+        CacheValue::new_negative(resp_bytes, expires_at)
     } else {
-        CacheValue::new_positive(&resp_bytes, expires_at)
+        CacheValue::new_positive(resp_bytes, expires_at)
     };
 
     (key, value)

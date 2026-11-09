@@ -70,7 +70,7 @@ impl Middleware for XdpCacheMiddleware {
             qtype,
             qclass,
             outcome.response_code,
-            resp_bytes.clone(),
+            resp_bytes,
             outcome.min_answer_ttl,
             self.negative_ttl,
             now_ns,

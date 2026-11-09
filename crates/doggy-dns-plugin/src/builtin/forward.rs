@@ -11,7 +11,7 @@ use hickory_server::server::{Request, RequestInfo};
 use hickory_server::zone_handler::{
     AuthLookup, AxfrPolicy, LookupControlFlow, LookupError, LookupOptions, ZoneHandler, ZoneType,
 };
-use std::net::{IpAddr, SocketAddr};
+use std::net::SocketAddr;
 use std::time::Duration;
 use tracing::Instrument;
 
@@ -23,7 +23,7 @@ pub struct ForwardAuthority {
 
 impl ForwardAuthority {
     pub async fn new(
-        upstream: Vec<String>,
+        upstream: Vec<SocketAddr>,
         cache_size: u64,
         min_ttl: Duration,
         max_ttl: Duration,
@@ -35,19 +35,14 @@ impl ForwardAuthority {
         let upstream_count = upstream.len();
         let name_servers: Vec<NameServerConfig> = upstream
             .iter()
-            .map(|addr| {
-                let socket_addr = parse_upstream(addr)?;
+            .map(|socket_addr| {
                 let mut udp = ConnectionConfig::udp();
                 udp.port = socket_addr.port();
                 let mut tcp = ConnectionConfig::tcp();
                 tcp.port = socket_addr.port();
-                Ok(NameServerConfig::new(
-                    socket_addr.ip(),
-                    true,
-                    vec![udp, tcp],
-                ))
+                NameServerConfig::new(socket_addr.ip(), true, vec![udp, tcp])
             })
-            .collect::<Result<Vec<_>>>()?;
+            .collect();
 
         let config = ResolverConfig::from_parts(None, vec![], name_servers);
 
@@ -67,20 +62,6 @@ impl ForwardAuthority {
             upstream_count,
         })
     }
-}
-
-/// Parse `IP` or `IP:port`, defaulting to port 53.
-fn parse_upstream(addr: &str) -> Result<SocketAddr> {
-    if let Ok(socket_addr) = addr.parse::<SocketAddr>() {
-        return Ok(socket_addr);
-    }
-    if let Ok(ip) = addr.parse::<IpAddr>() {
-        return Ok(SocketAddr::new(ip, 53));
-    }
-    anyhow::bail!(
-        "invalid upstream address '{}': expected IP or IP:port",
-        addr
-    )
 }
 
 /// Map a resolver failure to the DNS result it represents.
@@ -123,7 +104,6 @@ impl ZoneHandler for ForwardAuthority {
         _request_info: Option<&RequestInfo<'_>>,
         _lookup_options: LookupOptions,
     ) -> LookupControlFlow<AuthLookup> {
-        let name_str = name.to_string();
         // See `wire_query_name`: a `&str` would make the resolver re-parse the
         // name under IDNA/STD3 rules and reject interior underscores such as
         // Nacos' `DEFAULT_GROUP`.
@@ -131,7 +111,7 @@ impl ZoneHandler for ForwardAuthority {
         let span = tracing::info_span!(
             "dns.forward",
             otel.kind = "client",
-            "dns.question.name" = %name_str,
+            "dns.question.name" = %name,
             "dns.question.type" = tracing::field::display(rtype),
             "dns.upstream.count" = self.upstream_count as u64,
             "dns.answers" = tracing::field::Empty,
@@ -149,7 +129,7 @@ impl ZoneHandler for ForwardAuthority {
                 span.record("otel.status_code", "OK");
                 if answers == 0 {
                     tracing::debug!(
-                        query = %name_str,
+                        query = %name,
                         qtype = ?rtype,
                         "upstream returned an empty answer"
                     );
@@ -167,7 +147,7 @@ impl ZoneHandler for ForwardAuthority {
                 span.record("otel.status_code", if negative { "OK" } else { "ERROR" });
                 if negative {
                     tracing::debug!(
-                        query = %name_str,
+                        query = %name,
                         qtype = ?rtype,
                         response_code = ?response_code,
                         detail = %e,
@@ -175,7 +155,7 @@ impl ZoneHandler for ForwardAuthority {
                     );
                 } else {
                     tracing::warn!(
-                        query = %name_str,
+                        query = %name,
                         qtype = ?rtype,
                         response_code = ?response_code,
                         error = %e,

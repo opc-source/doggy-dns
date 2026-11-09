@@ -36,7 +36,7 @@ async fn chain_nacos_hit() {
     ));
     let forward = Arc::new(
         ForwardAuthority::new(
-            vec!["8.8.8.8:53".to_string()],
+            vec!["8.8.8.8:53".parse().expect("valid upstream")],
             256,
             Duration::from_secs(30),
             Duration::from_secs(600),
@@ -70,7 +70,7 @@ async fn chain_outside_nacos_zone_falls_to_forward() {
     ));
     let forward = Arc::new(
         ForwardAuthority::new(
-            vec!["8.8.8.8:53".to_string()],
+            vec!["8.8.8.8:53".parse().expect("valid upstream")],
             256,
             Duration::from_secs(30),
             Duration::from_secs(600),
@@ -106,7 +106,7 @@ async fn chain_unknown_service_in_nacos_zone_does_not_fall_to_forward() {
     ));
     let forward = Arc::new(
         ForwardAuthority::new(
-            vec!["8.8.8.8:53".to_string()],
+            vec!["8.8.8.8:53".parse().expect("valid upstream")],
             256,
             Duration::from_secs(30),
             Duration::from_secs(600),
