@@ -60,13 +60,14 @@ the TTL are answered by the kernel. The sequence diagram below shows both paths.
         +======================================================================+
         | INGRESS on <iface>   (XDP_DEFAULT hook; UDP traffic only)            |
         |                                                                      |
-        |   1  eth / IPv4 / UDP?                     no -> XDP_PASS            |
+        |   1  eth / IPv4 / UDP, no fragment?        no -> XDP_PASS            |
         |   2  dport == XDP_CONFIG.dns_port?         no -> XDP_PASS            |
         |   3  QR=0 and QDCOUNT=1?                   no -> XDP_PASS            |
         |   4  FNV-1a over qname wire bytes, 8 per round; qtype|qclass packed  |
         |   5  DNS_CACHE.get(key)      miss/expired -> XDP_PASS (counted)      |
         |   6  bpf_xdp_adjust_tail, then:                                      |
-        |         positive hit : copy cached reply (<= 512 B), patch TXID      |
+        |         positive hit : cached header words + tail after the live     |
+        |                        question (<= 512 B); TXID and QNAME kept      |
         |         negative hit : synthesise the NXDOMAIN header                |
         |         pre-resize failure  -> XDP_PASS                              |
         |         post-resize failure -> XDP_DROP (query already rewritten)    |
@@ -127,15 +128,21 @@ diagram leaves out:
   contains the root label's terminator is masked down to the bytes before it.
   Frames with fewer than eight bytes left fall back to a byte-at-a-time path
   that assembles the same word.
+- A fragmented IPv4 datagram is passed untouched: non-first fragments carry no
+  UDP header, and answering a first fragment would reply with the MF/offset
+  bits still set.
 - Freshness uses `expires_at` against `bpf_ktime_get_ns`, the same monotonic
   clock userspace timestamps with.
-- Positive replies are copied in 16-byte chunks (two `u64` moves) with a length
-  and bounds check per chunk, capped at 512 bytes, with the transaction ID
-  overwritten by the current query's. The chunking relies on a cached positive
-  reply being at least 17 bytes — header, a one-byte QNAME and QTYPE/QCLASS —
-  so a full chunk is always readable at offset zero even when the length is not
-  a multiple of 16; shorter or longer-than-512 lengths are rejected with a
-  warning and the query is passed.
+- Positive replies keep the incoming query's transaction ID and question
+  untouched — the question's case included — and overwrite the cached header
+  words at offsets 2..12. The tail is copied from the cached reply at
+  `12 + question_len` through `resp_len` in 16-byte chunks (two `u64` moves)
+  with a length and bounds check per chunk, capped at 512 bytes. A NODATA
+  positive ends exactly at the question, so it has no tail. A cached reply
+  shorter than the live question can only be another name's entry under a hash
+  collision — copying it would leave `QDCOUNT=1` above a truncated question —
+  so it is rejected with a warning and the query is passed, as is any length
+  outside [17, 512].
 - Header rewrite swaps the MAC, IP addresses and ports with `u32`/`u16` moves
   (the 6-byte MAC takes one `u32` and one `u16`), fixes IP total length and UDP
   length, and updates the IPv4 checksum incrementally (RFC 1624).

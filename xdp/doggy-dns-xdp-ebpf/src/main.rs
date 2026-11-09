@@ -208,11 +208,20 @@ fn try_dns_xdp(ctx: &XdpContext) -> Result<(u32, Option<Outcome>), ()> {
     } else {
         // The duplicate bound inside `write_positive` exists for the verifier
         // and stays silent; this is the diagnostic site for a poisoned entry.
-        if resp_len < MIN_POSITIVE_LEN || resp_len > MAX_RESPONSE_SIZE {
+        //
+        // A cached reply shorter than this query's own question can only come
+        // from another name's entry under a hash collision: copying it would
+        // leave QDCOUNT=1 above a truncated question. Treat it like the other
+        // poisoned lengths and let userspace answer.
+        if resp_len < MIN_POSITIVE_LEN
+            || resp_len > MAX_RESPONSE_SIZE
+            || resp_len < DNS_HDR_LEN + question_len
+        {
             warn!(
                 ctx,
-                "cached response length out of range: {} (txid {:x}, hash {:x})",
+                "cached response length out of range: {} for question length {} (txid {:x}, hash {:x})",
                 resp_len as u64,
+                question_len as u64,
                 txid as u64,
                 name_hash
             );
