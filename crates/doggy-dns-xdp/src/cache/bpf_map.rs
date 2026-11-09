@@ -5,6 +5,7 @@
 
 use anyhow::Result;
 use aya::maps::{HashMap, IterableMap, Map, MapData, MapType};
+use std::os::fd::AsFd;
 
 use crate::pin::PinnedCacheShape;
 use crate::types::{CacheKey, CacheValue};
@@ -29,6 +30,19 @@ impl DnsCacheMap {
     pub fn insert(&mut self, key: &CacheKey, value: &CacheValue) -> Result<()> {
         self.inner.insert(key, value, 0)?;
         Ok(())
+    }
+
+    /// Duplicate the handle so a second thread can write through it.
+    ///
+    /// The duplicate is a second file descriptor on the same kernel map, not a
+    /// second map: an entry written through it is visible through this handle
+    /// and through the XDP program. `aya` exposes no `Map::try_clone`, so this
+    /// goes through the descriptor it does expose: `MapData::fd()` returns a
+    /// `MapFd`, duplicating that descriptor and wrapping it again yields an
+    /// independent handle with no shared mutability.
+    pub fn try_clone(&self) -> Result<Self> {
+        let fd = self.inner.map().fd().as_fd().try_clone_to_owned()?;
+        Self::from_map(Map::from_map_data(MapData::from_fd(fd)?)?)
     }
 
     /// Look up a cache entry by key. Returns `None` if not found.
