@@ -67,7 +67,10 @@ jobs:
       - name: Report script tests
         run: python3 scripts/test_xdp_stress_report.py -v
       - name: Install dnsperf
-        run: sudo apt-get update && sudo apt-get install -y dnsperf
+        uses: ./.github/actions/dnsperf-run
+        with:
+          install: true
+          run: false
       - name: Generate query file
         run: |
           for i in $(seq 1 1000); do
@@ -115,20 +118,32 @@ jobs:
       # measures the runner's log pipe. The nacos scenario is deliberately
       # absent: the server aborts boot when Nacos is unreachable, so a live
       # Nacos would be a job dependency rather than a config file.
-      - name: End-to-end stress (userspace path)
+      # The server outlives its step now that the dnsperf passes are a separate
+      # composite-action step, so its output goes to a file: a background child
+      # holding the step's stdout pipe would keep the step from finishing.
+      - name: Build and start server (userspace path)
         run: |
           cargo build --release
-          RUST_LOG=warn ./target/release/doggy-dns config/doggy-dns-stress.toml &
+          RUST_LOG=warn ./target/release/doggy-dns config/doggy-dns-stress.toml > /tmp/e2e-server.log 2>&1 &
           echo $! > /tmp/server.pid
           sleep 2
-          dnsperf -s 127.0.0.1 -p 5353 -d /tmp/queries.txt -n 1 -l 5 > /dev/null 2>&1 || true
-          # `-n 100000` rather than `-n 10` so the `-l 30` wall-clock limit is
-          # what ends the run: 10 cycles of a 1000-name file finish in a quarter
-          # of a second on this transport (~40k QPS), which measured a startup
-          # burst instead of steady state. Same window as the XDP stress job, so
-          # the two reports are comparable.
-          dnsperf -s 127.0.0.1 -p 5353 -d /tmp/queries.txt -n 100000 -T 4 -l 30 > /tmp/e2e-result.txt 2>&1 || true
-          kill $(cat /tmp/server.pid) 2>/dev/null || echo "server had already exited"
+      # `-n 100000` rather than `-n 10` so the `-l 30` wall-clock limit is
+      # what ends the run: 10 cycles of a 1000-name file finish in a quarter
+      # of a second on this transport (~40k QPS), which measured a startup
+      # burst instead of steady state. Same window as the XDP stress job, so
+      # the two reports are comparable.
+      - name: Run dnsperf (end-to-end)
+        uses: ./.github/actions/dnsperf-run
+        with:
+          install: false
+          output: /tmp/e2e-result.txt
+          count: 100000
+          threads: 4
+          duration: 30
+          port: 5353
+          queries-file: /tmp/queries.txt
+      - name: Stop server
+        run: kill $(cat /tmp/server.pid) 2>/dev/null || echo "server had already exited"
       - name: Generate report
         run: |
           python3 scripts/xdp_stress_report.py --single /tmp/e2e-result.txt > /tmp/e2e-report.md \
@@ -156,28 +171,43 @@ jobs:
               echo '```'
             fi
           } >> "$GITHUB_STEP_SUMMARY"
+          if [ -f /tmp/e2e-server.log ]; then
+            {
+              echo '### Server log (end-to-end arm)'
+              echo '```'
+              tail -n 50 /tmp/e2e-server.log
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+      # Assembles the body the old inline template built. Both files can
+      # legitimately be absent: an earlier step may have produced nothing, and
+      # this is a report-only job. Reading them unguarded would turn a missing
+      # artefact into a red check.
+      - name: Assemble PR comment body
+        if: |
+          github.event_name == 'pull_request' &&
+          github.event.pull_request.head.repo.full_name == github.repository
+        run: |
+          {
+            if [ -f /tmp/e2e-report.md ]; then
+              cat /tmp/e2e-report.md
+            else
+              printf '_/tmp/e2e-report.md was not produced by this run_\n'
+            fi
+            printf '\n## Component Benchmarks (PR vs main)\n\n```\n'
+            if [ -f /tmp/bench-pr.txt ]; then
+              cat /tmp/bench-pr.txt
+            else
+              printf '_/tmp/bench-pr.txt was not produced by this run_\n'
+            fi
+            printf '\n```\n'
+          } > /tmp/comment-body.md
       # A push to main has no issue/PR to comment on, and fork PRs get a
       # read-only token, so only same-repo PRs can be commented on.
       - name: Post PR comment
         if: |
           github.event_name == 'pull_request' &&
           github.event.pull_request.head.repo.full_name == github.repository
-        uses: actions/github-script@v7
+        uses: ./.github/actions/pr-comment
         with:
-          script: |
-            const fs = require('fs');
-            // Both files can legitimately be absent: an earlier step may have
-            // produced nothing, and this is a report-only job. Reading them
-            // unguarded would turn a missing artefact into a red check.
-            const read = (p) => fs.existsSync(p)
-              ? fs.readFileSync(p, 'utf8')
-              : `_${p} was not produced by this run_\n`;
-            const report = read('/tmp/e2e-report.md');
-            const pr = read('/tmp/bench-pr.txt');
-            const body = `${report}\n## Component Benchmarks (PR vs main)\n\n\`\`\`\n${pr}\n\`\`\`\n`;
-            github.rest.issues.createComment({
-              issue_number: context.issue.number,
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              body
-            });
+          body-file: /tmp/comment-body.md

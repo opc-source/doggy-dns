@@ -1,0 +1,76 @@
+name: dnsperf run
+description: >-
+  Install dnsperf (optional) and run the warmup plus measured dnsperf passes
+  shared by the XDP stress job and the Rust performance job. Server start/kill
+  and query-file generation stay at the call site (they differ per site, and the
+  caller may prefix dnsperf with sudo). The measured pass keeps its output for
+  the caller's report script.
+
+  Flag rationale lives next to each call site: `-n` cycles the input at most N
+  times, `-l` caps wall clock, and whichever binds first ends the run; `|| true`
+  keeps a dnsperf failure from turning a report-only job red.
+inputs:
+  install:
+    description: apt-get install dnsperf before anything else.
+    required: false
+    default: "true"
+  run:
+    description: Run the warmup and measured dnsperf passes.
+    required: false
+    default: "true"
+  output:
+    description: File that receives the measured run's stdout and stderr. Required when run is true.
+    required: false
+    default: ""
+  sudo:
+    description: Prefix dnsperf with sudo (the XDP arm runs its server as root).
+    required: false
+    default: "false"
+  count:
+    description: "`-n`: maximum cycles over the query file."
+    required: false
+    default: "100000"
+  threads:
+    description: "`-T`: dnsperf client threads."
+    required: false
+    default: "4"
+  duration:
+    description: "`-l`: wall-clock limit in seconds."
+    required: false
+    default: "30"
+  port:
+    description: "`-p`: server port."
+    required: false
+    default: "5353"
+  queries-file:
+    description: "`-d`: query file the caller generated."
+    required: false
+    default: /tmp/queries.txt
+runs:
+  using: composite
+  steps:
+    - name: Install dnsperf
+      if: inputs.install == 'true'
+      shell: bash
+      run: sudo apt-get update && sudo apt-get install -y dnsperf
+    - name: Check inputs
+      if: inputs.run == 'true'
+      shell: bash
+      env:
+        DNS_PERF_OUTPUT: ${{ inputs.output }}
+      run: |
+        if [ -z "$DNS_PERF_OUTPUT" ]; then
+          echo "::error::dnsperf-run: output is required when run is true"; exit 1
+        fi
+    - name: Warm up
+      if: inputs.run == 'true'
+      shell: bash
+      env:
+        DNS_PERF_SUDO: ${{ inputs.sudo == 'true' && 'sudo' || '' }}
+      run: $DNS_PERF_SUDO dnsperf -s 127.0.0.1 -p ${{ inputs.port }} -d ${{ inputs.queries-file }} -n 1 -l 5 > /dev/null 2>&1 || true
+    - name: Measure
+      if: inputs.run == 'true'
+      shell: bash
+      env:
+        DNS_PERF_SUDO: ${{ inputs.sudo == 'true' && 'sudo' || '' }}
+      run: $DNS_PERF_SUDO dnsperf -s 127.0.0.1 -p ${{ inputs.port }} -d ${{ inputs.queries-file }} -n ${{ inputs.count }} -T ${{ inputs.threads }} -l ${{ inputs.duration }} > ${{ inputs.output }} 2>&1 || true
