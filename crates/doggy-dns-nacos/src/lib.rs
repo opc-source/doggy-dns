@@ -4,5 +4,6 @@ pub mod config_watcher;
 mod filter;
 mod instances;
 pub mod mapping;
-mod test_support;
+#[doc(hidden)]
+pub mod test_support;
 pub mod watcher;

@@ -2,6 +2,7 @@
 
 use dashmap::DashMap;
 use doggy_dns_nacos::authority::{CatalogAnswer, NacosAuthority, ServiceCatalog};
+use doggy_dns_nacos::test_support::{instances, qname};
 use doggy_dns_nacos::watcher::CachedInstance;
 use doggy_dns_plugin::authority_chain::AuthorityChain;
 use hickory_proto::op::ResponseCode;
@@ -402,14 +403,6 @@ impl ServiceCatalog for FakeCatalog {
     }
 }
 
-fn one_instance(ip: &str) -> Vec<CachedInstance> {
-    vec![CachedInstance {
-        ip: ip.parse().expect("test address"),
-        port: 8080,
-        healthy: true,
-    }]
-}
-
 fn catalog_authority(
     answer: Option<Vec<CachedInstance>>,
 ) -> (NacosAuthority<FakeCatalog>, Arc<FakeCatalog>) {
@@ -430,16 +423,12 @@ fn unavailable_catalog_authority() -> (NacosAuthority<FakeCatalog>, Arc<FakeCata
     (authority, catalog)
 }
 
-fn qname(text: &str) -> LowerName {
-    LowerName::from(Name::from_str(text).expect("valid name"))
-}
-
 /// The authority keeps no copy of the instance list: both queries for the same
 /// name read the catalog, so a deletion the client has already absorbed cannot
 /// be answered from a stale second copy.
 #[tokio::test]
 async fn every_in_zone_address_query_is_answered_from_the_catalog() {
-    let (authority, catalog) = catalog_authority(Some(one_instance("10.9.9.9")));
+    let (authority, catalog) = catalog_authority(Some(instances(&["10.9.9.9"])));
 
     for _ in 0..2 {
         let result = authority
@@ -473,7 +462,7 @@ async fn every_in_zone_address_query_is_answered_from_the_catalog() {
 /// are known, so it belongs to the authority rather than the catalog behind it.
 #[tokio::test]
 async fn a_name_outside_the_configured_group_is_nxdomain_without_reading_the_catalog() {
-    let (authority, catalog) = catalog_authority(Some(one_instance("10.8.8.8")));
+    let (authority, catalog) = catalog_authority(Some(instances(&["10.8.8.8"])));
 
     let result = authority
         .lookup(
@@ -500,7 +489,7 @@ async fn a_name_outside_the_configured_group_is_nxdomain_without_reading_the_cat
 
 #[tokio::test]
 async fn a_name_outside_the_configured_namespace_is_nxdomain_without_reading_the_catalog() {
-    let (authority, catalog) = catalog_authority(Some(one_instance("10.8.8.8")));
+    let (authority, catalog) = catalog_authority(Some(instances(&["10.8.8.8"])));
 
     let result = authority
         .lookup(
@@ -530,7 +519,7 @@ async fn a_name_outside_the_configured_namespace_is_nxdomain_without_reading_the
 /// a legitimate query must still resolve.
 #[tokio::test]
 async fn the_configured_group_matches_a_case_folded_label() {
-    let (authority, catalog) = catalog_authority(Some(one_instance("10.7.7.7")));
+    let (authority, catalog) = catalog_authority(Some(instances(&["10.7.7.7"])));
 
     let result = authority
         .lookup(
@@ -628,7 +617,7 @@ async fn a_catalog_answer_with_no_usable_instance_is_nodata() {
 /// two must answer NODATA and NXDOMAIN respectively.
 #[tokio::test]
 async fn non_address_queries_consult_the_catalog_and_answer_nodata() {
-    let (authority, catalog) = catalog_authority(Some(one_instance("10.9.9.9")));
+    let (authority, catalog) = catalog_authority(Some(instances(&["10.9.9.9"])));
 
     let result = authority
         .lookup(
@@ -673,7 +662,7 @@ async fn non_address_queries_without_a_catalog_answer_are_nxdomain() {
 
 #[tokio::test]
 async fn names_outside_the_zone_never_consult_the_catalog() {
-    let (authority, catalog) = catalog_authority(Some(one_instance("10.9.9.9")));
+    let (authority, catalog) = catalog_authority(Some(instances(&["10.9.9.9"])));
 
     let result = authority
         .lookup(
@@ -694,7 +683,7 @@ async fn names_outside_the_zone_never_consult_the_catalog() {
 
 #[tokio::test]
 async fn the_zone_apex_never_consults_the_catalog() {
-    let (authority, catalog) = catalog_authority(Some(one_instance("10.9.9.9")));
+    let (authority, catalog) = catalog_authority(Some(instances(&["10.9.9.9"])));
 
     let result = authority
         .lookup(
@@ -711,7 +700,7 @@ async fn the_zone_apex_never_consults_the_catalog() {
 
 #[tokio::test]
 async fn a_name_without_group_and_namespace_labels_never_consults_the_catalog() {
-    let (authority, catalog) = catalog_authority(Some(one_instance("10.9.9.9")));
+    let (authority, catalog) = catalog_authority(Some(instances(&["10.9.9.9"])));
 
     let result = authority
         .lookup(

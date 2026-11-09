@@ -51,6 +51,7 @@ doggy-dns (binary)
   │     └── doggy-dns-basic
   ├── doggy-dns-basic           (TOML config types, load & validate, wall-clock helpers — serde/toml/anyhow only)
   ├── doggy-dns-plugin          (traits, authority chain, built-in authorities — leaf crate)
+  ├── doggy-dns-testutil        (dev-only: wire builder, capturing response handler, zone mocks; publish = false, no crate depends on it in a product build)
   └── doggy-dns-xdp (optional, feature = "xdp")
         ├── doggy-dns-basic
         ├── doggy-dns-plugin

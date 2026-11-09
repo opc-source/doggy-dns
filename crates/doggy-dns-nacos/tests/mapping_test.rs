@@ -1,7 +1,7 @@
 #![allow(clippy::disallowed_methods)]
 
 use doggy_dns_nacos::mapping::{service_name_from_name, to_dns_records};
-use doggy_dns_nacos::watcher::CachedInstance;
+use doggy_dns_nacos::test_support::{instances, qname};
 use hickory_proto::rr::{LowerName, Name, Record, RecordType};
 use std::str::FromStr;
 
@@ -14,13 +14,9 @@ fn zone() -> Name {
     Name::from_str("nacos.local").unwrap()
 }
 
-fn lower(name: &str) -> LowerName {
-    LowerName::from(Name::from_str(name).unwrap())
-}
-
 /// The service name a name maps to under the configured pair.
 fn service_of(text: &str) -> Option<String> {
-    service_name_from_name(&lower(text), &zone(), GROUP, NAMESPACE).map(String::from)
+    service_name_from_name(&qname(text), &zone(), GROUP, NAMESPACE).map(String::from)
 }
 
 #[test]
@@ -53,7 +49,7 @@ fn service_name_does_not_check_zone_membership() {
     // service name a legitimate in-zone name would. That aliasing is exactly why
     // `NacosAuthority::lookup` must call `zone_of` first; `skips_sibling_zone_
     // with_shared_suffix` in `authority_test.rs` is the guard for that order.
-    let sibling = lower("user-service.default_group.public.evilnacos.local.");
+    let sibling = qname("user-service.default_group.public.evilnacos.local.");
     assert_eq!(
         service_name_from_name(&sibling, &zone(), GROUP, NAMESPACE).map(String::from),
         Some("user-service".to_string())
@@ -108,16 +104,6 @@ fn service_name_rejects_a_dot_inside_one_label() {
     assert!(service_of("com\\.example\\.api.DEFAULT_GROUP.public.nacos.local.").is_none());
 }
 
-fn instances(ips: &[&str]) -> Vec<CachedInstance> {
-    ips.iter()
-        .map(|ip| CachedInstance {
-            ip: ip.parse().unwrap(),
-            port: 8080,
-            healthy: true,
-        })
-        .collect()
-}
-
 /// Every record must carry the name it was asked for, case-folded.
 ///
 /// The wire bytes of a nacos hit already pin this for the one-name case
@@ -137,7 +123,7 @@ fn assert_records_named(records: &[Record], name: &LowerName) {
 
 #[test]
 fn to_dns_records_creates_a_records() {
-    let name = lower("user-service.DEFAULT_GROUP.public.nacos.local.");
+    let name = qname("user-service.DEFAULT_GROUP.public.nacos.local.");
     let records = to_dns_records(
         &name,
         &instances(&["10.0.1.5", "10.0.1.6"]),
@@ -155,7 +141,7 @@ fn to_dns_records_creates_a_records() {
 
 #[test]
 fn to_dns_records_handles_ipv6() {
-    let name = lower("svc.DEFAULT_GROUP.public.nacos.local.");
+    let name = qname("svc.DEFAULT_GROUP.public.nacos.local.");
     let records = to_dns_records(&name, &instances(&["::1"]), 6, RecordType::AAAA);
 
     assert_eq!(records.len(), 1);
@@ -165,7 +151,7 @@ fn to_dns_records_handles_ipv6() {
 
 #[test]
 fn to_dns_records_filters_a_records_for_a_query() {
-    let name = lower("svc.DEFAULT_GROUP.public.nacos.local.");
+    let name = qname("svc.DEFAULT_GROUP.public.nacos.local.");
     let records = to_dns_records(
         &name,
         &instances(&["10.0.1.5", "2001:db8::1"]),
@@ -180,7 +166,7 @@ fn to_dns_records_filters_a_records_for_a_query() {
 
 #[test]
 fn to_dns_records_filters_aaaa_records_for_aaaa_query() {
-    let name = lower("svc.DEFAULT_GROUP.public.nacos.local.");
+    let name = qname("svc.DEFAULT_GROUP.public.nacos.local.");
     let records = to_dns_records(
         &name,
         &instances(&["10.0.1.5", "2001:db8::1"]),
@@ -197,7 +183,7 @@ fn to_dns_records_filters_aaaa_records_for_aaaa_query() {
 /// depends on it, so pin it down before anything can reorder.
 #[test]
 fn to_dns_records_preserves_instance_order() {
-    let name = lower("svc.DEFAULT_GROUP.public.nacos.local.");
+    let name = qname("svc.DEFAULT_GROUP.public.nacos.local.");
     let records = to_dns_records(
         &name,
         &instances(&["10.0.1.5", "10.0.1.6", "10.0.1.7"]),

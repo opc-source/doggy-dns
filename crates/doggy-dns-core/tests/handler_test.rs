@@ -10,15 +10,14 @@ use doggy_dns_nacos::authority::NacosAuthority;
 use doggy_dns_nacos::watcher::CachedInstance;
 use doggy_dns_plugin::authority_chain::AuthorityChain;
 use doggy_dns_plugin::{Middleware, MiddlewareAction, RequestOutcome};
+use doggy_dns_testutil::{CapturingHandler, MockZoneHandler};
 use hickory_proto::op::{Edns, Message, ResponseCode};
 use hickory_proto::rr::rdata::A;
 use hickory_proto::rr::{Name, RData, Record, RecordType};
-use hickory_proto::serialize::binary::BinEncoder;
-use hickory_server::net::NetError;
 use hickory_server::net::runtime::TokioTime;
-use hickory_server::server::{Request, RequestHandler, ResponseHandler, ResponseInfo};
+use hickory_server::server::{Request, RequestHandler};
 use hickory_server::zone_handler::{
-    AuthLookup, LookupControlFlow, LookupError, LookupOptions, MessageResponse, ZoneHandler,
+    AuthLookup, LookupControlFlow, LookupError, LookupOptions, LookupRecords, ZoneType,
 };
 use std::net::Ipv4Addr;
 use std::str::FromStr;
@@ -35,179 +34,6 @@ fn make_edns_dns_request(domain: &str, rtype: RecordType, max_payload: u16) -> R
     let mut edns = Edns::new();
     edns.set_max_payload(max_payload);
     dns_request(1234, domain, rtype, Some(edns))
-}
-
-/// Mock ResponseHandler that serializes the response so tests can inspect
-/// header flags and record sections.
-#[derive(Clone)]
-struct MockResponseHandler {
-    last_response_code: Arc<std::sync::Mutex<Option<ResponseCode>>>,
-    last_message: Arc<std::sync::Mutex<Option<Message>>>,
-}
-
-impl MockResponseHandler {
-    fn new() -> Self {
-        Self {
-            last_response_code: Arc::new(std::sync::Mutex::new(None)),
-            last_message: Arc::new(std::sync::Mutex::new(None)),
-        }
-    }
-
-    fn response_code(&self) -> Option<ResponseCode> {
-        *self.last_response_code.lock().unwrap()
-    }
-
-    fn message(&self) -> Option<Message> {
-        self.last_message.lock().unwrap().clone()
-    }
-}
-
-#[async_trait]
-impl ResponseHandler for MockResponseHandler {
-    async fn send_response<'a>(
-        &mut self,
-        response: MessageResponse<
-            '_,
-            'a,
-            impl Iterator<Item = &'a Record> + Send + 'a,
-            impl Iterator<Item = &'a Record> + Send + 'a,
-            impl Iterator<Item = &'a Record> + Send + 'a,
-            impl Iterator<Item = &'a Record> + Send + 'a,
-        >,
-    ) -> Result<ResponseInfo, NetError> {
-        let mut bytes = Vec::new();
-        let mut encoder = BinEncoder::new(&mut bytes);
-        encoder.set_max_size(u16::MAX);
-        let info = response
-            .destructive_emit(&mut encoder)
-            .expect("serialize test response");
-        let message = Message::from_vec(&bytes).expect("parse serialized test response");
-        *self.last_response_code.lock().unwrap() = Some(message.metadata.response_code);
-        *self.last_message.lock().unwrap() = Some(message);
-        Ok(info)
-    }
-}
-
-/// A ZoneHandler that always returns Continue(Err(...)) for error path testing.
-struct ErrorZoneHandler;
-
-#[async_trait]
-impl ZoneHandler for ErrorZoneHandler {
-    fn zone_type(&self) -> hickory_server::zone_handler::ZoneType {
-        hickory_server::zone_handler::ZoneType::Primary
-    }
-
-    fn axfr_policy(&self) -> hickory_server::zone_handler::AxfrPolicy {
-        hickory_server::zone_handler::AxfrPolicy::Deny
-    }
-
-    fn origin(&self) -> &hickory_proto::rr::LowerName {
-        static ORIGIN: std::sync::LazyLock<hickory_proto::rr::LowerName> =
-            std::sync::LazyLock::new(|| {
-                hickory_proto::rr::LowerName::from(Name::from_str("error.local.").unwrap())
-            });
-        &ORIGIN
-    }
-
-    async fn lookup(
-        &self,
-        _name: &hickory_proto::rr::LowerName,
-        _rtype: RecordType,
-        _request_info: Option<&hickory_server::server::RequestInfo<'_>>,
-        _lookup_options: LookupOptions,
-    ) -> LookupControlFlow<AuthLookup> {
-        LookupControlFlow::Continue(Err(
-            hickory_server::zone_handler::LookupError::ResponseCode(ResponseCode::ServFail),
-        ))
-    }
-
-    async fn search(
-        &self,
-        _request: &Request,
-        _lookup_options: LookupOptions,
-    ) -> (
-        LookupControlFlow<AuthLookup>,
-        Option<hickory_proto::rr::TSigResponseContext>,
-    ) {
-        (LookupControlFlow::Skip, None)
-    }
-
-    async fn nsec_records(
-        &self,
-        _name: &hickory_proto::rr::LowerName,
-        _lookup_options: LookupOptions,
-    ) -> LookupControlFlow<AuthLookup> {
-        LookupControlFlow::Skip
-    }
-}
-
-/// A ZoneHandler that returns a specific authoritative negative result.
-struct LookupErrorZoneHandler {
-    kind: ExpectedLookupError,
-}
-
-#[derive(Clone, Copy)]
-enum ExpectedLookupError {
-    NxDomain,
-    NameExists,
-}
-
-impl LookupErrorZoneHandler {
-    fn new(kind: ExpectedLookupError) -> Self {
-        Self { kind }
-    }
-}
-
-#[async_trait]
-impl ZoneHandler for LookupErrorZoneHandler {
-    fn zone_type(&self) -> hickory_server::zone_handler::ZoneType {
-        hickory_server::zone_handler::ZoneType::Primary
-    }
-
-    fn axfr_policy(&self) -> hickory_server::zone_handler::AxfrPolicy {
-        hickory_server::zone_handler::AxfrPolicy::Deny
-    }
-
-    fn origin(&self) -> &hickory_proto::rr::LowerName {
-        static ORIGIN: std::sync::LazyLock<hickory_proto::rr::LowerName> =
-            std::sync::LazyLock::new(|| {
-                hickory_proto::rr::LowerName::from(Name::from_str("nacos.local.").unwrap())
-            });
-        &ORIGIN
-    }
-
-    async fn lookup(
-        &self,
-        _name: &hickory_proto::rr::LowerName,
-        _rtype: RecordType,
-        _request_info: Option<&hickory_server::server::RequestInfo<'_>>,
-        _lookup_options: LookupOptions,
-    ) -> LookupControlFlow<AuthLookup> {
-        let error = match self.kind {
-            ExpectedLookupError::NxDomain => LookupError::ResponseCode(ResponseCode::NXDomain),
-            ExpectedLookupError::NameExists => LookupError::NameExists,
-        };
-        LookupControlFlow::Continue(Err(error))
-    }
-
-    async fn search(
-        &self,
-        _request: &Request,
-        _lookup_options: LookupOptions,
-    ) -> (
-        LookupControlFlow<AuthLookup>,
-        Option<hickory_proto::rr::TSigResponseContext>,
-    ) {
-        (LookupControlFlow::Skip, None)
-    }
-
-    async fn nsec_records(
-        &self,
-        _name: &hickory_proto::rr::LowerName,
-        _lookup_options: LookupOptions,
-    ) -> LookupControlFlow<AuthLookup> {
-        LookupControlFlow::Skip
-    }
 }
 
 /// A middleware that always short-circuits.
@@ -301,7 +127,7 @@ async fn handler_resolves_query_returns_no_error() {
     let handler = DoggyDnsHandler::new(vec![], Arc::new(chain), false, AnswerRotation::new(false));
 
     let request = make_dns_request("my-svc.DEFAULT_GROUP.public.nacos.local.", RecordType::A);
-    let mock = MockResponseHandler::new();
+    let mock = CapturingHandler::new();
     let _info = handler
         .handle_request::<_, TokioTime>(&request, mock.clone())
         .await;
@@ -315,7 +141,7 @@ async fn handler_all_skip_returns_nxdomain() {
     let handler = DoggyDnsHandler::new(vec![], Arc::new(chain), false, AnswerRotation::new(false));
 
     let request = make_dns_request("unknown.example.com.", RecordType::A);
-    let mock = MockResponseHandler::new();
+    let mock = CapturingHandler::new();
     let _info = handler
         .handle_request::<_, TokioTime>(&request, mock.clone())
         .await;
@@ -325,11 +151,20 @@ async fn handler_all_skip_returns_nxdomain() {
 
 #[tokio::test]
 async fn handler_authority_error_returns_servfail() {
-    let chain = AuthorityChain::new(vec![("error".to_string(), Arc::new(ErrorZoneHandler))]);
+    let chain = AuthorityChain::new(vec![(
+        "error".to_string(),
+        Arc::new(MockZoneHandler::new(
+            ZoneType::Primary,
+            "error.local.",
+            |_, _, _, _| {
+                LookupControlFlow::Continue(Err(LookupError::ResponseCode(ResponseCode::ServFail)))
+            },
+        )),
+    )]);
     let handler = DoggyDnsHandler::new(vec![], Arc::new(chain), false, AnswerRotation::new(false));
 
     let request = make_dns_request("anything.example.com.", RecordType::A);
-    let mock = MockResponseHandler::new();
+    let mock = CapturingHandler::new();
     let _info = handler
         .handle_request::<_, TokioTime>(&request, mock.clone())
         .await;
@@ -349,7 +184,7 @@ async fn handler_middleware_short_circuit_returns_refused() {
     );
 
     let request = make_dns_request("example.com.", RecordType::A);
-    let mock = MockResponseHandler::new();
+    let mock = CapturingHandler::new();
     let _info = handler
         .handle_request::<_, TokioTime>(&request, mock.clone())
         .await;
@@ -369,7 +204,7 @@ async fn handler_after_request_called_on_short_circuit() {
     );
 
     let request = make_dns_request("example.com.", RecordType::A);
-    let mock = MockResponseHandler::new();
+    let mock = CapturingHandler::new();
     let _info = handler
         .handle_request::<_, TokioTime>(&request, mock.clone())
         .await;
@@ -385,7 +220,7 @@ async fn handler_no_middlewares_resolves_normally() {
     let handler = DoggyDnsHandler::new(vec![], Arc::new(chain), false, AnswerRotation::new(false));
 
     let request = make_dns_request("my-svc.DEFAULT_GROUP.public.nacos.local.", RecordType::A);
-    let mock = MockResponseHandler::new();
+    let mock = CapturingHandler::new();
     let _info = handler
         .handle_request::<_, TokioTime>(&request, mock.clone())
         .await;
@@ -414,7 +249,7 @@ async fn handler_edns_query_caches_small_response() {
         RecordType::A,
         1232,
     );
-    let mock = MockResponseHandler::new();
+    let mock = CapturingHandler::new();
     let _info = handler
         .handle_request::<_, TokioTime>(&request, mock.clone())
         .await;
@@ -449,7 +284,7 @@ async fn handler_oversized_response_is_not_cached() {
         RecordType::A,
         1232,
     );
-    let mock = MockResponseHandler::new();
+    let mock = CapturingHandler::new();
     let _info = handler
         .handle_request::<_, TokioTime>(&request, mock.clone())
         .await;
@@ -481,7 +316,7 @@ async fn handler_truncated_response_is_not_cached() {
         RecordType::A,
         512,
     );
-    let mock = MockResponseHandler::new();
+    let mock = CapturingHandler::new();
     let _info = handler
         .handle_request::<_, TokioTime>(&request, mock.clone())
         .await;
@@ -498,12 +333,18 @@ async fn handler_truncated_response_is_not_cached() {
 async fn handler_authority_nxdomain_maps_to_nxdomain() {
     let chain = AuthorityChain::new(vec![(
         "nacos".to_string(),
-        Arc::new(LookupErrorZoneHandler::new(ExpectedLookupError::NxDomain)),
+        Arc::new(MockZoneHandler::new(
+            ZoneType::Primary,
+            "nacos.local.",
+            |_, _, _, _| {
+                LookupControlFlow::Continue(Err(LookupError::ResponseCode(ResponseCode::NXDomain)))
+            },
+        )),
     )]);
     let handler = DoggyDnsHandler::new(vec![], Arc::new(chain), false, AnswerRotation::new(false));
 
     let request = make_dns_request("missing.DEFAULT_GROUP.public.nacos.local.", RecordType::A);
-    let mock = MockResponseHandler::new();
+    let mock = CapturingHandler::new();
     let _info = handler
         .handle_request::<_, TokioTime>(&request, mock.clone())
         .await;
@@ -515,12 +356,16 @@ async fn handler_authority_nxdomain_maps_to_nxdomain() {
 async fn handler_authority_name_exists_returns_nodata() {
     let chain = AuthorityChain::new(vec![(
         "nacos".to_string(),
-        Arc::new(LookupErrorZoneHandler::new(ExpectedLookupError::NameExists)),
+        Arc::new(MockZoneHandler::new(
+            ZoneType::Primary,
+            "nacos.local.",
+            |_, _, _, _| LookupControlFlow::Continue(Err(LookupError::NameExists)),
+        )),
     )]);
     let handler = DoggyDnsHandler::new(vec![], Arc::new(chain), false, AnswerRotation::new(false));
 
     let request = make_dns_request("my-svc.DEFAULT_GROUP.public.nacos.local.", RecordType::AAAA);
-    let mock = MockResponseHandler::new();
+    let mock = CapturingHandler::new();
     let _info = handler
         .handle_request::<_, TokioTime>(&request, mock.clone())
         .await;
@@ -532,7 +377,13 @@ async fn handler_authority_name_exists_returns_nodata() {
 async fn handler_authoritative_nxdomain_is_cached_for_xdp() {
     let chain = AuthorityChain::new(vec![(
         "nacos".to_string(),
-        Arc::new(LookupErrorZoneHandler::new(ExpectedLookupError::NxDomain)),
+        Arc::new(MockZoneHandler::new(
+            ZoneType::Primary,
+            "nacos.local.",
+            |_, _, _, _| {
+                LookupControlFlow::Continue(Err(LookupError::ResponseCode(ResponseCode::NXDomain)))
+            },
+        )),
     )]);
     let capture = Arc::new(OutcomeCaptureMiddleware::new());
     let handler = DoggyDnsHandler::new(
@@ -543,7 +394,7 @@ async fn handler_authoritative_nxdomain_is_cached_for_xdp() {
     );
 
     let request = make_dns_request("missing.DEFAULT_GROUP.public.nacos.local.", RecordType::A);
-    let mock = MockResponseHandler::new();
+    let mock = CapturingHandler::new();
     let _info = handler
         .handle_request::<_, TokioTime>(&request, mock.clone())
         .await;
@@ -573,7 +424,7 @@ async fn all_skip_xdp_payload_matches_the_sent_response() {
     );
 
     let request = make_dns_request("unknown.example.com.", RecordType::A);
-    let mock = MockResponseHandler::new();
+    let mock = CapturingHandler::new();
     let _info = handler
         .handle_request::<_, TokioTime>(&request, mock.clone())
         .await;
@@ -600,63 +451,6 @@ async fn all_skip_xdp_payload_matches_the_sent_response() {
     assert!(cached.authorities.is_empty());
 }
 
-/// A non-authoritative handler that answers every query with one A record.
-struct ExternalAnswerHandler;
-
-#[async_trait]
-impl ZoneHandler for ExternalAnswerHandler {
-    fn zone_type(&self) -> hickory_server::zone_handler::ZoneType {
-        hickory_server::zone_handler::ZoneType::External
-    }
-
-    fn axfr_policy(&self) -> hickory_server::zone_handler::AxfrPolicy {
-        hickory_server::zone_handler::AxfrPolicy::Deny
-    }
-
-    fn origin(&self) -> &hickory_proto::rr::LowerName {
-        static ORIGIN: std::sync::LazyLock<hickory_proto::rr::LowerName> =
-            std::sync::LazyLock::new(|| hickory_proto::rr::LowerName::from(Name::root()));
-        &ORIGIN
-    }
-
-    async fn lookup(
-        &self,
-        name: &hickory_proto::rr::LowerName,
-        _rtype: RecordType,
-        _request_info: Option<&hickory_server::server::RequestInfo<'_>>,
-        _lookup_options: LookupOptions,
-    ) -> LookupControlFlow<AuthLookup> {
-        let record = Record::from_rdata(
-            Name::from(name.clone()),
-            60,
-            RData::A(A(Ipv4Addr::new(203, 0, 113, 7))),
-        );
-        LookupControlFlow::Continue(Ok(AuthLookup::answers(
-            hickory_server::zone_handler::LookupRecords::Section(vec![record]),
-            None,
-        )))
-    }
-
-    async fn search(
-        &self,
-        _request: &Request,
-        _lookup_options: LookupOptions,
-    ) -> (
-        LookupControlFlow<AuthLookup>,
-        Option<hickory_proto::rr::TSigResponseContext>,
-    ) {
-        (LookupControlFlow::Skip, None)
-    }
-
-    async fn nsec_records(
-        &self,
-        _name: &hickory_proto::rr::LowerName,
-        _lookup_options: LookupOptions,
-    ) -> LookupControlFlow<AuthLookup> {
-        LookupControlFlow::Skip
-    }
-}
-
 fn soa_records(message: &Message) -> Vec<&Record> {
     message
         .authorities
@@ -672,7 +466,7 @@ async fn handler_authoritative_answer_sets_aa_and_clears_ra() {
     let handler = DoggyDnsHandler::new(vec![], Arc::new(chain), false, AnswerRotation::new(false));
 
     let request = make_dns_request("my-svc.DEFAULT_GROUP.public.nacos.local.", RecordType::A);
-    let mock = MockResponseHandler::new();
+    let mock = CapturingHandler::new();
     let _info = handler
         .handle_request::<_, TokioTime>(&request, mock.clone())
         .await;
@@ -690,7 +484,7 @@ async fn handler_authoritative_nxdomain_sets_aa_and_carries_soa() {
     let handler = DoggyDnsHandler::new(vec![], Arc::new(chain), false, AnswerRotation::new(false));
 
     let request = make_dns_request("missing.DEFAULT_GROUP.public.nacos.local.", RecordType::A);
-    let mock = MockResponseHandler::new();
+    let mock = CapturingHandler::new();
     let _info = handler
         .handle_request::<_, TokioTime>(&request, mock.clone())
         .await;
@@ -712,7 +506,7 @@ async fn handler_authoritative_nodata_sets_aa_and_carries_soa() {
     let handler = DoggyDnsHandler::new(vec![], Arc::new(chain), false, AnswerRotation::new(false));
 
     let request = make_dns_request("my-svc.DEFAULT_GROUP.public.nacos.local.", RecordType::AAAA);
-    let mock = MockResponseHandler::new();
+    let mock = CapturingHandler::new();
     let _info = handler
         .handle_request::<_, TokioTime>(&request, mock.clone())
         .await;
@@ -729,12 +523,26 @@ async fn handler_authoritative_nodata_sets_aa_and_carries_soa() {
 async fn handler_external_answer_sets_ra_and_clears_aa() {
     let chain = AuthorityChain::new(vec![(
         "external".to_string(),
-        Arc::new(ExternalAnswerHandler),
+        Arc::new(MockZoneHandler::new(
+            ZoneType::External,
+            ".",
+            |name, _, _, _| {
+                let record = Record::from_rdata(
+                    Name::from(name.clone()),
+                    60,
+                    RData::A(A(Ipv4Addr::new(203, 0, 113, 7))),
+                );
+                LookupControlFlow::Continue(Ok(AuthLookup::answers(
+                    LookupRecords::Section(vec![record]),
+                    None,
+                )))
+            },
+        )),
     )]);
     let handler = DoggyDnsHandler::new(vec![], Arc::new(chain), false, AnswerRotation::new(false));
 
     let request = make_dns_request("www.example.com.", RecordType::A);
-    let mock = MockResponseHandler::new();
+    let mock = CapturingHandler::new();
     let _info = handler
         .handle_request::<_, TokioTime>(&request, mock.clone())
         .await;
@@ -752,7 +560,7 @@ async fn handler_apex_soa_query_returns_authoritative_soa_answer() {
     let handler = DoggyDnsHandler::new(vec![], Arc::new(chain), false, AnswerRotation::new(false));
 
     let request = make_dns_request("nacos.local.", RecordType::SOA);
-    let mock = MockResponseHandler::new();
+    let mock = CapturingHandler::new();
     let _info = handler
         .handle_request::<_, TokioTime>(&request, mock.clone())
         .await;
@@ -785,7 +593,7 @@ fn answer_ipv4s(message: &Message) -> Vec<Ipv4Addr> {
 /// One A query against `handler`; the handler is shared, not rebuilt per query.
 async fn ask(handler: &DoggyDnsHandler, domain: &str) -> Message {
     let request = make_dns_request(domain, RecordType::A);
-    let mock = MockResponseHandler::new();
+    let mock = CapturingHandler::new();
     handler
         .handle_request::<_, TokioTime>(&request, mock.clone())
         .await;
@@ -886,82 +694,38 @@ async fn rotated_answers_reach_the_xdp_cache_payload() {
     );
 }
 
-/// An authority answering from records behind an `Arc` rather than an owned
-/// `Vec`: the `LookupRecords::Section` arm of `take_answer_records` does not
-/// match, so the records are collected by clone — the same arm
-/// `AuthLookup::Resolved`, which `native` and `forward` return, falls through to.
-struct SharedRecordHandler;
-
-#[async_trait]
-impl ZoneHandler for SharedRecordHandler {
-    fn zone_type(&self) -> hickory_server::zone_handler::ZoneType {
-        hickory_server::zone_handler::ZoneType::External
-    }
-
-    fn axfr_policy(&self) -> hickory_server::zone_handler::AxfrPolicy {
-        hickory_server::zone_handler::AxfrPolicy::Deny
-    }
-
-    fn origin(&self) -> &hickory_proto::rr::LowerName {
-        static ORIGIN: std::sync::LazyLock<hickory_proto::rr::LowerName> =
-            std::sync::LazyLock::new(|| hickory_proto::rr::LowerName::from(Name::root()));
-        &ORIGIN
-    }
-
-    async fn lookup(
-        &self,
-        name: &hickory_proto::rr::LowerName,
-        _rtype: RecordType,
-        _request_info: Option<&hickory_server::server::RequestInfo<'_>>,
-        _lookup_options: LookupOptions,
-    ) -> LookupControlFlow<AuthLookup> {
-        let answer_name = Name::from(name.clone());
-        let mut record_set =
-            hickory_proto::rr::RecordSet::new(answer_name.clone(), RecordType::A, 0);
-        record_set.set_records(vec![
-            Record::from_rdata(
-                answer_name.clone(),
-                60,
-                RData::A(A(Ipv4Addr::new(203, 0, 113, 1))),
-            ),
-            Record::from_rdata(answer_name, 60, RData::A(A(Ipv4Addr::new(203, 0, 113, 2)))),
-        ]);
-        LookupControlFlow::Continue(Ok(AuthLookup::answers(
-            hickory_server::zone_handler::LookupRecords::new(
-                LookupOptions::default(),
-                Arc::new(record_set),
-            ),
-            None,
-        )))
-    }
-
-    async fn search(
-        &self,
-        _request: &Request,
-        _lookup_options: LookupOptions,
-    ) -> (
-        LookupControlFlow<AuthLookup>,
-        Option<hickory_proto::rr::TSigResponseContext>,
-    ) {
-        (LookupControlFlow::Skip, None)
-    }
-
-    async fn nsec_records(
-        &self,
-        _name: &hickory_proto::rr::LowerName,
-        _lookup_options: LookupOptions,
-    ) -> LookupControlFlow<AuthLookup> {
-        LookupControlFlow::Skip
-    }
-}
-
 #[tokio::test]
 async fn rotate_answers_cycles_the_cloned_record_path() {
     // Rotation lives at the one choke point every record path passes through, so
     // the clone-collect path used by `native`/`forward` answers cycles too.
+    //
+    // The fake authority keeps its records behind an `Arc` rather than an owned
+    // `Vec`: the `LookupRecords::Section` arm of `take_answer_records` does not
+    // match, so the records are collected by clone — the same arm
+    // `AuthLookup::Resolved`, which `native` and `forward` return, falls through to.
     let chain = AuthorityChain::new(vec![(
         "external".to_string(),
-        Arc::new(SharedRecordHandler),
+        Arc::new(MockZoneHandler::new(
+            ZoneType::External,
+            ".",
+            |name, _, _, _| {
+                let answer_name = Name::from(name.clone());
+                let mut record_set =
+                    hickory_proto::rr::RecordSet::new(answer_name.clone(), RecordType::A, 0);
+                record_set.set_records(vec![
+                    Record::from_rdata(
+                        answer_name.clone(),
+                        60,
+                        RData::A(A(Ipv4Addr::new(203, 0, 113, 1))),
+                    ),
+                    Record::from_rdata(answer_name, 60, RData::A(A(Ipv4Addr::new(203, 0, 113, 2)))),
+                ]);
+                LookupControlFlow::Continue(Ok(AuthLookup::answers(
+                    LookupRecords::new(LookupOptions::default(), Arc::new(record_set)),
+                    None,
+                )))
+            },
+        )),
     )]);
     let handler = DoggyDnsHandler::new(vec![], Arc::new(chain), false, AnswerRotation::new(true));
 

@@ -15,6 +15,7 @@ tracing = { workspace = true }
 [dev-dependencies]
 tokio = { workspace = true }
 doggy-dns-nacos = { path = "../doggy-dns-nacos" }
+doggy-dns-testutil = { path = "../doggy-dns-testutil" }
 dashmap = { workspace = true }
 hickory-proto = { workspace = true }
 criterion = { workspace = true }

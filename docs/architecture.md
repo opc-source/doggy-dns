@@ -11,6 +11,8 @@ Part of [README](../README.md).
 - `doggy-dns-control` -> `doggy-dns-basic`
 - `doggy-dns-basic` is the config leaf crate (no internal deps)
 - `doggy-dns-plugin` is the leaf crate (no internal deps)
+- `doggy-dns-testutil` is dev-only (`publish = false`): shared test scaffolding used
+  by test targets and benches; no product crate depends on it
 
 ## Request flow
 

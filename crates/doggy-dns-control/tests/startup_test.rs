@@ -1,33 +1,21 @@
 #![allow(clippy::disallowed_methods)]
 
-use chrono::Utc;
+mod common;
+
+use common::test_state;
 use doggy_dns_control::ControlConfig;
 use doggy_dns_control::live::LiveState;
-use doggy_dns_control::state::McpState;
 use doggy_dns_control::transport;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::net::TcpListener;
-
-fn test_state() -> Arc<McpState> {
-    Arc::new(McpState::from_parts(
-        "dns-node-1".into(),
-        4242,
-        "0.1.0".into(),
-        Utc::now(),
-        "0.0.0.0:15353".into(),
-        vec!["udp".into(), "tcp".into()],
-        Vec::new(),
-        "",
-    ))
-}
 
 #[tokio::test]
 async fn occupied_port_returns_error_without_panicking() {
     let occupied = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = occupied.local_addr().unwrap();
     let err = transport::start(
-        test_state(),
+        Arc::new(test_state(Vec::new(), "")),
         Arc::new(LiveState::new()),
         ControlConfig {
             listen_addr: "127.0.0.1".into(),
@@ -51,7 +39,7 @@ async fn start_binds_ipv6_loopback() {
     drop(probe);
 
     let handle = transport::start(
-        test_state(),
+        Arc::new(test_state(Vec::new(), "")),
         Arc::new(LiveState::new()),
         ControlConfig {
             listen_addr: "::1".into(),
@@ -71,7 +59,7 @@ async fn start_binds_ipv6_loopback() {
 #[tokio::test]
 async fn start_with_port_zero_assigns_random_port() {
     let handle = transport::start(
-        test_state(),
+        Arc::new(test_state(Vec::new(), "")),
         Arc::new(LiveState::new()),
         ControlConfig {
             port: 0,
@@ -116,7 +104,7 @@ async fn start_retrying_serves_after_the_holder_releases_the_port() {
     let addr = occupied.local_addr().unwrap();
 
     let handle = transport::start_retrying(
-        test_state(),
+        Arc::new(test_state(Vec::new(), "")),
         Arc::new(LiveState::new()),
         retry_cfg(addr.port()),
         Duration::from_millis(20),
@@ -155,7 +143,7 @@ async fn start_retrying_stops_while_waiting_when_cancelled() {
     let addr = occupied.local_addr().unwrap();
 
     let handle = transport::start_retrying(
-        test_state(),
+        Arc::new(test_state(Vec::new(), "")),
         Arc::new(LiveState::new()),
         retry_cfg(addr.port()),
         Duration::from_secs(3600),
