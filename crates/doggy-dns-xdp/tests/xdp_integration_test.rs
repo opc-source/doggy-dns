@@ -857,7 +857,7 @@ mod linux_tests {
             1,
             1,
             ResponseCode::NoError,
-            cached.clone(),
+            &cached,
             Some(60),
             30,
             now_ktime_ns(),
@@ -906,8 +906,9 @@ mod linux_tests {
             "header words and answer records must still match the cached reply"
         );
 
+        // Exactly one query was sent on this test's private stats map.
         let snapshot = wait_for_stats(&stats, |snapshot| snapshot.hit >= 1);
-        assert!(snapshot.hit >= 1, "hit counter: {snapshot:?}");
+        assert_eq!(snapshot.hit, 1, "hit counter: {snapshot:?}");
 
         drop(cache);
         drop(attach);
@@ -978,7 +979,7 @@ mod linux_tests {
                 "open AF_PACKET socket: {}",
                 std::io::Error::last_os_error()
             );
-            let ifindex = libc::if_nametoindex(b"lo".as_ptr() as *const libc::c_char);
+            let ifindex = libc::if_nametoindex(b"lo\0".as_ptr() as *const libc::c_char);
             assert!(
                 ifindex != 0,
                 "look up lo: {}",
@@ -1007,6 +1008,94 @@ mod linux_tests {
         }
     }
 
+    /// Open a non-blocking AF_PACKET tap on `lo` that sees every frame the
+    /// interface receives (injected queries and XDP_TX replies alike). It is
+    /// needed because loopback does not deliver an XDP_TX reply to an
+    /// AF_PACKET-injected query back to a UDP socket: the reply is on the wire
+    /// (and counted as a hit) but never reaches `recv_from`. Open the tap
+    /// before sending the query; the caller closes the fd with `libc::close`.
+    fn open_lo_sniffer() -> libc::c_int {
+        // Safety: a zeroed sockaddr_ll is a valid initialised value, and the
+        // pointers below stay live for the duration of each call.
+        unsafe {
+            let fd = libc::socket(
+                libc::AF_PACKET,
+                libc::SOCK_RAW,
+                (libc::ETH_P_ALL as u16).to_be() as i32,
+            );
+            assert!(
+                fd >= 0,
+                "open lo sniffer: {}",
+                std::io::Error::last_os_error()
+            );
+            let ifindex = libc::if_nametoindex(b"lo\0".as_ptr() as *const libc::c_char);
+            assert!(
+                ifindex != 0,
+                "look up lo: {}",
+                std::io::Error::last_os_error()
+            );
+            let mut addr: libc::sockaddr_ll = std::mem::zeroed();
+            addr.sll_family = libc::AF_PACKET as u16;
+            addr.sll_protocol = (libc::ETH_P_ALL as u16).to_be();
+            addr.sll_ifindex = ifindex as i32;
+            let bound = libc::bind(
+                fd,
+                &addr as *const libc::sockaddr_ll as *const libc::sockaddr,
+                std::mem::size_of::<libc::sockaddr_ll>() as libc::socklen_t,
+            );
+            assert_eq!(
+                bound,
+                0,
+                "bind lo sniffer: {}",
+                std::io::Error::last_os_error()
+            );
+            let flags = libc::fcntl(fd, libc::F_GETFL, 0);
+            assert!(
+                flags >= 0,
+                "read sniffer flags: {}",
+                std::io::Error::last_os_error()
+            );
+            assert_eq!(
+                libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK),
+                0,
+                "set sniffer nonblock: {}",
+                std::io::Error::last_os_error()
+            );
+            fd
+        }
+    }
+
+    /// Receive one tapped frame, or `None` when none is queued right now.
+    fn recv_tapped_frame(fd: libc::c_int) -> Option<Vec<u8>> {
+        let mut buf = [0u8; 2048];
+        // Safety: `buf` is live for the call and `fd` is a valid open socket.
+        let n = unsafe { libc::recv(fd, buf.as_mut_ptr() as *mut libc::c_void, buf.len(), 0) };
+        if n > 0 {
+            Some(buf[..n as usize].to_vec())
+        } else {
+            None
+        }
+    }
+
+    /// The DNS payload of a tapped Ethernet + IPv4 + UDP frame, if it is one.
+    fn tapped_dns_payload(frame: &[u8]) -> Option<&[u8]> {
+        if frame.len() < 14 + 20 + 8 {
+            return None;
+        }
+        if u16::from_be_bytes([frame[12], frame[13]]) != 0x0800 {
+            return None;
+        }
+        let ip = &frame[14..];
+        if ip[9] != 17 {
+            return None;
+        }
+        let ip_hdr_len = (ip[0] & 0x0f) as usize * 4;
+        if ip.len() < ip_hdr_len + 8 {
+            return None;
+        }
+        Some(&ip[ip_hdr_len + 8..])
+    }
+
     #[test]
     #[ignore] // Requires root, Linux, and XDP support on lo.
     fn fragmented_query_passes() {
@@ -1022,12 +1111,13 @@ mod linux_tests {
         // that parses past the fragment check would answer (and count a hit)
         // instead of passing.
         let name = "fragmented.example.";
+        let cached = response_bytes(name, ResponseCode::NoError);
         let (key, value) = compute_cache_entry(
             &Name::from_str(name).expect("name"),
             1,
             1,
             ResponseCode::NoError,
-            response_bytes(name, ResponseCode::NoError),
+            &cached,
             Some(60),
             30,
             now_ktime_ns(),
@@ -1040,7 +1130,7 @@ mod linux_tests {
 
         // A first fragment (MF set, offset 0) and a non-first fragment
         // (offset 8 bytes). Distinct IP ids keep the kernel's reassembly
-        // queues separate so the two frames can never complete a datagram.
+        // queues separate so the frames can never complete a datagram.
         for (ip_id, frag_off) in [(0x0F01u16, 0x2000u16), (0x0F02, 0x0001)] {
             let frame = fragmented_udp_frame(src_port, port, ip_id, frag_off, &payload);
             send_frame_on_lo(&frame);
@@ -1050,14 +1140,46 @@ mod linux_tests {
             );
         }
 
+        // Positive control: DF alone (no MF, offset 0) is a complete,
+        // unfragmented datagram and must still be answered. The fragment
+        // mask is 0x3FFF (MF + offset); an over-broad 0x7FFF would also
+        // catch DF and pass this frame, leaving the hit counter at zero.
+        // Loopback never delivers the XDP_TX reply to an injected query back
+        // to a UDP socket, so tap the wire for it instead of `recv_datagram`:
+        // the reply is a response (QR=1), the injected query a query (QR=0).
+        let sniffer = open_lo_sniffer();
+        let frame = fragmented_udp_frame(src_port, port, 0x0F03, 0x4000, &payload);
+        send_frame_on_lo(&frame);
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        let reply = loop {
+            if let Some(tapped) = recv_tapped_frame(sniffer) {
+                if let Some(dns) = tapped_dns_payload(&tapped) {
+                    if dns.len() >= 12 && dns[2] & 0x80 != 0 {
+                        break Some(dns.to_vec());
+                    }
+                }
+            }
+            if tokio::time::Instant::now() >= deadline {
+                break None;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        // Safety: `sniffer` is a valid open fd returned by `open_lo_sniffer`.
+        unsafe { libc::close(sniffer) };
+        let reply = reply.expect("DF-set query must produce an XDP_TX reply on the wire");
+        // The query and the cached reply share the helpers' txid and canonical
+        // question case, so the replayed answer equals the cached bytes.
+        assert_eq!(reply, cached, "DF-set query must get the cached reply");
+
         // The receive timeouts above give the kernel ample time to run XDP
-        // and update the per-CPU counters; a pass leaves every one of them
-        // untouched (a hit, miss, or drop would each count).
-        let snapshot = stats.snapshot().expect("read stats map");
+        // and update the per-CPU counters: the two fragments leave every
+        // counter untouched, and only the DF-set query counts one hit.
+        let snapshot = wait_for_stats(&stats, |snapshot| snapshot.hit >= 1);
+        assert_eq!(snapshot.hit, 1, "hit counter: {snapshot:?}");
         assert_eq!(
-            snapshot.hit + snapshot.negative_hit + snapshot.miss + snapshot.expired + snapshot.drop,
+            snapshot.negative_hit + snapshot.miss + snapshot.expired + snapshot.drop,
             0,
-            "fragments must pass without touching the cache counters: {snapshot:?}"
+            "fragments must pass without touching the other cache counters: {snapshot:?}"
         );
 
         drop(cache);
