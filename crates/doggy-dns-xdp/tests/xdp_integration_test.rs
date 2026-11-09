@@ -358,13 +358,18 @@ mod linux_tests {
         //    follow the QNAME start: the kernel takes its byte-at-a-time
         //    fallback instead of the 8-byte block scan, and the reply is
         //    exactly MIN_POSITIVE_LEN (17), the shortest the copy admits.
-        // 2. 32 bytes is a whole number of 16-byte chunks, so no lead chunk is
-        //    written. Both synthetic replies end before their question would,
-        //    exercising the no-tail path: only the header words are copied.
+        // 2. A named question longer than the minimum, with a reply that ends
+        //    exactly at the question: the no-tail path, header words only.
+        // 3. A tail of exactly one copy chunk after the question, so `lead`
+        //    is zero and no leading chunk is written before the loop.
         let mut cases: Vec<(&Name, Vec<u8>)> = vec![
             (&root, response_for(&root, ResponseCode::NoError)),
-            (&seventeen, synthetic_reply(17)),
-            (&aligned, synthetic_reply(32)),
+            (&seventeen, response_for(&seventeen, ResponseCode::NoError)),
+            (&aligned, {
+                let mut reply = response_for(&aligned, ResponseCode::NoError);
+                reply.extend_from_slice(&[0xA5; 16]);
+                reply
+            }),
         ];
         // 3. Tails of every copy shape after a real question: shorter than a
         //    chunk (byte loop), exactly one chunk, and chunk-plus-lead with
@@ -416,6 +421,35 @@ mod linux_tests {
         let expected_hits = cases.len() as u64;
         let snapshot = wait_for_stats(&stats, |snapshot| snapshot.hit >= expected_hits);
         assert_eq!(snapshot.hit, expected_hits, "hit counter: {snapshot:?}");
+
+        // A cached reply shorter than the query's own question can only be
+        // another name's entry under a hash collision. Replaying it would leave
+        // QDCOUNT=1 above a truncated question, so the kernel must pass the
+        // query and leave the hit counter alone.
+        let short_name = Name::from_str("short.example.").expect("name");
+        let (key, value) = compute_cache_entry(
+            &short_name,
+            1,
+            1,
+            ResponseCode::NoError,
+            &synthetic_reply(17),
+            Some(60),
+            30,
+            now_ktime_ns(),
+        );
+        cache.insert(&key, &value).expect("insert short entry");
+        socket
+            .send_to(&query_for(&short_name, 0x9FFF), ("127.0.0.1", port))
+            .expect("send short-reply query");
+        assert!(
+            recv_datagram(&socket).is_none(),
+            "a cached reply shorter than the question must not be replayed"
+        );
+        let snapshot = wait_for_stats(&stats, |snapshot| snapshot.hit > expected_hits);
+        assert_eq!(
+            snapshot.hit, expected_hits,
+            "short reply counted a hit: {snapshot:?}"
+        );
 
         drop(cache);
         drop(attach);
