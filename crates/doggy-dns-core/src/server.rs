@@ -67,20 +67,7 @@ async fn register_tls<H: RequestHandler>(
     let tls_addr = socket_addr(&config.server.listen_addr, tls_config.port)
         .context("invalid TLS listen address")?;
 
-    let cert_pem = fs::read(&tls_config.cert_path).context("failed to read TLS certificate")?;
-    let key_pem = fs::read(&tls_config.key_path).context("failed to read TLS private key")?;
-
-    let certs = rustls_pemfile::certs(&mut &cert_pem[..])
-        .collect::<std::result::Result<Vec<_>, _>>()
-        .context("failed to parse TLS certificate")?;
-    let key = rustls_pemfile::private_key(&mut &key_pem[..])
-        .context("failed to parse TLS private key")?
-        .context("no private key found")?;
-
-    let tls_server_config = rustls::ServerConfig::builder()
-        .with_no_client_auth()
-        .with_single_cert(certs, key)
-        .context("failed to build TLS server config")?;
+    let tls_server_config = load_rustls_config(&tls_config.cert_path, &tls_config.key_path, "TLS")?;
 
     let listener = reuseport::bind_tcp(tls_addr).await?;
     let timeout = Duration::from_secs(config.server.tcp_timeout);
@@ -99,19 +86,8 @@ async fn register_https<H: RequestHandler>(
     let https_addr = socket_addr(&config.server.listen_addr, https_config.port)
         .context("invalid HTTPS listen address")?;
 
-    let cert_pem = fs::read(&https_config.cert_path).context("failed to read HTTPS certificate")?;
-    let key_pem = fs::read(&https_config.key_path).context("failed to read HTTPS private key")?;
-
-    let certs = rustls_pemfile::certs(&mut &cert_pem[..])
-        .collect::<std::result::Result<Vec<_>, _>>()
-        .context("failed to parse HTTPS certificate")?;
-    let key = rustls_pemfile::private_key(&mut &key_pem[..])
-        .context("failed to parse HTTPS private key")?
-        .context("no private key found")?;
-
-    let mut tls_config = rustls::ServerConfig::builder()
-        .with_no_client_auth()
-        .with_single_cert(certs, key)?;
+    let mut tls_config =
+        load_rustls_config(&https_config.cert_path, &https_config.key_path, "HTTPS")?;
     tls_config.alpn_protocols = vec![b"h2".to_vec()];
 
     let listener = reuseport::bind_tcp(https_addr).await?;
@@ -127,4 +103,31 @@ async fn register_https<H: RequestHandler>(
 
     tracing::info!("listening on HTTPS {}", https_addr);
     Ok(())
+}
+
+/// Load a rustls server config from a PEM certificate/key pair.
+///
+/// `label` only names the listener in error messages ("TLS" or "HTTPS"), so a
+/// bad certificate points at the config section that supplied it.
+fn load_rustls_config(
+    cert_path: &str,
+    key_path: &str,
+    label: &str,
+) -> Result<rustls::ServerConfig> {
+    let cert_pem =
+        fs::read(cert_path).with_context(|| format!("failed to read {label} certificate"))?;
+    let key_pem =
+        fs::read(key_path).with_context(|| format!("failed to read {label} private key"))?;
+
+    let certs = rustls_pemfile::certs(&mut &cert_pem[..])
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .with_context(|| format!("failed to parse {label} certificate"))?;
+    let key = rustls_pemfile::private_key(&mut &key_pem[..])
+        .with_context(|| format!("failed to parse {label} private key"))?
+        .context("no private key found")?;
+
+    rustls::ServerConfig::builder()
+        .with_no_client_auth()
+        .with_single_cert(certs, key)
+        .with_context(|| format!("failed to build {label} server config"))
 }

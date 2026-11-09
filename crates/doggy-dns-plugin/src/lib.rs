@@ -1,6 +1,7 @@
 pub mod authority;
 pub mod authority_chain;
 pub mod builtin;
+pub mod naming;
 pub mod plugin;
 pub mod registry;
 pub mod zone_handler;

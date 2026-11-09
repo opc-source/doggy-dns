@@ -50,7 +50,6 @@ impl ZoneHandler for NativeAuthority {
         _request_info: Option<&RequestInfo<'_>>,
         _lookup_options: LookupOptions,
     ) -> LookupControlFlow<AuthLookup> {
-        let name_str = name.to_string();
         // See `wire_query_name`: a `&str` would make the resolver re-parse the
         // name under IDNA/STD3 rules and reject interior underscores such as
         // Nacos' `DEFAULT_GROUP`.
@@ -59,7 +58,7 @@ impl ZoneHandler for NativeAuthority {
             Ok(lookup) => {
                 if lookup.answers().is_empty() {
                     tracing::debug!(
-                        query = %name_str,
+                        query = %name,
                         qtype = ?rtype,
                         "system resolver returned an empty answer, falling through"
                     );
@@ -70,7 +69,7 @@ impl ZoneHandler for NativeAuthority {
             }
             Err(e) if e.is_nx_domain() || e.is_no_records_found() => {
                 tracing::debug!(
-                    query = %name_str,
+                    query = %name,
                     qtype = ?rtype,
                     detail = %e,
                     "system resolver returned a negative answer, falling through"
@@ -79,7 +78,7 @@ impl ZoneHandler for NativeAuthority {
             }
             Err(e) => {
                 tracing::warn!(
-                    query = %name_str,
+                    query = %name,
                     qtype = ?rtype,
                     error = %e,
                     "system resolver lookup failed, falling through"

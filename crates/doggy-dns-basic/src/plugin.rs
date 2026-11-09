@@ -1,5 +1,13 @@
 use serde::Deserialize;
 
+/// Defaults a Nacos plugin falls back to when a field is omitted. Validation
+/// requires the fields for an enabled plugin, so these also fill the control
+/// plane's read-only snapshot.
+pub const NACOS_DEFAULT_SERVER_ADDR: &str = "127.0.0.1:8848";
+pub const NACOS_DEFAULT_NAMESPACE: &str = "public";
+pub const NACOS_DEFAULT_GROUP: &str = "DEFAULT_GROUP";
+pub const NACOS_DEFAULT_DNS_ZONE: &str = "nacos.local";
+
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum PluginKind {

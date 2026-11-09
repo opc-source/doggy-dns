@@ -496,7 +496,10 @@ endpoint = "http://127.0.0.1:5080/api/default/v1/logs"
 
     let config: DoggyDnsConfig = toml::from_str(toml_str).unwrap();
     let error = validate_config(&config).unwrap_err().to_string();
-    assert!(error.contains("base URL"), "unexpected error: {error}");
+    assert!(
+        error.contains("must not include /v1/logs"),
+        "unexpected error: {error}"
+    );
 }
 
 #[test]

@@ -26,8 +26,12 @@ pub use middleware::MiddlewareConfig;
 pub use observability::{
     BasicAuthConfig, LogsConfig, MetricsConfig, MetricsTemporality, OTLP_SIGNAL_PATHS,
     ObservabilityBackend, ObservabilityConfig, ObservabilityProtocol, ProfilesConfig, TracesConfig,
+    validate_otlp_base_url,
 };
-pub use plugin::{PluginConfig, PluginKind};
+pub use plugin::{
+    NACOS_DEFAULT_DNS_ZONE, NACOS_DEFAULT_GROUP, NACOS_DEFAULT_NAMESPACE,
+    NACOS_DEFAULT_SERVER_ADDR, PluginConfig, PluginKind,
+};
 pub use remote::RemoteConfig;
 pub use server::{HttpsConfig, ServerConfig, TlsConfig};
 pub use validate::validate_config;

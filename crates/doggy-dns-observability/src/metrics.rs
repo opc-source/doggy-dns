@@ -3,6 +3,7 @@ use crate::endpoint::{self, Signal};
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use doggy_dns_basic::{MetricsTemporality, ObservabilityConfig};
+use doggy_dns_plugin::naming::{protocol_name, response_code_name};
 use doggy_dns_plugin::{Middleware, MiddlewareAction, RequestOutcome};
 use hickory_server::server::Request;
 use opentelemetry::KeyValue;
@@ -152,7 +153,7 @@ fn outcome_attributes(request: &Request, outcome: &RequestOutcome) -> Vec<KeyVal
     let (question_type, protocol) = match request.request_info() {
         Ok(info) => (
             format!("{:?}", info.query.query_type()),
-            format!("{:?}", info.protocol).to_ascii_lowercase(),
+            protocol_name(info.protocol).into_owned(),
         ),
         Err(_) => ("unknown".to_string(), "unknown".to_string()),
     };
@@ -162,7 +163,7 @@ fn outcome_attributes(request: &Request, outcome: &RequestOutcome) -> Vec<KeyVal
         KeyValue::new("network.protocol.name", protocol),
         KeyValue::new(
             "dns.response.code",
-            format!("{:?}", outcome.response_code).to_ascii_uppercase(),
+            response_code_name(outcome.response_code).into_owned(),
         ),
         KeyValue::new(
             "dns.authority",

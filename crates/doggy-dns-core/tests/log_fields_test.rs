@@ -19,7 +19,7 @@ use hickory_proto::rr::{Record, RecordType};
 use hickory_proto::serialize::binary::BinEncoder;
 use hickory_server::net::NetError;
 use hickory_server::net::runtime::TokioTime;
-use hickory_server::server::{Request, RequestHandler, ResponseHandler, ResponseInfo};
+use hickory_server::server::{RequestHandler, ResponseHandler, ResponseInfo};
 use hickory_server::zone_handler::MessageResponse;
 use std::sync::Arc;
 

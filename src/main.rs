@@ -1,6 +1,10 @@
 use anyhow::{Context, Result};
 use doggy_dns_control::live::LiveState;
-use doggy_dns_core::config::{DoggyDnsConfig, PluginKind, load_config};
+use doggy_dns_core::config::net::parse_upstream;
+use doggy_dns_core::config::{
+    DoggyDnsConfig, NACOS_DEFAULT_DNS_ZONE, NACOS_DEFAULT_GROUP, NACOS_DEFAULT_NAMESPACE,
+    NACOS_DEFAULT_SERVER_ADDR, PluginKind, load_config,
+};
 use doggy_dns_core::handler::{AnswerRotation, DoggyDnsHandler};
 use doggy_dns_core::middleware::logging::LoggingMiddleware;
 use doggy_dns_core::server::build_server;
@@ -12,6 +16,7 @@ use doggy_dns_plugin::authority_chain::AuthorityChain;
 use doggy_dns_plugin::builtin::forward::ForwardAuthority;
 use doggy_dns_plugin::builtin::native::NativeAuthority;
 use hickory_server::zone_handler::ZoneHandler;
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::signal;
@@ -34,12 +39,12 @@ const BACKGROUND_TASK_SHUTDOWN_GRACE: Duration = Duration::from_secs(2);
 /// unset and when no `[[plugins]]` section exists at all.
 const DEFAULT_FORWARD_UPSTREAM: [&str; 2] = ["8.8.8.8:53", "1.1.1.1:53"];
 
-/// [`DEFAULT_FORWARD_UPSTREAM`] in the owned shape `ForwardAuthority::new`
-/// takes, so neither fallback site repeats the conversion.
-fn default_forward_upstreams() -> Vec<String> {
+/// [`DEFAULT_FORWARD_UPSTREAM`] in the shape `ForwardAuthority::new` takes, so
+/// neither fallback site repeats the conversion.
+fn default_forward_upstreams() -> Result<Vec<SocketAddr>> {
     DEFAULT_FORWARD_UPSTREAM
         .iter()
-        .map(|upstream| upstream.to_string())
+        .map(|upstream| parse_upstream(upstream).context("invalid built-in forward upstream"))
         .collect()
 }
 
@@ -286,7 +291,7 @@ async fn build_authority_chain(
     if config.plugins.is_empty() {
         tracing::info!("no plugins configured, defaulting to forward");
         let forward = ForwardAuthority::new(
-            default_forward_upstreams(),
+            default_forward_upstreams()?,
             DEFAULT_FORWARD_CACHE_SIZE,
             DEFAULT_FORWARD_MIN_TTL,
             DEFAULT_FORWARD_MAX_TTL,
@@ -304,10 +309,16 @@ async fn build_authority_chain(
 
         match plugin.kind {
             PluginKind::Nacos => {
-                let addr = plugin.server_addr.as_deref().unwrap_or("127.0.0.1:8848");
-                let ns = plugin.namespace.as_deref().unwrap_or("public");
-                let grp = plugin.group.as_deref().unwrap_or("DEFAULT_GROUP");
-                let zone = plugin.dns_zone.as_deref().unwrap_or("nacos.local");
+                let addr = plugin
+                    .server_addr
+                    .as_deref()
+                    .unwrap_or(NACOS_DEFAULT_SERVER_ADDR);
+                let ns = plugin
+                    .namespace
+                    .as_deref()
+                    .unwrap_or(NACOS_DEFAULT_NAMESPACE);
+                let grp = plugin.group.as_deref().unwrap_or(NACOS_DEFAULT_GROUP);
+                let zone = plugin.dns_zone.as_deref().unwrap_or(NACOS_DEFAULT_DNS_ZONE);
                 let filter = ServiceFilter::from_config(plugin.service_pattern.as_deref())
                     .context(format!("plugins[{i}].service_pattern"))?;
 
@@ -331,11 +342,23 @@ async fn build_authority_chain(
                 tracing::info!(plugin = %name, "loaded plugin");
             }
             PluginKind::Forward => {
-                let addrs = plugin
-                    .upstream
-                    .clone()
-                    .unwrap_or_else(default_forward_upstreams);
-                let name = format!("forward[{}]", addrs.join(","));
+                let (addrs, configured) = match &plugin.upstream {
+                    Some(values) => (
+                        values
+                            .iter()
+                            .map(|value| {
+                                parse_upstream(value)
+                                    .with_context(|| format!("plugins[{i}].upstream"))
+                            })
+                            .collect::<Result<Vec<_>>>()?,
+                        values.join(","),
+                    ),
+                    None => (
+                        default_forward_upstreams()?,
+                        DEFAULT_FORWARD_UPSTREAM.join(","),
+                    ),
+                };
+                let name = format!("forward[{configured}]");
                 let authority = ForwardAuthority::new(
                     addrs,
                     plugin.cache_size as u64,

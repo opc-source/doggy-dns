@@ -103,24 +103,7 @@ fn non_empty(value: Option<&str>) -> Option<&str> {
 }
 
 fn ensure_base_endpoint(base: &str) -> Result<()> {
-    let base = base.trim().trim_end_matches('/');
-    anyhow::ensure!(
-        !base.contains(['?', '#']),
-        "OTLP base endpoint must not contain a query string or fragment"
-    );
-    anyhow::ensure!(
-        !base.ends_with("/v1"),
-        "OTLP base endpoint must not include /v1; \
-         use the signal-specific endpoint for a full URL"
-    );
-    for signal in doggy_dns_basic::OTLP_SIGNAL_PATHS {
-        anyhow::ensure!(
-            !base.ends_with(&format!("/v1/{signal}")),
-            "OTLP base endpoint must not include /v1/{signal}; \
-             use the signal-specific endpoint for a full URL"
-        );
-    }
-    Ok(())
+    doggy_dns_basic::validate_otlp_base_url("OTLP base endpoint", base)
 }
 
 fn validate_endpoint(url: String) -> Result<String> {
