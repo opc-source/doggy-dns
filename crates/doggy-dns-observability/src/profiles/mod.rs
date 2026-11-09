@@ -7,6 +7,7 @@ use doggy_dns_basic::ObservabilityConfig;
 use opentelemetry_sdk::Resource;
 use prost::Message as _;
 use reqwest::header::{CONTENT_TYPE, HeaderMap, HeaderValue};
+use std::collections::HashMap;
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 use tokio::task::JoinHandle;
@@ -75,9 +76,13 @@ pub(crate) struct ProfileExporter {
 }
 
 impl ProfileExporter {
-    pub(crate) fn new(config: &ObservabilityConfig, resource: &Resource) -> Result<Self> {
+    pub(crate) fn new(
+        config: &ObservabilityConfig,
+        resource: &Resource,
+        headers: HashMap<String, String>,
+    ) -> Result<Self> {
         let url = endpoint::resolve_signal_endpoint(config, Signal::Profiles)?;
-        let mut headers = auth::to_header_map(auth::resolve_headers(config)?)?;
+        let mut headers = auth::to_header_map(headers)?;
         // Profiles must always be protobuf; override a user-supplied content type.
         headers.insert(
             CONTENT_TYPE,
@@ -257,16 +262,12 @@ mod tests {
     #![allow(clippy::disallowed_methods)]
 
     use super::*;
-    use doggy_dns_basic::{BasicAuthConfig, ObservabilityConfig};
+    use doggy_dns_basic::ObservabilityConfig;
 
     fn config(endpoint: &str) -> ObservabilityConfig {
         let mut config = ObservabilityConfig {
             enabled: true,
             endpoint: endpoint.to_string(),
-            basic_auth: Some(BasicAuthConfig {
-                username: "root@example.com".to_string(),
-                password: "secret".to_string(),
-            }),
             ..ObservabilityConfig::default()
         };
         config.profiles.enabled = true;
@@ -277,6 +278,19 @@ mod tests {
         Resource::builder()
             .with_service_name(doggy_dns_plugin::APP_NAME)
             .build()
+    }
+
+    /// `Observability::init` resolves the headers; the exporter only converts
+    /// them, so a literal pair is enough here.
+    fn headers() -> HashMap<String, String> {
+        HashMap::from([(
+            "Authorization".to_string(),
+            "Basic cm9vdEBleGFtcGxlLmNvbTpzZWNyZXQ=".to_string(),
+        )])
+    }
+
+    fn build_exporter(config: &ObservabilityConfig) -> Result<ProfileExporter> {
+        ProfileExporter::new(config, &resource(), headers())
     }
 
     #[test]
@@ -298,9 +312,7 @@ mod tests {
 
     #[test]
     fn exporter_uses_profiles_endpoint() {
-        let exporter =
-            ProfileExporter::new(&config("http://127.0.0.1:5080/api/default"), &resource())
-                .unwrap();
+        let exporter = build_exporter(&config("http://127.0.0.1:5080/api/default")).unwrap();
 
         assert_eq!(
             exporter.url,
@@ -313,9 +325,7 @@ mod tests {
 
     #[test]
     fn exporter_sets_content_type_and_auth_headers() {
-        let exporter =
-            ProfileExporter::new(&config("http://127.0.0.1:5080/api/default"), &resource())
-                .unwrap();
+        let exporter = build_exporter(&config("http://127.0.0.1:5080/api/default")).unwrap();
 
         assert_eq!(
             exporter.headers.get(CONTENT_TYPE).unwrap(),
@@ -332,7 +342,7 @@ mod tests {
             .headers
             .insert("content-type".to_string(), "application/json".to_string());
 
-        let exporter = ProfileExporter::new(&config, &resource()).unwrap();
+        let exporter = build_exporter(&config).unwrap();
         assert_eq!(
             exporter.headers.get(CONTENT_TYPE).unwrap(),
             "application/x-protobuf"
@@ -341,9 +351,7 @@ mod tests {
 
     #[test]
     fn exporter_resource_contains_service_name() {
-        let exporter =
-            ProfileExporter::new(&config("http://127.0.0.1:5080/api/default"), &resource())
-                .unwrap();
+        let exporter = build_exporter(&config("http://127.0.0.1:5080/api/default")).unwrap();
 
         let resource = &exporter.resource;
         assert!(resource.attributes.iter().any(|attribute| {
@@ -359,7 +367,6 @@ mod tests {
 
     #[test]
     fn invalid_signal_endpoint_is_rejected() {
-        let exporter = ProfileExporter::new(&config("not-a-url"), &resource());
-        assert!(exporter.is_err());
+        assert!(build_exporter(&config("not-a-url")).is_err());
     }
 }

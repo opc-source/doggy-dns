@@ -1,5 +1,5 @@
-use crate::auth;
 use crate::endpoint::{self, Signal};
+use crate::exporter::configured_http;
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use doggy_dns_basic::{MetricsTemporality, ObservabilityConfig};
@@ -8,9 +8,10 @@ use doggy_dns_plugin::{Middleware, MiddlewareAction, RequestOutcome};
 use hickory_server::server::Request;
 use opentelemetry::KeyValue;
 use opentelemetry::metrics::{Counter, Histogram, Meter, MeterProvider as _, UpDownCounter};
-use opentelemetry_otlp::{MetricExporter, Protocol, WithExportConfig, WithHttpConfig};
+use opentelemetry_otlp::MetricExporter;
 use opentelemetry_sdk::Resource;
 use opentelemetry_sdk::metrics::{PeriodicReader, SdkMeterProvider, Temporality};
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -99,23 +100,23 @@ impl XdpMetrics {
 pub(crate) fn build_meter_provider(
     config: &ObservabilityConfig,
     resource: Resource,
+    headers: HashMap<String, String>,
 ) -> Result<(SdkMeterProvider, DnsMetrics, XdpMetrics)> {
     let endpoint = endpoint::resolve_signal_endpoint(config, Signal::Metrics)?;
-    let headers = auth::resolve_headers(config)?;
     let temporality = match config.metrics.temporality {
         MetricsTemporality::Cumulative => Temporality::Cumulative,
         MetricsTemporality::Delta => Temporality::Delta,
     };
 
-    let exporter = MetricExporter::builder()
-        .with_http()
-        .with_protocol(Protocol::HttpBinary)
-        .with_endpoint(endpoint)
-        .with_headers(headers)
-        .with_timeout(Duration::from_secs(config.timeout_secs))
-        .with_temporality(temporality)
-        .build()
-        .context("failed to build OTLP metric exporter")?;
+    let exporter = configured_http(
+        MetricExporter::builder().with_http(),
+        endpoint,
+        headers,
+        config.timeout_secs,
+    )
+    .with_temporality(temporality)
+    .build()
+    .context("failed to build OTLP metric exporter")?;
 
     let reader = PeriodicReader::builder(exporter)
         .with_interval(Duration::from_secs(config.metrics.interval_secs))
