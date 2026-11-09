@@ -32,6 +32,11 @@ cargo bench -p doggy-dns-xdp                   # XDP components
 sudo env "PATH=$PATH" cargo test -p doggy-dns-xdp --test xdp_integration_test -- --ignored  # Integration (root)
 ```
 
+> The `cd xdp && cargo build …` line builds the eBPF crate on its own, for
+> inspecting or iterating on it; `doggy-dns-xdp` does not embed that output —
+> its `build.rs` runs a nested build into `$OUT_DIR/ebpf` and embeds the ELF
+> from there.
+
 > **Note:** `cargo bench` output starts with "running 0 tests" lines from the
 > default test harness for each crate. This is normal — the actual criterion
 > results follow immediately after. Benchmarks inherit `[profile.release]`
