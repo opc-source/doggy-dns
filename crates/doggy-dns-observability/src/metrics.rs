@@ -3,14 +3,15 @@ use crate::exporter::configured_http;
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use doggy_dns_basic::{MetricsTemporality, ObservabilityConfig};
-use doggy_dns_plugin::naming::{protocol_name, response_code_name};
+use doggy_dns_plugin::naming::{protocol_name, record_type_name, response_code_name};
 use doggy_dns_plugin::{Middleware, MiddlewareAction, RequestOutcome};
 use hickory_server::server::Request;
-use opentelemetry::KeyValue;
 use opentelemetry::metrics::{Counter, Histogram, Meter, MeterProvider as _, UpDownCounter};
+use opentelemetry::{KeyValue, Value};
 use opentelemetry_otlp::MetricExporter;
 use opentelemetry_sdk::Resource;
 use opentelemetry_sdk::metrics::{PeriodicReader, SdkMeterProvider, Temporality};
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
@@ -150,25 +151,32 @@ impl Middleware for DnsMetricsMiddleware {
     }
 }
 
-fn outcome_attributes(request: &Request, outcome: &RequestOutcome) -> Vec<KeyValue> {
+/// The four low-cardinality dimensions every query outcome is recorded under.
+///
+/// The common path hands OTel borrowed and ref-counted strings, so the attribute
+/// set itself allocates nothing.
+fn outcome_attributes(request: &Request, outcome: &RequestOutcome) -> [KeyValue; 4] {
     let (question_type, protocol) = match request.request_info() {
         Ok(info) => (
-            format!("{:?}", info.query.query_type()),
-            protocol_name(info.protocol).into_owned(),
+            record_type_name(info.query.query_type()),
+            protocol_name(info.protocol),
         ),
-        Err(_) => ("unknown".to_string(), "unknown".to_string()),
+        Err(_) => (Cow::Borrowed("unknown"), Cow::Borrowed("unknown")),
     };
 
-    vec![
+    [
         KeyValue::new("dns.question.type", question_type),
         KeyValue::new("network.protocol.name", protocol),
         KeyValue::new(
             "dns.response.code",
-            response_code_name(outcome.response_code).into_owned(),
+            response_code_name(outcome.response_code),
         ),
         KeyValue::new(
             "dns.authority",
-            outcome.authority.as_deref().unwrap_or("none").to_string(),
+            outcome
+                .authority
+                .clone()
+                .map_or(Value::from("none"), Value::from),
         ),
     ]
 }
@@ -185,16 +193,20 @@ mod tests {
     use std::str::FromStr;
 
     fn make_request() -> Request {
+        make_request_with(RecordType::AAAA, Protocol::Udp)
+    }
+
+    fn make_request_with(query_type: RecordType, protocol: Protocol) -> Request {
         let mut message = Message::new(1, MessageType::Query, OpCode::Query);
         let mut query = Query::new();
         query.set_name(Name::from_str("example.com.").unwrap());
-        query.set_query_type(RecordType::AAAA);
+        query.set_query_type(query_type);
         message.add_query(query);
         let bytes = message.to_vec().unwrap();
         Request::from_bytes(
             bytes,
             SocketAddr::from((Ipv4Addr::LOCALHOST, 5353)),
-            Protocol::Udp,
+            protocol,
         )
         .unwrap()
     }
@@ -245,6 +257,128 @@ mod tests {
         let outcome = RequestOutcome::error(ResponseCode::FormErr);
         let attributes = outcome_attributes(&request, &outcome);
         assert_eq!(attribute(&attributes, "dns.response.code"), Some("FORMERR"));
+    }
+
+    /// Pins the exact strings the four attributes carry for the common
+    /// question/transport/response-code combinations.
+    #[test]
+    fn common_attribute_values_are_pinned() {
+        let cases = [
+            (
+                RecordType::A,
+                Protocol::Udp,
+                ResponseCode::NoError,
+                ("A", "udp", "NOERROR"),
+            ),
+            (
+                RecordType::AAAA,
+                Protocol::Udp,
+                ResponseCode::NoError,
+                ("AAAA", "udp", "NOERROR"),
+            ),
+            (
+                RecordType::A,
+                Protocol::Tcp,
+                ResponseCode::NXDomain,
+                ("A", "tcp", "NXDOMAIN"),
+            ),
+            (
+                RecordType::AAAA,
+                Protocol::Tcp,
+                ResponseCode::ServFail,
+                ("AAAA", "tcp", "SERVFAIL"),
+            ),
+        ];
+
+        for (
+            query_type,
+            protocol,
+            response_code,
+            (expected_type, expected_protocol, expected_code),
+        ) in cases
+        {
+            let request = make_request_with(query_type, protocol);
+            let mut outcome = RequestOutcome::success("native".into(), 1, None, None);
+            outcome.response_code = response_code;
+
+            let attributes = outcome_attributes(&request, &outcome);
+            assert_eq!(
+                attribute(&attributes, "dns.question.type"),
+                Some(expected_type)
+            );
+            assert_eq!(
+                attribute(&attributes, "network.protocol.name"),
+                Some(expected_protocol)
+            );
+            assert_eq!(
+                attribute(&attributes, "dns.response.code"),
+                Some(expected_code)
+            );
+            assert_eq!(attribute(&attributes, "dns.authority"), Some("native"));
+        }
+    }
+
+    /// Rare question types keep the derived `Debug` spelling, never a
+    /// hand-written one.
+    #[test]
+    fn rare_question_types_keep_the_debug_spelling() {
+        let cases = [
+            (RecordType::ANY, "ANY"),
+            (RecordType::OPT, "OPT"),
+            (RecordType::Unknown(65000), "Unknown(65000)"),
+            (RecordType::ZERO, "ZERO"),
+        ];
+
+        for (query_type, expected) in cases {
+            let request = make_request_with(query_type, Protocol::Udp);
+            let outcome = RequestOutcome::success("native".into(), 0, None, None);
+            let attributes = outcome_attributes(&request, &outcome);
+            assert_eq!(attribute(&attributes, "dns.question.type"), Some(expected));
+        }
+    }
+
+    /// Rare response codes fall back to the upper-cased `Debug` spelling.
+    #[test]
+    fn rare_response_codes_keep_the_upper_case_debug_spelling() {
+        let request = make_request();
+        let cases = [
+            // `ResponseCode` has an inherent `from(high, low)`, so name the
+            // trait conversion for the numeric spelling.
+            (<ResponseCode as From<u16>>::from(23), "BADCOOKIE"),
+            (ResponseCode::Unknown(99), "UNKNOWN(99)"),
+        ];
+
+        for (response_code, expected) in cases {
+            let outcome = RequestOutcome::error(response_code);
+            let attributes = outcome_attributes(&request, &outcome);
+            assert_eq!(attribute(&attributes, "dns.response.code"), Some(expected));
+        }
+    }
+
+    /// A request that does not carry exactly one question has neither a
+    /// question type nor a transport to report — `request_info()` rejects it as
+    /// a unit, discarding the transport it could still see — so both fall back
+    /// to `"unknown"`.
+    #[test]
+    fn questionless_requests_fall_back_to_unknown() {
+        let message = Message::new(1, MessageType::Query, OpCode::Query);
+        let bytes = message.to_vec().unwrap();
+        let request = Request::from_bytes(
+            bytes,
+            SocketAddr::from((Ipv4Addr::LOCALHOST, 5353)),
+            Protocol::Tcp,
+        )
+        .unwrap();
+        let outcome = RequestOutcome::error(ResponseCode::FormErr);
+
+        let attributes = outcome_attributes(&request, &outcome);
+        assert_eq!(attribute(&attributes, "dns.question.type"), Some("unknown"));
+        assert_eq!(
+            attribute(&attributes, "network.protocol.name"),
+            Some("unknown")
+        );
+        assert_eq!(attribute(&attributes, "dns.response.code"), Some("FORMERR"));
+        assert_eq!(attribute(&attributes, "dns.authority"), Some("none"));
     }
 
     #[test]
