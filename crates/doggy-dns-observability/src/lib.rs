@@ -302,7 +302,8 @@ fn log_startup(config: &ObservabilityConfig, resource: Option<&opentelemetry_sdk
 
     if config.profiles.enabled && !config.backend.supports_profiles() {
         tracing::warn!(
-            "Vector's OTLP source does not support profiles; profile exports will likely be dropped"
+            backend = ?config.backend,
+            "the selected OTLP backend does not support profiles; profile exports will likely be dropped"
         );
     }
     if config.profiles.enabled && config.backend == ObservabilityBackend::OtelCollector {

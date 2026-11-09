@@ -23,6 +23,15 @@ fn rejects_urls_that_already_carry_a_signal_path() {
 }
 
 #[test]
+fn trims_surrounding_whitespace_before_checking() {
+    assert!(validate_otlp_base_url("observability.endpoint", " http://collector:4318/ ").is_ok());
+    assert!(
+        validate_otlp_base_url("observability.endpoint", " http://collector:4318/v1/logs ")
+            .is_err()
+    );
+}
+
+#[test]
 fn rejects_query_strings_and_fragments() {
     assert!(validate_otlp_base_url("observability.endpoint", "http://collector:4318?x=1").is_err());
     assert!(

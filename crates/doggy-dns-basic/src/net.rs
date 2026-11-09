@@ -1,4 +1,5 @@
-//! Socket address parsing shared by the DNS, TLS, HTTPS and MCP listeners.
+//! Socket address parsing shared by the DNS, TLS, HTTPS and MCP listeners,
+//! plus the forward plugin's upstream addresses.
 //!
 //! Building an address with `format!("{host}:{port}")` breaks for IPv6:
 //! `::` becomes `:::15353`, which is not a valid socket address.

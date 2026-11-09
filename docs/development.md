@@ -159,7 +159,9 @@ Points worth knowing before reading a failure:
 |-----------|-------|-------------|
 | `crates/doggy-dns-basic/tests/config_test.rs` | 60 | Config parsing, defaults, validation (plugins/TLS/HTTPS/remote_config/observability/xdp/control plane, subscription filter) |
 | `crates/doggy-dns-basic/tests/env_test.rs` | 8 | `${ENV_VAR}` expansion across tables and arrays, malformed references |
-| `crates/doggy-dns-basic/tests/net_test.rs` | 5 | IPv4/IPv6 listen-address parsing, bracketed literals, rejects hostnames |
+| `crates/doggy-dns-basic/tests/net_test.rs` | 8 | IPv4/IPv6 listen-address parsing, bracketed literals, rejects hostnames; forward upstream parsing (bare IP defaults to port 53, explicit port kept) |
+| `crates/doggy-dns-basic/tests/observability_backend_test.rs` | 1 | Which observability backends support profiles: `Vector` is the only one that does not |
+| `crates/doggy-dns-basic/tests/otlp_endpoint_test.rs` | 5 | OTLP base URL guard: rejects `/v1` and `/v1/<signal>` (trailing slash included), query strings and fragments; accepts surrounding whitespace and a trailing slash; caller supplies the message prefix |
 | `crates/doggy-dns-core/tests/handler_test.rs` | 21 | Handler pipeline: NoError, NXDomain, NODATA, ServFail, Refused, middleware callbacks, EDNS cache admission, AA/RA flags, SOA on negatives, answer rotation |
 | `crates/doggy-dns-core/tests/log_fields_test.rs` | 1 | The handler's rendered tracing fields: event authority keeps its quoted `&str` form, span authority/protocol/response-code keep their display forms |
 | `crates/doggy-dns-core/tests/middleware_test.rs` | 2 | Logging middleware: `before_request` continues, `after_request` completes |
@@ -170,7 +172,8 @@ Points worth knowing before reading a failure:
 | `crates/doggy-dns-nacos/tests/mapping_test.rs` | 13 | Name-to-service-name mapping (zone boundaries, group and namespace labels, escaped labels), family-filtered record creation |
 | `crates/doggy-dns-nacos/tests/watcher_test.rs` | 20 | Service filter (defaults, anchoring, case, Unicode, invalid pattern), usable-instance parsing, failure-backoff window (opens, restarts, expires, reopens, lifts on success, covers exactly its backoff, lifts on a backwards clock step), the whole `entry_of` table (client cache, cache-first boot, server-first, cache-only) and `ever_confirmed`, a cache read answering only when it holds instances, the cache-read bound |
 | `crates/doggy-dns-plugin/tests/authority_chain_test.rs` | 12 | Chain resolution: empty, hit, authoritative miss, zone fallthrough, all-skip, Break, error, is_empty |
-| `crates/doggy-dns-plugin/tests/forward_test.rs` | 9 | Forward resolver: local mock upstream, custom/bare IP parsing, validation, NXDOMAIN/NODATA/SERVFAIL mapping, underscore labels still forwarded |
+| `crates/doggy-dns-plugin/tests/forward_test.rs` | 7 | Forward resolver: local mock upstream, configured port, validation, NXDOMAIN/NODATA/SERVFAIL mapping, underscore labels still forwarded |
+| `crates/doggy-dns-plugin/tests/naming_test.rs` | 2 | Shared transport/response-code naming: static `udp`/`tcp`, uppercase response-code mnemonics |
 | `crates/doggy-dns-plugin/tests/request_outcome_test.rs` | 3 | `RequestOutcome` construction: success, response bytes, NXDOMAIN TTL |
 | `crates/doggy-dns-plugin/tests/system_dns_test.rs` | 1 | Native resolver (requires network) |
 | `crates/doggy-dns-plugin/tests/wire_query_name_test.rs` | 2 | The wire-name handoff both fallback authorities use: label bytes survive, and the `&str` path's underscore rejection stays a premise |
