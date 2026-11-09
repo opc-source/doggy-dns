@@ -7,6 +7,7 @@ use doggy_dns_nacos::watcher::{
     entry_of, usable_instances,
 };
 use nacos_sdk::api::naming::ServiceInstance;
+use regex::Regex;
 use std::collections::HashMap;
 use std::net::IpAddr;
 use std::time::Duration;
@@ -93,6 +94,48 @@ fn default_filter_selects_bare_application_names() {
     }
 }
 
+/// The built-in rule is a byte-wise shortcut for the anchored
+/// `[A-Za-z0-9_-]+` pattern. Pin the two against a reference regex over every
+/// ASCII byte and the multi-byte/punctuation shapes a Nacos name can carry, so
+/// the shortcut cannot quietly widen or narrow what an operator configured.
+#[test]
+fn default_filter_matches_the_ascii_class_exactly() {
+    let reference = Regex::new("^(?:[A-Za-z0-9_-]+)$").expect("reference pattern");
+    let default = ServiceFilter::from_config(None).expect("the built-in rule");
+    let configured = ServiceFilter::from_config(Some("[A-Za-z0-9_-]+"))
+        .expect("the explicit default pattern compiles");
+
+    let mut cases: Vec<String> = (0u8..=127)
+        .map(|byte| char::from(byte).to_string())
+        .collect();
+    cases.extend([
+        "order-service".to_string(),
+        "ORDER_svc-1".to_string(),
+        "a1".to_string(),
+        "com.foo.Bar".to_string(),
+        "DEFAULT_GROUP@@order".to_string(),
+        "服务名".to_string(),
+        "café".to_string(),
+        "order service".to_string(),
+        String::new(),
+        "abc\0def".to_string(),
+    ]);
+
+    for case in cases {
+        let expected = reference.is_match(&case);
+        assert_eq!(
+            default.is_selected(&case),
+            expected,
+            "the built-in rule diverged from the anchored ASCII class on {case:?}"
+        );
+        assert_eq!(
+            configured.is_selected(&case),
+            expected,
+            "the regex path diverged from the reference on {case:?}"
+        );
+    }
+}
+
 /// A configured pattern is wrapped in whole-name anchors, so `user-service-\d+`
 /// cannot silently subscribe `my-user-service-1` through a substring match. An
 /// author who already wrote anchors keeps working.
@@ -126,10 +169,10 @@ fn filter_matching_is_case_sensitive() {
     );
 }
 
-/// Characterisation of the assumption behind [`DEFAULT_SERVICE_PATTERN`] being
-/// spelled as an ASCII class: with the regex crate's default `unicode` feature,
-/// a `\w` an operator writes here is Unicode-aware, so it does select a CJK
-/// registration. The built-in default must not inherit that breadth.
+/// Characterisation of why the built-in rule is spelled as explicit ASCII bytes
+/// rather than `\w`: with the regex crate's default `unicode` feature, a `\w` an
+/// operator writes here is Unicode-aware, so it does select a CJK registration.
+/// The built-in default must not inherit that breadth.
 #[test]
 fn user_written_word_class_is_unicode_aware() {
     let filter = ServiceFilter::from_config(Some(r"\w+")).expect("valid pattern");

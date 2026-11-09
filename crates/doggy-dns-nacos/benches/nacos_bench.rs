@@ -5,7 +5,7 @@ use dashmap::DashMap;
 use doggy_dns_nacos::authority::NacosAuthority;
 use doggy_dns_nacos::mapping::{service_name_from_name, to_dns_records};
 use doggy_dns_nacos::test_support::qname;
-use doggy_dns_nacos::watcher::CachedInstance;
+use doggy_dns_nacos::watcher::{CachedInstance, ServiceFilter};
 use hickory_proto::rr::{LowerName, Name, RecordType};
 use hickory_server::zone_handler::{LookupOptions, ZoneHandler};
 use std::hint::black_box;
@@ -117,6 +117,54 @@ fn bench_service_name_dotted_service(c: &mut Criterion) {
     });
 }
 
+/// Names shaped like the traffic the filter sees: bare application names that
+/// the built-in rule selects, plus one dotted and one `group@@service` shape it
+/// rejects.
+const FILTER_NAMES: [&str; 6] = [
+    "order-service",
+    "ORDER_svc-1",
+    "a1",
+    "inventory",
+    "com.foo.Bar",
+    "DEFAULT_GROUP@@order",
+];
+
+fn bench_service_filter(c: &mut Criterion, group_name: &str, filter: ServiceFilter) {
+    // One iteration does 600 decisions, not 6: at a few nanoseconds per call
+    // criterion's per-iteration overhead would otherwise be most of the number.
+    const ROUNDS: usize = 100;
+    c.bench_function(group_name, |b| {
+        b.iter(|| {
+            let mut selected = 0;
+            for _ in 0..ROUNDS {
+                for name in FILTER_NAMES {
+                    selected += filter.is_selected(black_box(name)) as usize;
+                }
+            }
+            black_box(selected)
+        })
+    });
+}
+
+/// The built-in rule without `service_pattern` configured.
+fn bench_service_filter_default(c: &mut Criterion) {
+    bench_service_filter(
+        c,
+        "service_filter_default",
+        ServiceFilter::from_config(None).expect("the built-in rule"),
+    );
+}
+
+/// The same rule spelled as a configured regex, which is the shape the default
+/// rule took before the byte-wise shortcut.
+fn bench_service_filter_regex(c: &mut Criterion) {
+    bench_service_filter(
+        c,
+        "service_filter_regex",
+        ServiceFilter::from_config(Some("[A-Za-z0-9_-]+")).expect("the explicit default pattern"),
+    );
+}
+
 fn bench_to_dns_records_10_ips(c: &mut Criterion) {
     let name = LowerName::from(Name::from_str("my-svc.nacos.local.").unwrap());
     let instances: Vec<CachedInstance> = (0..10)
@@ -138,6 +186,8 @@ criterion_group!(
     bench_service_name_from_name_hit,
     bench_service_name_from_name_miss,
     bench_service_name_dotted_service,
+    bench_service_filter_default,
+    bench_service_filter_regex,
     bench_to_dns_records_10_ips,
 );
 criterion_main!(benches);
