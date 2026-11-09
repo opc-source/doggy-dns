@@ -12,6 +12,29 @@ use std::time::Duration;
 mod common;
 use common::{make_dns_request, mock_otlp_server, resource_attribute};
 
+/// `Observability::init` now resolves the OTLP headers itself instead of each
+/// exporter builder doing it; a header-config error must still surface from
+/// `init`, before any signal is built.
+#[test]
+fn init_surfaces_header_config_errors() {
+    let mut config = ObservabilityConfig {
+        enabled: true,
+        backend: doggy_dns_basic::ObservabilityBackend::Custom,
+        endpoint: "http://127.0.0.1:4318".to_string(),
+        ..ObservabilityConfig::default()
+    };
+    config.headers.insert(" ".to_string(), "x".to_string());
+
+    let error = Observability::init(&common::full_config(config), None)
+        .err()
+        .expect("init must reject an empty header name");
+
+    assert!(
+        format!("{error:#}").contains("observability.headers contains an empty header name"),
+        "unexpected error: {error:?}"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn exports_logs_metrics_and_traces_with_openobserve_headers() {
     let (addr, mut receiver) = mock_otlp_server().await;

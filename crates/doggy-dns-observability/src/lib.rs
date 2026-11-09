@@ -1,6 +1,7 @@
 mod auth;
 mod endpoint;
 mod error_events;
+mod exporter;
 mod exposure;
 mod logs;
 mod metrics;
@@ -17,6 +18,7 @@ use opentelemetry_appender_tracing::layer::OpenTelemetryTracingBridge;
 use opentelemetry_sdk::logs::SdkLoggerProvider;
 use opentelemetry_sdk::metrics::SdkMeterProvider;
 use opentelemetry_sdk::trace::SdkTracerProvider;
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::task::JoinHandle;
@@ -68,27 +70,49 @@ impl Observability {
             let built_resource = resource::build_resource(config, &exposure);
             resource = Some(built_resource.clone());
 
+            // Every signal sends the same headers, so resolve them once. A
+            // config whose signals are all disabled never reaches an exporter
+            // and so never validates them, as when each builder resolved its
+            // own.
+            //
+            // This guard and the four `if config.*.enabled` blocks below must
+            // stay in sync: adding a signal means a term here and a block there.
+            let any_signal_enabled = config.logs.enabled
+                || config.metrics.enabled
+                || config.traces.enabled
+                || config.profiles.enabled;
+            let headers = if any_signal_enabled {
+                auth::resolve_headers(config)?
+            } else {
+                HashMap::new()
+            };
+
             if config.logs.enabled {
-                let provider = logs::build_logger_provider(config, built_resource.clone())?;
+                let provider =
+                    logs::build_logger_provider(config, built_resource.clone(), headers.clone())?;
                 observability.logger_provider = Some(provider);
             }
 
             if config.metrics.enabled {
                 let (provider, metrics, xdp_metrics) =
-                    metrics::build_meter_provider(config, built_resource.clone())?;
+                    metrics::build_meter_provider(config, built_resource.clone(), headers.clone())?;
                 observability.metrics = Some(Arc::new(metrics));
                 observability.xdp = Some(Arc::new(xdp_metrics));
                 observability.meter_provider = Some(provider);
             }
 
             if config.traces.enabled {
-                let provider = traces::build_tracer_provider(config, built_resource.clone())?;
+                let provider =
+                    traces::build_tracer_provider(config, built_resource.clone(), headers.clone())?;
                 observability.tracer_provider = Some(provider);
             }
 
             if config.profiles.enabled {
-                observability.profile_exporter =
-                    Some(profiles::ProfileExporter::new(config, &built_resource)?);
+                observability.profile_exporter = Some(profiles::ProfileExporter::new(
+                    config,
+                    &built_resource,
+                    headers,
+                )?);
             }
         }
 
