@@ -4,6 +4,7 @@ use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use dashmap::DashMap;
 use doggy_dns_nacos::authority::NacosAuthority;
 use doggy_dns_nacos::mapping::{service_name_from_name, to_dns_records};
+use doggy_dns_nacos::test_support::qname;
 use doggy_dns_nacos::watcher::CachedInstance;
 use hickory_proto::rr::{LowerName, Name, RecordType};
 use hickory_server::zone_handler::{LookupOptions, ZoneHandler};
@@ -26,13 +27,13 @@ fn make_populated_cache(count: usize) -> Arc<DashMap<String, Vec<CachedInstance>
     cache
 }
 
-fn bench_nacos_authority_lookup_hit(c: &mut Criterion) {
+/// The authority lookup against the 100-service cache, for one query name.
+fn bench_authority_lookup(c: &mut Criterion, group_name: &str, query: &str) {
     let cache = make_populated_cache(100);
     let authority = NacosAuthority::new(cache, "nacos.local", "DEFAULT_GROUP", "public", 6);
-    let name =
-        LowerName::from(Name::from_str("service-50.default_group.public.nacos.local.").unwrap());
+    let name = qname(query);
 
-    let mut group = c.benchmark_group("nacos_authority_lookup_hit");
+    let mut group = c.benchmark_group(group_name);
     for threads in 1..=4 {
         let rt = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(threads)
@@ -52,30 +53,20 @@ fn bench_nacos_authority_lookup_hit(c: &mut Criterion) {
     group.finish();
 }
 
-fn bench_nacos_authority_lookup_miss(c: &mut Criterion) {
-    let cache = make_populated_cache(100);
-    let authority = NacosAuthority::new(cache, "nacos.local", "DEFAULT_GROUP", "public", 6);
-    let name =
-        LowerName::from(Name::from_str("unknown-svc.default_group.public.nacos.local.").unwrap());
+fn bench_nacos_authority_lookup_hit(c: &mut Criterion) {
+    bench_authority_lookup(
+        c,
+        "nacos_authority_lookup_hit",
+        "service-50.default_group.public.nacos.local.",
+    );
+}
 
-    let mut group = c.benchmark_group("nacos_authority_lookup_miss");
-    for threads in 1..=4 {
-        let rt = tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(threads)
-            .enable_all()
-            .build()
-            .unwrap();
-        group.bench_with_input(BenchmarkId::new("threads", threads), &threads, |b, _| {
-            b.to_async(&rt).iter(|| async {
-                black_box(
-                    authority
-                        .lookup(&name, RecordType::A, None, LookupOptions::default())
-                        .await,
-                )
-            });
-        });
-    }
-    group.finish();
+fn bench_nacos_authority_lookup_miss(c: &mut Criterion) {
+    bench_authority_lookup(
+        c,
+        "nacos_authority_lookup_miss",
+        "unknown-svc.default_group.public.nacos.local.",
+    );
 }
 
 fn bench_service_name_from_name_hit(c: &mut Criterion) {

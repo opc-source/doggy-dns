@@ -4,91 +4,38 @@
 //! handler's own `lookup` for the request's name and type, and attaches no TSIG
 //! context. Nothing else in the suite calls `ZoneHandler::search`.
 
-use async_trait::async_trait;
 use doggy_dns_plugin::zone_handler::search_via_lookup;
-use hickory_proto::op::{Message, MessageType, OpCode, Query};
+use doggy_dns_testutil::{MockZoneHandler, dns_request};
+use hickory_proto::op::{Message, MessageType, OpCode};
 use hickory_proto::rr::{LowerName, Name, RecordType};
 use hickory_server::net::xfer::Protocol;
-use hickory_server::server::{Request, RequestInfo};
+use hickory_server::server::Request;
 use hickory_server::zone_handler::{
-    AuthLookup, AxfrPolicy, LookupControlFlow, LookupOptions, LookupRecords, ZoneHandler, ZoneType,
+    AuthLookup, LookupControlFlow, LookupOptions, LookupRecords, ZoneType,
 };
 use std::net::{Ipv4Addr, SocketAddr};
 use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 
-/// Records every `lookup` it receives and breaks with no answers.
-struct RecordingHandler {
-    /// What each `lookup` received: name, type, whether request info was
-    /// attached, and the forwarded options' DO bit.
-    seen: Arc<Mutex<Vec<(LowerName, RecordType, bool, bool)>>>,
-}
+/// What each `lookup` received: name, type, whether request info was attached,
+/// and the forwarded options' DO bit.
+type Seen = Arc<Mutex<Vec<(LowerName, RecordType, bool, bool)>>>;
 
-#[async_trait]
-impl ZoneHandler for RecordingHandler {
-    fn zone_type(&self) -> ZoneType {
-        ZoneType::Primary
-    }
-
-    fn axfr_policy(&self) -> AxfrPolicy {
-        AxfrPolicy::Deny
-    }
-
-    fn origin(&self) -> &LowerName {
-        static ORIGIN: std::sync::LazyLock<LowerName> =
-            std::sync::LazyLock::new(|| LowerName::from(Name::from_str("search.local.").unwrap()));
-        &ORIGIN
-    }
-
-    async fn lookup(
-        &self,
-        name: &LowerName,
-        rtype: RecordType,
-        request_info: Option<&RequestInfo<'_>>,
-        lookup_options: LookupOptions,
-    ) -> LookupControlFlow<AuthLookup> {
-        self.seen.lock().unwrap().push((
-            name.clone(),
-            rtype,
-            request_info.is_some(),
-            lookup_options.dnssec_ok,
-        ));
-        LookupControlFlow::Break(Ok(AuthLookup::answers(
-            LookupRecords::Section(vec![]),
-            None,
-        )))
-    }
-
-    async fn search(
-        &self,
-        _request: &Request,
-        _lookup_options: LookupOptions,
-    ) -> (
-        LookupControlFlow<AuthLookup>,
-        Option<hickory_proto::rr::TSigResponseContext>,
-    ) {
-        (LookupControlFlow::Skip, None)
-    }
-
-    async fn nsec_records(
-        &self,
-        _name: &LowerName,
-        _lookup_options: LookupOptions,
-    ) -> LookupControlFlow<AuthLookup> {
-        LookupControlFlow::Skip
-    }
-}
-
-fn dns_request(domain: &str, rtype: RecordType) -> Request {
-    let mut message = Message::new(1234, MessageType::Query, OpCode::Query);
-    message.metadata.recursion_desired = true;
-
-    let mut query = Query::new();
-    query.set_name(Name::from_str(domain).unwrap());
-    query.set_query_type(rtype);
-    message.add_query(query);
-
-    encode(message)
+/// A handler that records every `lookup` it receives and breaks with no answers.
+fn recording_handler(seen: Seen) -> MockZoneHandler {
+    MockZoneHandler::new(
+        ZoneType::Primary,
+        "search.local.",
+        move |name, rtype, info, options| {
+            seen.lock()
+                .unwrap()
+                .push((name.clone(), rtype, info.is_some(), options.dnssec_ok));
+            LookupControlFlow::Break(Ok(AuthLookup::answers(
+                LookupRecords::Section(vec![]),
+                None,
+            )))
+        },
+    )
 }
 
 fn dns_request_without_question() -> Request {
@@ -103,11 +50,9 @@ fn encode(message: Message) -> Request {
 
 #[tokio::test]
 async fn search_answers_from_lookup_for_the_requests_name_and_type() {
-    let seen = Arc::new(Mutex::new(Vec::new()));
-    let handler = RecordingHandler {
-        seen: Arc::clone(&seen),
-    };
-    let request = dns_request("www.search.local.", RecordType::AAAA);
+    let seen: Seen = Arc::new(Mutex::new(Vec::new()));
+    let handler = recording_handler(Arc::clone(&seen));
+    let request = dns_request(1234, "www.search.local.", RecordType::AAAA, None);
     let mut options = LookupOptions::default();
     options.dnssec_ok = true;
 
@@ -134,10 +79,8 @@ async fn search_answers_from_lookup_for_the_requests_name_and_type() {
 
 #[tokio::test]
 async fn search_skips_a_request_without_exactly_one_question() {
-    let seen = Arc::new(Mutex::new(Vec::new()));
-    let handler = RecordingHandler {
-        seen: Arc::clone(&seen),
-    };
+    let seen: Seen = Arc::new(Mutex::new(Vec::new()));
+    let handler = recording_handler(Arc::clone(&seen));
     let request = dns_request_without_question();
 
     let (flow, tsig) = search_via_lookup(&handler, &request, LookupOptions::default()).await;

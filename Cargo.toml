@@ -8,6 +8,7 @@ members = [
     "crates/doggy-dns-observability",
     "crates/doggy-dns-xdp",
     "crates/doggy-dns-control",
+    "crates/doggy-dns-testutil",
 ]
 
 [package]

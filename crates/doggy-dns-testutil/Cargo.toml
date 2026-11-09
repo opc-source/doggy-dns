@@ -1,0 +1,12 @@
+[package]
+name = "doggy-dns-testutil"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+description = "Shared test scaffolding for the doggy-dns test targets and benchmarks"
+publish = false
+
+[dependencies]
+hickory-proto = { workspace = true }
+hickory-server = { workspace = true }
+async-trait = { workspace = true }

@@ -10,52 +10,18 @@
 
 mod common;
 
-use async_trait::async_trait;
 use common::dns_request;
 use dashmap::DashMap;
 use doggy_dns_core::handler::{AnswerRotation, DoggyDnsHandler};
 use doggy_dns_nacos::authority::NacosAuthority;
 use doggy_dns_nacos::watcher::CachedInstance;
 use doggy_dns_plugin::authority_chain::AuthorityChain;
+use doggy_dns_testutil::CapturingHandler;
 use hickory_proto::op::Message;
-use hickory_proto::rr::{Record, RecordType};
-use hickory_proto::serialize::binary::BinEncoder;
-use hickory_server::net::NetError;
+use hickory_proto::rr::RecordType;
 use hickory_server::net::runtime::TokioTime;
-use hickory_server::server::{Request, RequestHandler, ResponseHandler, ResponseInfo};
-use hickory_server::zone_handler::MessageResponse;
-use std::sync::{Arc, Mutex};
-
-/// ResponseHandler that serialises the response exactly as the server would and
-/// keeps the raw datagram for byte comparison.
-#[derive(Clone, Default)]
-struct ByteCapturingHandler {
-    bytes: Arc<Mutex<Vec<u8>>>,
-}
-
-#[async_trait]
-impl ResponseHandler for ByteCapturingHandler {
-    async fn send_response<'a>(
-        &mut self,
-        response: MessageResponse<
-            '_,
-            'a,
-            impl Iterator<Item = &'a Record> + Send + 'a,
-            impl Iterator<Item = &'a Record> + Send + 'a,
-            impl Iterator<Item = &'a Record> + Send + 'a,
-            impl Iterator<Item = &'a Record> + Send + 'a,
-        >,
-    ) -> Result<ResponseInfo, NetError> {
-        let mut bytes = Vec::new();
-        let mut encoder = BinEncoder::new(&mut bytes);
-        encoder.set_max_size(u16::MAX);
-        let info = response
-            .destructive_emit(&mut encoder)
-            .expect("serialize test response");
-        *self.bytes.lock().unwrap() = bytes;
-        Ok(info)
-    }
-}
+use hickory_server::server::{Request, RequestHandler};
+use std::sync::Arc;
 
 fn make_request(domain: &str, rtype: RecordType) -> Request {
     // The golden bytes start with this id, so it is part of what is pinned.
@@ -64,7 +30,7 @@ fn make_request(domain: &str, rtype: RecordType) -> Request {
 
 /// One A instance under `my-svc.default_group.public`, so a v6 query on the
 /// same name is a real NODATA (the spec's golden set pins that shape).
-fn nacos_handler() -> (DoggyDnsHandler, ByteCapturingHandler) {
+fn nacos_handler() -> (DoggyDnsHandler, CapturingHandler) {
     let cache = Arc::new(DashMap::new());
     cache.insert(
         "my-svc".to_string(),
@@ -81,7 +47,7 @@ fn nacos_handler() -> (DoggyDnsHandler, ByteCapturingHandler) {
     )]));
     (
         DoggyDnsHandler::new(vec![], chain, false, AnswerRotation::new(false)),
-        ByteCapturingHandler::default(),
+        CapturingHandler::default(),
     )
 }
 
@@ -91,7 +57,7 @@ async fn wire(domain: &str, rtype: RecordType) -> Vec<u8> {
     handler
         .handle_request::<_, TokioTime>(&request, capture.clone())
         .await;
-    capture.bytes.lock().unwrap().clone()
+    capture.bytes()
 }
 
 fn hex(bytes: &[u8]) -> String {

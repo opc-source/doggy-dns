@@ -8,46 +8,17 @@
 
 mod common;
 
-use async_trait::async_trait;
 use common::dns_request;
 use dashmap::DashMap;
 use doggy_dns_core::handler::{AnswerRotation, DoggyDnsHandler};
 use doggy_dns_nacos::authority::NacosAuthority;
 use doggy_dns_nacos::watcher::CachedInstance;
 use doggy_dns_plugin::authority_chain::AuthorityChain;
-use hickory_proto::rr::{Record, RecordType};
-use hickory_proto::serialize::binary::BinEncoder;
-use hickory_server::net::NetError;
+use doggy_dns_testutil::CapturingHandler;
+use hickory_proto::rr::RecordType;
 use hickory_server::net::runtime::TokioTime;
-use hickory_server::server::{RequestHandler, ResponseHandler, ResponseInfo};
-use hickory_server::zone_handler::MessageResponse;
+use hickory_server::server::RequestHandler;
 use std::sync::Arc;
-
-/// Serializes the response so the handler's send path completes normally.
-#[derive(Clone)]
-struct MockResponseHandler;
-
-#[async_trait]
-impl ResponseHandler for MockResponseHandler {
-    async fn send_response<'a>(
-        &mut self,
-        response: MessageResponse<
-            '_,
-            'a,
-            impl Iterator<Item = &'a Record> + Send + 'a,
-            impl Iterator<Item = &'a Record> + Send + 'a,
-            impl Iterator<Item = &'a Record> + Send + 'a,
-            impl Iterator<Item = &'a Record> + Send + 'a,
-        >,
-    ) -> Result<ResponseInfo, NetError> {
-        let mut bytes = Vec::new();
-        let mut encoder = BinEncoder::new(&mut bytes);
-        encoder.set_max_size(u16::MAX);
-        Ok(response
-            .destructive_emit(&mut encoder)
-            .expect("serialize test response"))
-    }
-}
 
 /// Captures formatted log output so the test can assert the rendered values.
 #[derive(Clone)]
@@ -108,7 +79,7 @@ async fn handler_renders_the_same_log_field_values_as_before() {
     let guard = tracing::subscriber::set_default(subscriber);
 
     handler
-        .handle_request::<_, TokioTime>(&request, MockResponseHandler)
+        .handle_request::<_, TokioTime>(&request, CapturingHandler::default())
         .await;
     drop(guard);
 

@@ -20,6 +20,7 @@ libc = { workspace = true }
 [dev-dependencies]
 tracing-subscriber = { workspace = true }
 doggy-dns-nacos = { path = "../doggy-dns-nacos" }
+doggy-dns-testutil = { path = "../doggy-dns-testutil" }
 dashmap = { workspace = true }
 hickory-proto = { workspace = true }
 hickory-server = { workspace = true }

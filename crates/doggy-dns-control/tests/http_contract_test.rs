@@ -1,38 +1,11 @@
 #![allow(clippy::disallowed_methods)]
 
-use chrono::Utc;
-use doggy_dns_control::live::LiveState;
-use doggy_dns_control::state::McpState;
+mod common;
+
+use common::{forward_plugins, test_live, test_state};
+use doggy_dns_control::ControlConfig;
 use doggy_dns_control::transport;
-use doggy_dns_control::{ControlConfig, PluginSnapshot};
 use std::sync::Arc;
-
-fn test_state() -> Arc<McpState> {
-    Arc::new(McpState::from_parts(
-        "dns-node-1".into(),
-        4242,
-        "0.1.0".into(),
-        Utc::now(),
-        "0.0.0.0:15353".into(),
-        vec!["udp".into(), "tcp".into()],
-        vec![PluginSnapshot {
-            order: 0,
-            kind: "forward".into(),
-            enabled: true,
-            details: serde_json::json!({"upstream": ["8.8.8.8:53"]}),
-        }],
-        "",
-    ))
-}
-
-fn test_live() -> Arc<LiveState> {
-    let mut live = LiveState::new();
-    live.register(
-        "nacos.nacos.local",
-        || serde_json::json!({"subscribedServices": 3}),
-    );
-    Arc::new(live)
-}
 
 fn initialize_request() -> serde_json::Value {
     serde_json::json!({
@@ -103,7 +76,7 @@ async fn get_path(addr: std::net::SocketAddr, path: &str) -> reqwest::Response {
 
 #[tokio::test]
 async fn lists_four_read_only_tools_and_calls_status() {
-    let state = test_state();
+    let state = Arc::new(test_state(forward_plugins(), ""));
     let cfg = ControlConfig {
         port: 0,
         token: None,
@@ -147,7 +120,7 @@ async fn lists_four_read_only_tools_and_calls_status() {
 
 #[tokio::test]
 async fn rejects_missing_or_wrong_token() {
-    let state = test_state();
+    let state = Arc::new(test_state(forward_plugins(), ""));
     let cfg = ControlConfig {
         port: 0,
         token: Some("s3cret".into()),
@@ -169,7 +142,7 @@ async fn rejects_missing_or_wrong_token() {
 
 #[tokio::test]
 async fn initialize_returns_doggy_dns_control_server_info() {
-    let state = test_state();
+    let state = Arc::new(test_state(forward_plugins(), ""));
     let cfg = ControlConfig {
         port: 0,
         token: None,
@@ -188,7 +161,7 @@ async fn initialize_returns_doggy_dns_control_server_info() {
 
 #[tokio::test]
 async fn health_endpoints_bypass_the_mcp_token() {
-    let state = test_state();
+    let state = Arc::new(test_state(forward_plugins(), ""));
     let cfg = ControlConfig {
         port: 0,
         token: Some("s3cret".into()),
@@ -215,7 +188,7 @@ async fn health_endpoints_bypass_the_mcp_token() {
 
 #[tokio::test]
 async fn endpoints_subset_hides_unselected_routes() {
-    let state = test_state();
+    let state = Arc::new(test_state(forward_plugins(), ""));
     let cfg = ControlConfig {
         port: 0,
         token: None,

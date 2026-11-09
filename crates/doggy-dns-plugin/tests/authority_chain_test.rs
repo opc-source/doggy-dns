@@ -1,118 +1,32 @@
 #![allow(clippy::disallowed_methods)]
 
-use async_trait::async_trait;
 use doggy_dns_plugin::authority_chain::AuthorityChain;
-use hickory_proto::rr::{LowerName, Name, RecordType};
-use hickory_server::server::{Request, RequestInfo};
+use doggy_dns_testutil::MockZoneHandler;
+use hickory_proto::op::ResponseCode;
+use hickory_proto::rr::rdata::SOA;
+use hickory_proto::rr::{LowerName, Name, RData, Record, RecordType};
 use hickory_server::zone_handler::{
-    AuthLookup, AxfrPolicy, LookupControlFlow, LookupOptions, LookupRecords, ZoneHandler, ZoneType,
+    AuthLookup, LookupControlFlow, LookupError, LookupRecords, ZoneType,
 };
 use std::str::FromStr;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
-/// A ZoneHandler that always returns Break(Ok(...)) with an empty record set.
-struct BreakZoneHandler;
-
-#[async_trait]
-impl ZoneHandler for BreakZoneHandler {
-    fn zone_type(&self) -> ZoneType {
-        ZoneType::Primary
-    }
-
-    fn axfr_policy(&self) -> AxfrPolicy {
-        AxfrPolicy::Deny
-    }
-
-    fn origin(&self) -> &LowerName {
-        static ORIGIN: std::sync::LazyLock<LowerName> =
-            std::sync::LazyLock::new(|| LowerName::from(Name::from_str("break.local.").unwrap()));
-        &ORIGIN
-    }
-
-    async fn lookup(
-        &self,
-        _name: &LowerName,
-        _rtype: RecordType,
-        _request_info: Option<&RequestInfo<'_>>,
-        _lookup_options: LookupOptions,
-    ) -> LookupControlFlow<AuthLookup> {
+/// A handler that always breaks with an empty record set.
+fn break_handler() -> MockZoneHandler {
+    MockZoneHandler::new(ZoneType::Primary, "break.local.", |_, _, _, _| {
         LookupControlFlow::Break(Ok(AuthLookup::answers(
             LookupRecords::Section(vec![]),
             None,
         )))
-    }
-
-    async fn search(
-        &self,
-        _request: &Request,
-        _lookup_options: LookupOptions,
-    ) -> (
-        LookupControlFlow<AuthLookup>,
-        Option<hickory_proto::rr::TSigResponseContext>,
-    ) {
-        (LookupControlFlow::Skip, None)
-    }
-
-    async fn nsec_records(
-        &self,
-        _name: &LowerName,
-        _lookup_options: LookupOptions,
-    ) -> LookupControlFlow<AuthLookup> {
-        LookupControlFlow::Skip
-    }
+    })
 }
 
-/// A ZoneHandler that always returns Continue(Err(...)).
-struct ErrorZoneHandler;
-
-#[async_trait]
-impl ZoneHandler for ErrorZoneHandler {
-    fn zone_type(&self) -> ZoneType {
-        ZoneType::Primary
-    }
-
-    fn axfr_policy(&self) -> AxfrPolicy {
-        AxfrPolicy::Deny
-    }
-
-    fn origin(&self) -> &LowerName {
-        static ORIGIN: std::sync::LazyLock<LowerName> =
-            std::sync::LazyLock::new(|| LowerName::from(Name::from_str("error.local.").unwrap()));
-        &ORIGIN
-    }
-
-    async fn lookup(
-        &self,
-        _name: &LowerName,
-        _rtype: RecordType,
-        _request_info: Option<&RequestInfo<'_>>,
-        _lookup_options: LookupOptions,
-    ) -> LookupControlFlow<AuthLookup> {
-        LookupControlFlow::Continue(Err(
-            hickory_server::zone_handler::LookupError::ResponseCode(
-                hickory_proto::op::ResponseCode::ServFail,
-            ),
-        ))
-    }
-
-    async fn search(
-        &self,
-        _request: &Request,
-        _lookup_options: LookupOptions,
-    ) -> (
-        LookupControlFlow<AuthLookup>,
-        Option<hickory_proto::rr::TSigResponseContext>,
-    ) {
-        (LookupControlFlow::Skip, None)
-    }
-
-    async fn nsec_records(
-        &self,
-        _name: &LowerName,
-        _lookup_options: LookupOptions,
-    ) -> LookupControlFlow<AuthLookup> {
-        LookupControlFlow::Skip
-    }
+/// A handler that always fails the lookup with SERVFAIL.
+fn error_handler() -> MockZoneHandler {
+    MockZoneHandler::new(ZoneType::Primary, "error.local.", |_, _, _, _| {
+        LookupControlFlow::Continue(Err(LookupError::ResponseCode(ResponseCode::ServFail)))
+    })
 }
 
 #[tokio::test]
@@ -241,21 +155,21 @@ fn is_empty_true_for_empty_chain() {
 
 #[test]
 fn is_empty_false_for_non_empty_chain() {
-    let chain = AuthorityChain::new(vec![("break".to_string(), Arc::new(BreakZoneHandler))]);
+    let chain = AuthorityChain::new(vec![("break".to_string(), Arc::new(break_handler()))]);
     assert!(!chain.is_empty());
 }
 
 #[tokio::test]
 async fn break_result_stops_chain_and_returns_handler_name() {
     let chain = AuthorityChain::new(vec![
-        ("breaker".to_string(), Arc::new(BreakZoneHandler)),
-        ("should-not-reach".to_string(), Arc::new(ErrorZoneHandler)),
+        ("breaker".to_string(), Arc::new(break_handler())),
+        ("should-not-reach".to_string(), Arc::new(error_handler())),
     ]);
 
     let name = LowerName::from(Name::from_str("anything.example.com.").unwrap());
     let result = chain.resolve(&name, RecordType::A, None).await;
 
-    // BreakZoneHandler returns Break(Ok(...)), so chain stops at first handler
+    // `break_handler` returns Break(Ok(...)), so the chain stops at the first handler
     assert!(matches!(result.outcome, LookupControlFlow::Break(Ok(_))));
     assert_eq!(result.handler_name.as_deref(), Some("breaker"));
 }
@@ -264,7 +178,7 @@ async fn break_result_stops_chain_and_returns_handler_name() {
 async fn continue_error_propagated_with_handler_name() {
     let chain = AuthorityChain::new(vec![(
         "error-handler".to_string(),
-        Arc::new(ErrorZoneHandler),
+        Arc::new(error_handler()),
     )]);
 
     let name = LowerName::from(Name::from_str("anything.example.com.").unwrap());
@@ -307,7 +221,11 @@ async fn authoritative_negative_carries_apex_soa() {
 async fn external_negative_is_not_authoritative_and_has_no_soa() {
     let chain = AuthorityChain::new(vec![(
         "external".to_string(),
-        Arc::new(ExternalNegativeHandler),
+        Arc::new(MockZoneHandler::new(
+            ZoneType::External,
+            ".",
+            |_, _, _, _| LookupControlFlow::Continue(Err(LookupError::NameExists)),
+        )),
     )]);
 
     let name = LowerName::from(Name::from_str("missing.example.com.").unwrap());
@@ -317,93 +235,20 @@ async fn external_negative_is_not_authoritative_and_has_no_soa() {
     assert!(result.soa.is_none());
 }
 
-/// A non-authoritative handler that reports NODATA.
-struct ExternalNegativeHandler;
-
-#[async_trait]
-impl ZoneHandler for ExternalNegativeHandler {
-    fn zone_type(&self) -> ZoneType {
-        ZoneType::External
-    }
-
-    fn axfr_policy(&self) -> AxfrPolicy {
-        AxfrPolicy::Deny
-    }
-
-    fn origin(&self) -> &LowerName {
-        static ORIGIN: std::sync::LazyLock<LowerName> =
-            std::sync::LazyLock::new(|| LowerName::from(Name::root()));
-        &ORIGIN
-    }
-
-    async fn lookup(
-        &self,
-        _name: &LowerName,
-        _rtype: RecordType,
-        _request_info: Option<&RequestInfo<'_>>,
-        _lookup_options: LookupOptions,
-    ) -> LookupControlFlow<AuthLookup> {
-        LookupControlFlow::Continue(Err(hickory_server::zone_handler::LookupError::NameExists))
-    }
-
-    async fn search(
-        &self,
-        _request: &Request,
-        _lookup_options: LookupOptions,
-    ) -> (
-        LookupControlFlow<AuthLookup>,
-        Option<hickory_proto::rr::TSigResponseContext>,
-    ) {
-        (LookupControlFlow::Skip, None)
-    }
-
-    async fn nsec_records(
-        &self,
-        _name: &LowerName,
-        _lookup_options: LookupOptions,
-    ) -> LookupControlFlow<AuthLookup> {
-        LookupControlFlow::Skip
-    }
-}
-
-use std::sync::atomic::{AtomicUsize, Ordering};
-
-/// Authoritative handler that counts how many times the chain looked at it.
-/// An in-zone negative answer used to cost two lookups: the answer and a
-/// second one for the apex SOA.
-struct CountingPrimaryHandler {
-    calls: Arc<AtomicUsize>,
-}
-
-#[async_trait]
-impl ZoneHandler for CountingPrimaryHandler {
-    fn zone_type(&self) -> ZoneType {
-        ZoneType::Primary
-    }
-
-    fn axfr_policy(&self) -> AxfrPolicy {
-        AxfrPolicy::Deny
-    }
-
-    fn origin(&self) -> &LowerName {
-        static ORIGIN: std::sync::LazyLock<LowerName> =
-            std::sync::LazyLock::new(|| LowerName::from(Name::from_str("example.com.").unwrap()));
-        &ORIGIN
-    }
-
-    async fn lookup(
-        &self,
-        _name: &LowerName,
-        rtype: RecordType,
-        _request_info: Option<&RequestInfo<'_>>,
-        _lookup_options: LookupOptions,
-    ) -> LookupControlFlow<AuthLookup> {
-        self.calls.fetch_add(1, Ordering::Relaxed);
+#[tokio::test]
+async fn negative_answers_fetch_the_apex_soa_only_once() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    // Authoritative handler that counts how many times the chain looked at it.
+    // An in-zone negative answer used to cost two lookups: the answer and a
+    // second one for the apex SOA.
+    let counted = Arc::clone(&calls);
+    let handler = MockZoneHandler::new(ZoneType::Primary, "example.com.", move |_, rtype, _, _| {
+        counted.fetch_add(1, Ordering::Relaxed);
         if rtype == RecordType::SOA {
-            let soa = hickory_proto::rr::Record::from_rdata(
+            let soa = Record::from_rdata(
                 Name::from_str("example.com.").unwrap(),
                 30,
-                hickory_proto::rr::RData::SOA(hickory_proto::rr::rdata::SOA::new(
+                RData::SOA(SOA::new(
                     Name::from_str("example.com.").unwrap(),
                     Name::from_str("admin.example.com.").unwrap(),
                     1,
@@ -418,40 +263,9 @@ impl ZoneHandler for CountingPrimaryHandler {
                 None,
             )));
         }
-        LookupControlFlow::Continue(Err(
-            hickory_server::zone_handler::LookupError::ResponseCode(
-                hickory_proto::op::ResponseCode::NXDomain,
-            ),
-        ))
-    }
-
-    async fn search(
-        &self,
-        _request: &Request,
-        _lookup_options: LookupOptions,
-    ) -> (
-        LookupControlFlow<AuthLookup>,
-        Option<hickory_proto::rr::TSigResponseContext>,
-    ) {
-        (LookupControlFlow::Skip, None)
-    }
-
-    async fn nsec_records(
-        &self,
-        _name: &LowerName,
-        _lookup_options: LookupOptions,
-    ) -> LookupControlFlow<AuthLookup> {
-        LookupControlFlow::Skip
-    }
-}
-
-#[tokio::test]
-async fn negative_answers_fetch_the_apex_soa_only_once() {
-    let calls = Arc::new(AtomicUsize::new(0));
-    let handler = Arc::new(CountingPrimaryHandler {
-        calls: Arc::clone(&calls),
+        LookupControlFlow::Continue(Err(LookupError::ResponseCode(ResponseCode::NXDomain)))
     });
-    let chain = AuthorityChain::new(vec![("counting".to_string(), handler)]);
+    let chain = AuthorityChain::new(vec![("counting".to_string(), Arc::new(handler))]);
 
     let first = chain
         .resolve(
