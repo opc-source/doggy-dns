@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+doggy-dns-xdp-abi = { path = "../../xdp/doggy-dns-xdp-abi" }
 doggy-dns-plugin = { path = "../doggy-dns-plugin" }
 doggy-dns-basic = { path = "../doggy-dns-basic" }
 tokio = { workspace = true }

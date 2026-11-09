@@ -11,13 +11,14 @@ use aya_ebpf::{
 use aya_log_ebpf::{error, warn};
 
 mod protocol;
-mod types;
 
+use doggy_dns_xdp_abi::{
+    CacheKey, CacheValue, FLAG_NEGATIVE, MAX_RESPONSE_SIZE, XdpRuntimeConfig, XdpStats,
+};
 use protocol::{
     COPY_CHUNK, ETH_HDR_LEN, ETH_P_IP, EthHdr, IPPROTO_UDP, IpHdr, UDP_HDR_LEN, UdpHdr, copy_chunk,
     read_u16_be, swap_u16, swap_u32, write_u16_be,
 };
-use types::{CacheKey, CacheValue, FLAG_NEGATIVE, XdpRuntimeConfig, XdpStats};
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -26,7 +27,6 @@ use types::{CacheKey, CacheValue, FLAG_NEGATIVE, XdpRuntimeConfig, XdpStats};
 // A QNAME is at most 255 bytes on the wire, including the root label.
 const MAX_QNAME_LEN: usize = 255;
 const DNS_HDR_LEN: usize = 12;
-const MAX_DNS_LEN: usize = 512;
 // Largest UDP/L4 length the fast path will touch. Only queries that carry a
 // single question ever match the cache, so anything above this is passed on.
 const MAX_UDP_DNS_LEN: usize = 1500;
@@ -201,7 +201,7 @@ fn try_dns_xdp(ctx: &XdpContext) -> Result<(u32, Option<Outcome>), ()> {
     } else {
         // The duplicate bound inside `write_positive` exists for the verifier
         // and stays silent; this is the diagnostic site for a poisoned entry.
-        if resp_len < MIN_POSITIVE_LEN || resp_len > MAX_DNS_LEN {
+        if resp_len < MIN_POSITIVE_LEN || resp_len > MAX_RESPONSE_SIZE {
             warn!(
                 ctx,
                 "cached response length out of range: {} (txid {:x}, hash {:x})",
@@ -472,7 +472,7 @@ fn write_positive(
     // Verifier bound only: the poisoned-entry case is diagnosed and passed
     // before the resize, and reaching this point means the frame was resized
     // and must be answered or dropped.
-    if resp_len < MIN_POSITIVE_LEN || resp_len > MAX_DNS_LEN {
+    if resp_len < MIN_POSITIVE_LEN || resp_len > MAX_RESPONSE_SIZE {
         return Err(());
     }
 

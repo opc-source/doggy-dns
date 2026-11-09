@@ -4,8 +4,6 @@ pub mod kernel_log;
 pub mod middleware;
 pub mod pin;
 #[cfg(target_os = "linux")]
-mod pod_impls;
-#[cfg(target_os = "linux")]
 pub mod program;
 pub mod stats;
 pub mod types;

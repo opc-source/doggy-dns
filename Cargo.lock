@@ -831,6 +831,7 @@ dependencies = [
  "criterion",
  "doggy-dns-basic",
  "doggy-dns-plugin",
+ "doggy-dns-xdp-abi",
  "hickory-proto",
  "hickory-server",
  "libc",
@@ -838,6 +839,13 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "doggy-dns-xdp-abi"
+version = "0.1.0"
+dependencies = [
+ "aya",
 ]
 
 [[package]]

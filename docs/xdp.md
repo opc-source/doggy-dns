@@ -225,11 +225,13 @@ sudo env "PATH=$PATH" RUST_LOG=debug cargo test -p doggy-dns-xdp --test xdp_inte
 cargo bench -p doggy-dns-xdp                    # component benchmarks
 ```
 
-The BPF struct layout (`CacheKey`, `CacheValue`, `XdpStats`,
-`XdpRuntimeConfig`) is intentionally duplicated between
-`crates/doggy-dns-xdp/src/types.rs` and
-`xdp/doggy-dns-xdp-ebpf/src/types.rs`; `XdpStats` has a drift-guard test, but
-the others must be edited in both places together.
+The BPF map layout (`CacheKey`, `CacheValue`, `XdpStats`, `XdpRuntimeConfig`)
+lives in `xdp/doggy-dns-xdp-abi`, which both the eBPF program and
+`crates/doggy-dns-xdp` depend on, so the two sides cannot drift apart; the
+compile-time size assertions live there too. Bump `CACHE_FORMAT_VERSION` in
+that crate with any layout change. The QNAME hash is still implemented on both
+sides — the userspace key builder hashes the wire name, the kernel parser
+hashes packet words in place — so that contract is mirrored by hand.
 
 [benchmarks/xdp-kernel-hot-path.md](benchmarks/xdp-kernel-hot-path.md) records
 the kernel-side measurements: static instruction counts for the whole program

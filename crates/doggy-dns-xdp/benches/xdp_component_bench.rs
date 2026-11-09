@@ -35,11 +35,15 @@ fn bench_cache_value_construction(c: &mut Criterion) {
     let resp_data = vec![0u8; 128];
 
     c.bench_function("cache_value_positive", |b| {
-        b.iter(|| CacheValue::new_positive(black_box(resp_data.clone()), black_box(1_000_000_000)))
+        b.iter(|| {
+            CacheValue::new_positive(black_box(resp_data.as_slice()), black_box(1_000_000_000))
+        })
     });
 
     c.bench_function("cache_value_negative", |b| {
-        b.iter(|| CacheValue::new_negative(black_box(resp_data.clone()), black_box(1_000_000_000)))
+        b.iter(|| {
+            CacheValue::new_negative(black_box(resp_data.as_slice()), black_box(1_000_000_000))
+        })
     });
 }
 
