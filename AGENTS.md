@@ -99,8 +99,8 @@ handed). `entry_of(ledgered, ever_confirmed, window_open)` then picks the source
   that same cache read first and is confirmed only when the cache has nothing to
   serve — the disk-loaded cache is what answers names during a start-up outage.
 - an unledgered name in a process the registry *has* answered is first confirmed
-  with `get_all_instances(..., subscribe = false)`, the only shape in nacos-sdk
-  0.8.3 that reports a failed request; a failed confirmation tries the client's
+  with `get_all_instances(..., subscribe = false)`, the only shape the SDK has that
+  reports a failed request; a failed confirmation tries the client's
   cache before answering `SERVFAIL`.
 - an unledgered name inside an open backoff window gets the cache read and nothing
   else; an empty read is `SERVFAIL`, refused without waiting on the registry.
@@ -110,7 +110,14 @@ so a name answers either with instances or with the server's own verdict. The le
 entry appears only after `subscribe` returns, so concurrent first queries can each take
 the unledgered path until it lands.
 
-nacos-sdk 0.8.3 gives `subscribe` nothing to report back — it registers the
+The SDK's naming cache holds one shared snapshot per service and hands it out as an
+`Arc<Vec<ServiceInstance>>`, so a cache hit costs a pointer bump rather than a deep
+copy of every instance (`ip` string, metadata map and all) per query. The plugin
+reads that snapshot through the `Arc` and derives its own `CachedInstance` records
+from it — that derivation is the only copy left on the path, and it is the parsed
+form the records are built from anyway.
+
+The SDK gives `subscribe` nothing to report back — it registers the
 listener and its own retry task, swallows the request error and returns `Ok` — so
 the arm that forgets a failed subscribe is defensive, not a live path. A call that
 fails, or one that takes longer than the watcher's three-second bound

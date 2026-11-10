@@ -17,7 +17,7 @@ struct ConfigReloadListener<F: Fn(String) + Send + Sync + 'static> {
 
 impl<F: Fn(String) + Send + Sync + 'static> ConfigChangeListener for ConfigReloadListener<F> {
     fn notify(&self, config_resp: ConfigResponse) {
-        let content = config_resp.content().to_string();
+        let content = config_resp.content().to_owned();
         tracing::info!(
             data_id = %config_resp.data_id(),
             "received config update from nacos"
@@ -55,7 +55,7 @@ impl NacosConfigWatcher {
         let listener = ConfigReloadListener { callback };
 
         self.config_service
-            .add_listener(self.data_id.clone(), self.group.clone(), Arc::new(listener))
+            .add_listener(&self.data_id, &self.group, Arc::new(listener))
             .await?;
 
         tracing::info!(
@@ -71,8 +71,8 @@ impl NacosConfigWatcher {
     pub async fn get_current_config(&self) -> anyhow::Result<String> {
         let resp = self
             .config_service
-            .get_config(self.data_id.clone(), self.group.clone())
+            .get_config(&self.data_id, &self.group)
             .await?;
-        Ok(resp.content().to_string())
+        Ok(resp.content().to_owned())
     }
 }

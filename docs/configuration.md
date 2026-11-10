@@ -194,14 +194,15 @@ process has subscribed reads that cache, and a name it has *not* subscribed is f
 confirmed by the server (`subscribe = false`) — outside the backoff window described
 below. A cache entry loaded from a previous run, or the absence of one, says nothing
 about a name this process never asked the
-server about, and nacos-sdk 0.8.3 reports a failed fetch on the `subscribe = true`
+server about, and the SDK reports a failed fetch on the `subscribe = true`
 path as an empty list rather than an error. While the registry has never answered this
 process, though, that confirmation has nothing to give, so the cache is read first and
 the server is asked only when the cache has nothing to serve. The price of that
 start-up rule is an answer that can carry the previous run's address until the client
 refreshes; the gain is that an outage at boot resolves names instead of answering
-`SERVFAIL`. An empty list is never served from the cache. The confirmed path costs one
-list clone plus address parsing per query and one round trip per new name.
+`SERVFAIL`. An empty list is never served from the cache. The confirmed path costs
+address parsing per query and one round trip per new name; the instance list itself
+is shared, not copied — the SDK hands out the snapshot its cache already holds.
 
 `service_pattern` selects which names may reach Nacos at all. A configured
 pattern is a regex wrapped in whole-name anchors (`order-service` therefore
@@ -223,7 +224,7 @@ client's own push/refresh keeps the cache current. A name answered from the clie
 cache has to subscribe itself too: `get_all_instances` returns a cached entry before
 `subscribe_async` is reached, so without that call a disk-loaded entry would never be
 refreshed and the name would stay out of the ledger. `subscribe` reports no failure to
-us in nacos-sdk 0.8.3: it registers the listener and its own retry task, swallows the
+us: it registers the listener and its own retry task, swallows the
 request error and returns `Ok`.
 
 `naming_load_cache_at_start` makes the client load its naming cache from disk, which

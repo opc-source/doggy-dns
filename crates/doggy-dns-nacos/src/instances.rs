@@ -17,14 +17,14 @@ impl CachedInstance {
     /// Parsed once per query read instead of once per record, so an unparsable
     /// address is dropped before the family filter walks the list.
     pub fn from_service_instance(instance: &ServiceInstance) -> Option<Self> {
-        match IpAddr::from_str(&instance.ip) {
+        match IpAddr::from_str(instance.ip()) {
             Ok(ip) => Some(Self {
                 ip,
-                port: instance.port,
-                healthy: instance.healthy,
+                port: instance.port(),
+                healthy: instance.healthy(),
             }),
             Err(e) => {
-                tracing::warn!("skipping invalid IP '{}': {}", instance.ip, e);
+                tracing::warn!("skipping invalid IP '{}': {}", instance.ip(), e);
                 None
             }
         }
@@ -37,7 +37,7 @@ impl CachedInstance {
 pub fn usable_instances(instances: &[ServiceInstance]) -> Vec<CachedInstance> {
     instances
         .iter()
-        .filter(|instance| instance.healthy && instance.enabled)
+        .filter(|instance| instance.healthy() && instance.enabled())
         .filter_map(CachedInstance::from_service_instance)
         .collect()
 }
