@@ -5,7 +5,7 @@ name: Nacos CI
 # through the subscription cache. The cases are #[ignore]d, so plain
 # `cargo test --workspace` never needs a server.
 #
-# Image choice: Nacos 2.x, the protocol line nacos-sdk 0.8 speaks (v1/v2 HTTP
+# Image choice: Nacos 2.x, the protocol line the SDK speaks (v1/v2 HTTP
 # plus the 9848 gRPC channel). The `latest` tag now points at Nacos 3.x, which
 # enables authentication by default and moved to /nacos/v3 endpoints, so the
 # tag is pinned deliberately — bump it together with the SDK, not casually.

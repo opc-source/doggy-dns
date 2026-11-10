@@ -28,7 +28,7 @@ pub const NACOS_LOOKUP_TIMEOUT: Duration = Duration::from_secs(3);
 /// So this bound only ever cuts off the round trip the SDK makes when the name is
 /// *not* held, and cutting that one off costs nothing. `subscribe_async` registers
 /// the listener, the refresh task and the redo task before it waits for the server
-/// (`naming/mod.rs:489-520`), so the name stays subscribed and the SDK fills the
+/// (`naming/mod.rs:495-527`), so the name stays subscribed and the SDK fills the
 /// cache itself once the registry answers again. What it buys is the point: a
 /// start-up or outage probe of a name the client has never seen costs 50 ms instead
 /// of a full [`NACOS_LOOKUP_TIMEOUT`].
@@ -290,7 +290,7 @@ impl NacosServiceWatcher {
     /// caller decides what a `None` means - ask the server, or refuse.
     ///
     /// A hit is what arms the subscription. `get_all_instances` returns the cached
-    /// entry before `subscribe_async` is reached (`naming/mod.rs:361-363`), so
+    /// entry before `subscribe_async` is reached (`naming/mod.rs:373-381`), so
     /// without the call below a disk-loaded entry would never be refreshed by a
     /// push or the polling updater, and the name would stay out of the ledger to be
     /// probed again on every query.
@@ -323,7 +323,7 @@ impl NacosServiceWatcher {
     /// Ask the SDK for `service`, reading its naming cache first when
     /// `subscribe` is set.
     ///
-    /// `subscribe = false` is the only shape nacos-sdk 0.8.3 has that reports a
+    /// `subscribe = false` is the only shape nacos-sdk has that reports a
     /// failed request: it forwards the error straight out of `request_to_server`,
     /// touching neither the cache nor the subscription registry, which is what
     /// makes the answer a confirmation.
@@ -333,18 +333,17 @@ impl NacosServiceWatcher {
     /// fetch, which is why every caller bounds this call rather than trusting it
     /// to be local. A failed fetch is swallowed into an empty list, which is
     /// indistinguishable from a name that does not exist.
+    ///
+    /// The list comes back as an `Arc`: the cache hands out the snapshot it
+    /// already holds rather than a copy of it, so a cache hit costs a pointer
+    /// bump instead of a deep clone of every instance.
     async fn query_naming_service(
         &self,
         service: &str,
         subscribe: bool,
-    ) -> Result<Vec<ServiceInstance>, nacos_sdk::api::error::Error> {
+    ) -> Result<Arc<Vec<ServiceInstance>>, nacos_sdk::api::error::Error> {
         self.naming_service
-            .get_all_instances(
-                service.to_string(),
-                Some(self.group.clone()),
-                vec![],
-                subscribe,
-            )
+            .get_all_instances(service, Some(self.group.clone()), vec![], subscribe)
             .await
     }
 
@@ -404,7 +403,7 @@ impl NacosServiceWatcher {
         let subscribed = self
             .naming_service
             .subscribe(
-                service.to_string(),
+                service,
                 Some(self.group.clone()),
                 vec![],
                 Arc::clone(&self.listener),
@@ -415,7 +414,7 @@ impl NacosServiceWatcher {
                 self.subscribed.insert(service.to_string());
                 tracing::info!("asked the nacos client to subscribe service '{}'", service);
             }
-            // Defensive. nacos-sdk 0.8.3's `subscribe` registers the listener and
+            // Defensive. The SDK's `subscribe` registers the listener and
             // its own retry task, then swallows the request error and returns
             // `Ok(())`, so nothing reaches this arm live. If a version does hand a
             // failure back, the name stays out of the ledger and the next query

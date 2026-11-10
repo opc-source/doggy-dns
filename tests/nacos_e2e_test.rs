@@ -92,7 +92,7 @@ impl NacosClient {
             .map(|(ip, port)| test_instance(ip, *port))
             .collect();
         self.naming
-            .batch_register_instance(service.to_string(), Some(GROUP.to_string()), instances)
+            .batch_register_instance(service, Some(GROUP.to_string()), instances)
             .await
             .expect("failed to register instances with Nacos");
     }
@@ -100,11 +100,7 @@ impl NacosClient {
     /// Remove one ephemeral instance; the last removal empties the service.
     async fn deregister(&self, service: &str, ip: &str, port: i32) {
         self.naming
-            .deregister_instance(
-                service.to_string(),
-                Some(GROUP.to_string()),
-                test_instance(ip, port),
-            )
+            .deregister_instance(service, Some(GROUP.to_string()), test_instance(ip, port))
             .await
             .expect("failed to deregister an instance with Nacos");
     }
@@ -115,11 +111,11 @@ impl NacosClient {
     /// registry actually holds rather than what some client last remembered.
     async fn server_ips(&self, service: &str) -> HashSet<String> {
         self.naming
-            .get_all_instances(service.to_string(), Some(GROUP.to_string()), vec![], false)
+            .get_all_instances(service, Some(GROUP.to_string()), vec![], false)
             .await
             .unwrap_or_default()
             .iter()
-            .map(|instance| instance.ip.clone())
+            .map(|instance| instance.ip().to_owned())
             .collect()
     }
 

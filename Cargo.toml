@@ -45,7 +45,8 @@ nacos-sdk = { workspace = true }
 hickory-server = { version = "0.26", features = ["tls-ring", "https-ring", "resolver"] }
 hickory-proto = "0.26"
 hickory-resolver = { version = "0.26", features = ["tokio", "system-config"] }
-nacos-sdk = "0.8"
+# nacos-sdk = "0.8"
+nacos-sdk = { git = "https://github.com/nacos-group/nacos-sdk-rust", branch = "main" }
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }
 toml = "1.1"
