@@ -99,3 +99,15 @@ port = 53
     assert!(out.contains("127.0.0.1"));
     assert!(redacted.is_empty());
 }
+
+#[test]
+fn a_string_array_under_a_sensitive_key_is_not_redacted() {
+    // Pins the pre-existing rule the shared walker inherits: redaction keys off
+    // a table entry's own key, and an array item carries none, so a sensitive
+    // key holding an array of strings passes through. A future change to this
+    // behaviour should update this test on purpose, not by drift.
+    let (out, redacted) = redact_toml("token = [\"s1\", \"s2\"]\n").unwrap();
+    assert!(out.contains("s1"), "got: {out}");
+    assert!(out.contains("s2"), "got: {out}");
+    assert!(redacted.is_empty(), "got: {redacted:?}");
+}

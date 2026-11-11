@@ -16,6 +16,7 @@ pub mod remote;
 pub mod server;
 pub mod time;
 pub mod validate;
+pub mod walk;
 pub mod xdp;
 
 use serde::Deserialize;

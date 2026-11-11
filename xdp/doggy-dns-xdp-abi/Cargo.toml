@@ -5,7 +5,11 @@ edition = "2024"
 
 # Only the userspace loader marks the layouts `aya::Pod` (orphan rule: the
 # impls must live with the types). Gating on the target rather than a feature
-# keeps `aya` out of the eBPF build, which targets `bpfel-unknown-none`.
+# keeps `aya` out of the eBPF build, which targets `bpfel-unknown-none` — and
+# keeps this crate's build identical in both workspaces, so the layout can
+# never differ between the two sides. A constant-only consumer (core takes
+# `MAX_RESPONSE_SIZE`) does not depend on this crate at all; a test pins its
+# copy of the value to the one here.
 # Spelled out rather than `workspace = true` because this crate is a member of
 # the `xdp/` workspace, which has no `[workspace.dependencies]`; keep the pin
 # in sync with the root workspace's `aya` entry.

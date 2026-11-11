@@ -98,9 +98,7 @@ impl DoggyMcpServer {
             protocols: &self.state.protocols,
             status: "running",
         };
-        Ok(CallToolResult::success(vec![ContentBlock::text(
-            serde_json::to_string(&body).expect("status response is serializable"),
-        )]))
+        json_text(&body)
     }
 
     #[tool(
@@ -118,9 +116,7 @@ impl DoggyMcpServer {
         let body = PluginsResponse {
             plugins: &self.state.plugins,
         };
-        Ok(CallToolResult::success(vec![ContentBlock::text(
-            serde_json::to_string(&body).expect("plugin list is serializable"),
-        )]))
+        json_text(&body)
     }
 
     #[tool(
@@ -135,19 +131,19 @@ impl DoggyMcpServer {
         )
     )]
     pub async fn get_config(&self) -> Result<CallToolResult, ErrorData> {
-        let json = match &self.state.config {
+        match &self.state.config {
             ConfigSnapshot::Redacted {
                 content,
                 redacted_keys,
-            } => serde_json::to_string(&ConfigResponse {
+            } => json_text(&ConfigResponse {
                 format: "toml",
                 content,
                 redacted_keys,
-            })
-            .expect("config response is serializable"),
-            ConfigSnapshot::Error { code, message } => error_json(code, message),
-        };
-        Ok(CallToolResult::success(vec![ContentBlock::text(json)]))
+            }),
+            ConfigSnapshot::Error { code, message } => json_text(&ErrorBody {
+                error: ErrorDetail { code, message },
+            }),
+        }
     }
 
     #[tool(
@@ -162,17 +158,13 @@ impl DoggyMcpServer {
         )
     )]
     pub async fn get_runtime_status(&self) -> Result<CallToolResult, ErrorData> {
-        Ok(CallToolResult::success(vec![ContentBlock::text(
-            self.live.snapshot().to_string(),
-        )]))
+        json_text(&self.live.snapshot())
     }
 }
 
-fn error_json(code: &str, message: &str) -> String {
-    let body = ErrorBody {
-        error: ErrorDetail { code, message },
-    };
-    serde_json::to_string(&body).expect("error body is serializable")
+fn json_text<T: Serialize>(body: &T) -> Result<CallToolResult, ErrorData> {
+    let json = serde_json::to_string(body).expect("tool response is serializable");
+    Ok(CallToolResult::success(vec![ContentBlock::text(json)]))
 }
 
 #[tool_handler(name = "doggy-dns-control", version = "0.1.0")]

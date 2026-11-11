@@ -13,7 +13,8 @@ use aya_log_ebpf::{error, warn};
 mod protocol;
 
 use doggy_dns_xdp_abi::{
-    CacheKey, CacheValue, FLAG_NEGATIVE, MAX_RESPONSE_SIZE, XdpRuntimeConfig, XdpStats,
+    BYTE_HIGHS, BYTE_ONES, CacheKey, CacheValue, FLAG_NEGATIVE, FNV_OFFSET_BASIS,
+    MAX_RESPONSE_SIZE, XdpRuntimeConfig, XdpStats, fnv1a_word, lower_word,
 };
 use protocol::{
     COPY_CHUNK, ETH_HDR_LEN, ETH_P_IP, EthHdr, IPPROTO_UDP, IpHdr, UDP_HDR_LEN, UdpHdr, copy_chunk,
@@ -293,30 +294,8 @@ fn try_dns_xdp(ctx: &XdpContext) -> Result<(u32, Option<Outcome>), ()> {
 // DNS question parsing + word-wise FNV-1a hash
 // ---------------------------------------------------------------------------
 
-const FNV_OFFSET_BASIS: u64 = 0xcbf29ce484222325;
-const FNV_PRIME: u64 = 0x100000001b3;
-
-const BYTE_ONES: u64 = 0x0101_0101_0101_0101;
-const BYTE_HIGHS: u64 = 0x8080_8080_8080_8080;
-
-/// Fold one little-endian 8-byte word of QNAME into the running hash.
-#[inline(always)]
-fn fnv1a_word(hash: u64, word: u64) -> u64 {
-    (hash ^ word).wrapping_mul(FNV_PRIME)
-}
-
-/// Lowercase ASCII letters in every byte, branchlessly.
-///
-/// `b >= 0x41` and `b >= 0x5B` come from the padded-subtraction SWAR trick:
-/// `word | BYTE_HIGHS` keeps each byte's borrow to itself, and `!word` drops
-/// bytes that already have the high bit set (never ASCII letters).
-#[inline(always)]
-fn lower_word(word: u64) -> u64 {
-    let ge_a = ((word | BYTE_HIGHS) - 0x4141_4141_4141_4141) & !word & BYTE_HIGHS;
-    let gt_z = ((word | BYTE_HIGHS) - 0x5B5B_5B5B_5B5B_5B5B) & !word & BYTE_HIGHS;
-    // `'A'..='Z'` leaves bit 7 set; moving it to bit 5 gives the +0x20 offset.
-    word | ((ge_a & !gt_z) >> 2)
-}
+// The FNV constants, `fnv1a_word` and `lower_word` come from the abi crate:
+// the userspace key builder folds the same stream with the same code.
 
 /// Index of the first zero byte in `word`, or 8 if there is none.
 ///
@@ -461,7 +440,11 @@ fn write_nxdomain(ctx: &XdpContext, dns: usize, end: usize, txid: u16) -> Result
     let new_flags = 0x8000 | (orig_flags & 0x0100) | 0x0003;
     write_u16_be(dns as *mut u8, 2, new_flags);
 
-    // ANCOUNT, NSCOUNT, ARCOUNT = 0
+    // ANCOUNT, NSCOUNT, ARCOUNT = 0.
+    //
+    // Byte-wise on purpose: wider stores here were tried and the verifier's
+    // state exploration went over its 1,000,000-instruction budget (the tail
+    // copy loop below is already near it), so the program failed to load.
     write_u16_be(dns as *mut u8, 6, 0);
     write_u16_be(dns as *mut u8, 8, 0);
     write_u16_be(dns as *mut u8, 10, 0);
@@ -511,6 +494,10 @@ fn write_positive(
     let src = entry.resp_data.as_ptr();
     // Copy the cached header words, but not offset 0: the incoming query's
     // transaction id is already there and must survive the replay.
+    //
+    // Byte-wise on purpose: wide moves here were tried and the verifier's
+    // state exploration went over its 1,000,000-instruction budget (the tail
+    // copy loop below is already near it), so the program failed to load.
     write_u16_be(dns as *mut u8, 2, read_u16_be(src, 2));
     write_u16_be(dns as *mut u8, 4, read_u16_be(src, 4));
     write_u16_be(dns as *mut u8, 6, read_u16_be(src, 6));

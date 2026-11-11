@@ -482,16 +482,24 @@ fn record_outcome(span: &tracing::Span, outcome: &RequestOutcome, duration_ms: u
 }
 
 /// Maximum DNS response size (in bytes) that can be stored in the XDP cache.
-/// Must match `CacheValue::resp_data` length in doggy-dns-xdp and the eBPF program.
+///
+/// Must match `MAX_RESPONSE_SIZE` in `doggy-dns-xdp-abi`, which sizes
+/// `CacheValue::resp_data`. Core does not depend on that crate outside its
+/// tests — the userspace loader's `aya` dependency must stay out of a default
+/// build — so `the_probe_cap_matches_the_cache_layout` is what keeps the two
+/// values from drifting.
 const XDP_CACHE_MAX_SIZE: usize = 512;
 
 /// Serialize a DNS response to wire format for the XDP cache.
 ///
 /// The caller supplies a closure that builds and emits the response into the
-/// provided [`BinEncoder`]. The response is serialized with the client's
-/// advertised max size, then admitted to the cache only when the actual wire
-/// length fits [`XDP_CACHE_MAX_SIZE`] and the response is not truncated.
-/// Returns `None` in all other cases (those responses fall through to userspace).
+/// provided [`BinEncoder`]. The probe is capped at the smaller of the client's
+/// advertised max size and [`XDP_CACHE_MAX_SIZE`]: an answer that would
+/// overflow the cache is truncated (TC) inside the probe instead of being
+/// serialized up to the client's full EDNS buffer only to be thrown away. The
+/// payload is admitted only when it fits the cache and is not truncated;
+/// returns `None` in all other cases (those responses fall through to
+/// userspace).
 fn serialize_for_xdp(
     request: &Request,
     emit_fn: impl FnOnce(&mut BinEncoder<'_>) -> bool,
@@ -500,7 +508,7 @@ fn serialize_for_xdp(
 
     let mut bytes = Vec::with_capacity(XDP_CACHE_MAX_SIZE);
     let mut encoder = BinEncoder::new(&mut bytes);
-    encoder.set_max_size(max_size);
+    encoder.set_max_size(max_size.min(XDP_CACHE_MAX_SIZE as u16));
     if !emit_fn(&mut encoder) {
         tracing::warn!(
             request_id = request.metadata.id,
@@ -509,6 +517,10 @@ fn serialize_for_xdp(
         return None;
     }
 
+    // The encoder cap above makes the size branch unreachable; it stays as the
+    // guard that keeps an oversized payload out of the cache if that cap ever
+    // moves. TC, not the length, is the admission gate: a rolled-back record
+    // can leave bytes in the buffer while the header still says truncated.
     let skip_reason = if bytes.len() > XDP_CACHE_MAX_SIZE {
         Some("response exceeds XDP cache capacity")
     } else if bytes.get(2).is_some_and(|flags| flags & 0x02 != 0) {
@@ -651,5 +663,61 @@ async fn send_error<R: ResponseHandler>(
             }
             .into()
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{XDP_CACHE_MAX_SIZE, serialize_for_xdp};
+    use doggy_dns_testutil::dns_request;
+    use hickory_proto::op::{Edns, ResponseCode};
+    use hickory_proto::rr::rdata::A;
+    use hickory_proto::rr::{Name, RData, Record, RecordType};
+    use hickory_server::zone_handler::MessageResponseBuilder;
+    use std::net::Ipv4Addr;
+    use std::str::FromStr;
+
+    /// The probe cap is a local constant so a default build stays free of the
+    /// userspace loader's `aya` dependency; this is what keeps it equal to the
+    /// cache layout's own `MAX_RESPONSE_SIZE`.
+    #[test]
+    fn the_probe_cap_matches_the_cache_layout() {
+        assert_eq!(
+            super::XDP_CACHE_MAX_SIZE,
+            doggy_dns_xdp_abi::MAX_RESPONSE_SIZE
+        );
+    }
+
+    /// The cap is only worth anything if serialization actually stops at it:
+    /// without `set_max_size` the whole 40-record answer fits the client's 1232
+    /// bytes, and this length check is what turns red.
+    #[test]
+    fn the_probe_stops_emitting_at_the_cache_cap() {
+        let mut edns = Edns::new();
+        edns.set_max_payload(1232);
+        let request = dns_request(1234, "my-svc.example.", RecordType::A, Some(edns));
+
+        let name = Name::from_str("my-svc.example.").expect("valid name");
+        let records: Vec<Record> = (0..40)
+            .map(|i| Record::from_rdata(name.clone(), 60, RData::A(A(Ipv4Addr::new(10, 0, 0, i)))))
+            .collect();
+        let metadata = super::response_metadata(&request, ResponseCode::NoError, true);
+
+        let mut emitted_len = 0;
+        let result = serialize_for_xdp(&request, |probe| {
+            let builder = MessageResponseBuilder::from_message_request(&request);
+            let ok = builder
+                .build(metadata, records.iter(), &[], &[], &[])
+                .destructive_emit(probe)
+                .is_ok();
+            emitted_len = probe.len();
+            ok
+        });
+
+        assert!(result.is_none(), "a truncated probe must not be admitted");
+        assert!(
+            emitted_len <= XDP_CACHE_MAX_SIZE,
+            "probe emitted {emitted_len} bytes past the {XDP_CACHE_MAX_SIZE}-byte cap"
+        );
     }
 }

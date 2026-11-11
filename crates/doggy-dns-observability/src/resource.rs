@@ -112,14 +112,7 @@ mod tests {
     #![allow(clippy::disallowed_methods)]
 
     use super::*;
-
-    fn env_map(pairs: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> {
-        let map: std::collections::HashMap<String, String> = pairs
-            .iter()
-            .map(|(key, value)| ((*key).to_string(), (*value).to_string()))
-            .collect();
-        move |name| map.get(name).cloned()
-    }
+    use crate::test_util::env_map;
 
     fn attr(resource: &Resource, key: &str) -> Option<String> {
         resource

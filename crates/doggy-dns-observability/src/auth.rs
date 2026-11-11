@@ -153,16 +153,9 @@ mod tests {
     #![allow(clippy::disallowed_methods)]
 
     use super::*;
+    use crate::test_util::env_map;
     use doggy_dns_basic::{BasicAuthConfig, ObservabilityConfig};
     use std::collections::{BTreeMap, HashMap};
-
-    fn env_map(pairs: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> {
-        let map: HashMap<String, String> = pairs
-            .iter()
-            .map(|(key, value)| ((*key).to_string(), (*value).to_string()))
-            .collect();
-        move |name| map.get(name).cloned()
-    }
 
     #[test]
     fn env_headers_are_overridden_by_config() {

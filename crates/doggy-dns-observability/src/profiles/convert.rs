@@ -159,7 +159,7 @@ struct DictionaryBuilder {
     stacks: Vec<Stack>,
     stack_lookup: HashMap<Vec<i32>, i32>,
     attributes: Vec<KeyValueAndUnit>,
-    attribute_lookup: HashMap<(i32, String), i32>,
+    thread_lookup: HashMap<String, i32>,
 }
 
 impl DictionaryBuilder {
@@ -264,12 +264,14 @@ impl DictionaryBuilder {
     }
 
     fn thread_attribute(&mut self, thread_name: &str) -> i32 {
-        let key = self.intern("thread.name");
-        let lookup_key = (key, thread_name.to_string());
-        if let Some(index) = self.attribute_lookup.get(&lookup_key) {
+        // Keyed by thread name alone: the attribute key is always
+        // "thread.name", and a hit — nearly every sample, threads are few —
+        // must not allocate a lookup String.
+        if let Some(index) = self.thread_lookup.get(thread_name) {
             return *index;
         }
 
+        let key = self.intern("thread.name");
         let index = self.attributes.len() as i32;
         self.attributes.push(KeyValueAndUnit {
             key_strindex: key,
@@ -278,7 +280,7 @@ impl DictionaryBuilder {
             }),
             unit_strindex: 0,
         });
-        self.attribute_lookup.insert(lookup_key, index);
+        self.thread_lookup.insert(thread_name.to_string(), index);
         index
     }
 

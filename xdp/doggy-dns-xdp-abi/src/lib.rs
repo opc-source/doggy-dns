@@ -11,6 +11,8 @@
 
 #![no_std]
 
+use core::mem::MaybeUninit;
+
 /// Cache-value flag: the entry holds an NXDOMAIN answer.
 pub const FLAG_NEGATIVE: u16 = 0x01;
 
@@ -56,14 +58,22 @@ impl CacheValue {
     /// and stamping the negative flag when requested.
     fn from_response(resp_data: &[u8], expires_at: u64, negative: bool) -> Self {
         let len = resp_data.len().min(MAX_RESPONSE_SIZE);
-        let mut data = [0u8; MAX_RESPONSE_SIZE];
-        data[..len].copy_from_slice(&resp_data[..len]);
-        Self {
-            resp_data: data,
-            resp_len: len as u16,
-            flags: if negative { FLAG_NEGATIVE } else { 0 },
-            _pad: 0,
-            expires_at,
+        // Copy the payload first and zero only the tail: 512 bytes written in
+        // total, instead of a full zero fill plus a second pass over the payload.
+        let mut data = MaybeUninit::<[u8; MAX_RESPONSE_SIZE]>::uninit();
+        let ptr = data.as_mut_ptr().cast::<u8>();
+        // Safety: `len <= MAX_RESPONSE_SIZE`, so the copy and the tail zeroing
+        // together initialise every byte of `data` exactly once.
+        unsafe {
+            core::ptr::copy_nonoverlapping(resp_data.as_ptr(), ptr, len);
+            core::ptr::write_bytes(ptr.add(len), 0, MAX_RESPONSE_SIZE - len);
+            Self {
+                resp_data: data.assume_init(),
+                resp_len: len as u16,
+                flags: if negative { FLAG_NEGATIVE } else { 0 },
+                _pad: 0,
+                expires_at,
+            }
         }
     }
 
@@ -74,6 +84,36 @@ impl CacheValue {
     pub fn new_negative(resp_data: &[u8], expires_at: u64) -> Self {
         Self::from_response(resp_data, expires_at, true)
     }
+}
+
+/// FNV-1a 64-bit offset basis and prime. The userspace key builder and the
+/// eBPF parser fold the same wire stream with the same constants, so they
+/// live here once rather than mirrored by hand on each side.
+pub const FNV_OFFSET_BASIS: u64 = 0xcbf29ce484222325;
+pub const FNV_PRIME: u64 = 0x100000001b3;
+
+/// One FNV-1a step over a little-endian word.
+#[inline(always)]
+pub fn fnv1a_word(hash: u64, word: u64) -> u64 {
+    (hash ^ word).wrapping_mul(FNV_PRIME)
+}
+
+/// SWAR byte masks: [`BYTE_ONES`] for zero-byte detection, [`BYTE_HIGHS`] for
+/// keeping each byte's borrow to itself in padded subtraction.
+pub const BYTE_ONES: u64 = 0x0101_0101_0101_0101;
+pub const BYTE_HIGHS: u64 = 0x8080_8080_8080_8080;
+
+/// Lowercase ASCII letters in every byte, branchlessly.
+///
+/// `b >= 0x41` and `b >= 0x5B` come from the padded-subtraction SWAR trick:
+/// `word | BYTE_HIGHS` keeps each byte's borrow to itself, and `!word` drops
+/// bytes that already have the high bit set (never ASCII letters).
+#[inline(always)]
+pub fn lower_word(word: u64) -> u64 {
+    let ge_a = ((word | BYTE_HIGHS) - 0x4141_4141_4141_4141) & !word & BYTE_HIGHS;
+    let gt_z = ((word | BYTE_HIGHS) - 0x5B5B_5B5B_5B5B_5B5B) & !word & BYTE_HIGHS;
+    // `'A'..='Z'` leaves bit 7 set; moving it to bit 5 gives the +0x20 offset.
+    word | ((ge_a & !gt_z) >> 2)
 }
 
 /// Configuration written into the eBPF program's config map before attach.

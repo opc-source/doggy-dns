@@ -115,7 +115,7 @@ enum PluginDetails {
 
 impl PluginSnapshot {
     pub fn from_config(order: usize, p: &PluginConfig) -> Self {
-        let kind = format!("{:?}", p.kind).to_ascii_lowercase();
+        let kind = p.kind.as_str().to_string();
         let details = match p.kind {
             PluginKind::Nacos => PluginDetails::Nacos(NacosDetails {
                 server_addr: p

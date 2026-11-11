@@ -1,4 +1,5 @@
 use crate::authority::{CatalogAnswer, ServiceCatalog};
+use crate::bounded::{CallFailure, bounded_call};
 use dashmap::DashSet;
 use nacos_sdk::api::naming::{
     NamingChangeEvent, NamingEventListener, NamingService, NamingServiceBuilder, ServiceInstance,
@@ -246,28 +247,30 @@ impl NacosServiceWatcher {
     /// server's own list, and the reply is what credits the registry for
     /// [`entry_of`] from then on.
     async fn answer_from_server(&self, service: &str) -> CatalogAnswer {
-        let confirmed = match tokio::time::timeout(
+        let confirmed = match bounded_call(
             NACOS_LOOKUP_TIMEOUT,
             self.query_naming_service(service, false),
         )
         .await
         {
-            Ok(Ok(instances)) => instances,
-            Ok(Err(e)) => {
-                tracing::warn!(
-                    "nacos could not confirm service '{}': {}; answering SERVFAIL so a failure is not negative-cached as NXDOMAIN",
-                    service,
-                    e
-                );
-                self.record_remote_failure();
-                return CatalogAnswer::Unavailable;
-            }
-            Err(_) => {
-                tracing::warn!(
-                    "nacos did not confirm service '{}' within {:?}; answering SERVFAIL so a hang is not negative-cached as NXDOMAIN",
-                    service,
-                    NACOS_LOOKUP_TIMEOUT
-                );
+            Ok(instances) => instances,
+            Err(failure) => {
+                match failure {
+                    CallFailure::Sdk(e) => {
+                        tracing::warn!(
+                            "nacos could not confirm service '{}': {}; answering SERVFAIL so a failure is not negative-cached as NXDOMAIN",
+                            service,
+                            e
+                        );
+                    }
+                    CallFailure::Timeout => {
+                        tracing::warn!(
+                            "nacos did not confirm service '{}' within {:?}; answering SERVFAIL so a hang is not negative-cached as NXDOMAIN",
+                            service,
+                            NACOS_LOOKUP_TIMEOUT
+                        );
+                    }
+                }
                 self.record_remote_failure();
                 return CatalogAnswer::Unavailable;
             }
@@ -280,7 +283,7 @@ impl NacosServiceWatcher {
         // subscribe below armed.
         self.subscribe_name(service).await;
 
-        Self::answer_of(service, &confirmed)
+        cache_hit_of(service, &confirmed).unwrap_or(CatalogAnswer::Unknown)
     }
 
     /// What the client's own view answers for `service` right now, if anything.
@@ -295,14 +298,14 @@ impl NacosServiceWatcher {
     /// push or the polling updater, and the name would stay out of the ledger to be
     /// probed again on every query.
     async fn answer_from_cache(&self, service: &str) -> Option<CatalogAnswer> {
-        let instances = match tokio::time::timeout(
+        let instances = match bounded_call(
             NACOS_CACHE_READ_TIMEOUT,
             self.query_naming_service(service, true),
         )
         .await
         {
-            Ok(Ok(instances)) => instances,
-            Ok(Err(e)) => {
+            Ok(instances) => instances,
+            Err(CallFailure::Sdk(e)) => {
                 tracing::debug!(
                     "the nacos client could not read service '{}': {}",
                     service,
@@ -310,7 +313,7 @@ impl NacosServiceWatcher {
                 );
                 return None;
             }
-            Err(_) => return None,
+            Err(CallFailure::Timeout) => return None,
         };
 
         let hit = cache_hit_of(service, &instances);
@@ -354,14 +357,14 @@ impl NacosServiceWatcher {
     /// moments ago can still miss; the SDK then re-fetches inline, which is a call
     /// that reaches Nacos and is bounded and counted like any other.
     async fn read_client_cache(&self, service: &str) -> CatalogAnswer {
-        let instances = match tokio::time::timeout(
+        let instances = match bounded_call(
             NACOS_LOOKUP_TIMEOUT,
             self.query_naming_service(service, true),
         )
         .await
         {
-            Ok(Ok(instances)) => instances,
-            Ok(Err(e)) => {
+            Ok(instances) => instances,
+            Err(CallFailure::Sdk(e)) => {
                 tracing::warn!(
                     "failed to read the nacos client cache for service '{}': {}",
                     service,
@@ -369,7 +372,7 @@ impl NacosServiceWatcher {
                 );
                 return CatalogAnswer::Unavailable;
             }
-            Err(_) => {
+            Err(CallFailure::Timeout) => {
                 tracing::warn!(
                     "the nacos client did not answer for subscribed service '{}' within {:?}; answering SERVFAIL",
                     service,
@@ -380,7 +383,7 @@ impl NacosServiceWatcher {
             }
         };
 
-        Self::answer_of(service, &instances)
+        cache_hit_of(service, &instances).unwrap_or(CatalogAnswer::Unknown)
     }
 
     /// Subscribe `service`, then put it in the ledger.
@@ -427,19 +430,6 @@ impl NacosServiceWatcher {
                 );
             }
         }
-    }
-
-    /// What a service list implies.
-    fn answer_of(service: &str, instances: &[ServiceInstance]) -> CatalogAnswer {
-        let usable = usable_instances(instances);
-        if usable.is_empty() {
-            // Either Nacos does not know the name, or it has nothing healthy to
-            // serve; the list carries no presence flag, so both answer
-            // authoritative NXDOMAIN rather than NODATA.
-            tracing::debug!("nacos has no usable instance of '{}'", service);
-            return CatalogAnswer::Unknown;
-        }
-        CatalogAnswer::Instances(usable)
     }
 
     /// Count one failure of a call that reached Nacos, and say so when that
