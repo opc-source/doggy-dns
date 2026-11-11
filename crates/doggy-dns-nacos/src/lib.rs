@@ -1,5 +1,6 @@
 pub mod authority;
 mod backoff;
+pub mod bounded;
 pub mod config_watcher;
 mod filter;
 mod instances;

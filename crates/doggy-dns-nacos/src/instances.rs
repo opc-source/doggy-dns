@@ -35,28 +35,34 @@ impl CachedInstance {
 /// that parses. The client keeps instances this resolver cannot use; they are
 /// dropped when a query reads the list.
 pub fn usable_instances(instances: &[ServiceInstance]) -> Vec<CachedInstance> {
-    instances
-        .iter()
-        .filter(|instance| instance.healthy() && instance.enabled())
-        .filter_map(CachedInstance::from_service_instance)
-        .collect()
+    // The filter drops entries, so the hint over-allocates for a list with
+    // unhealthy ones — still one allocation instead of the 0→4→8→16 regrowth
+    // a bare `collect` pays on a ten-instance service.
+    let mut usable = Vec::with_capacity(instances.len());
+    usable.extend(
+        instances
+            .iter()
+            .filter(|instance| instance.healthy() && instance.enabled())
+            .filter_map(CachedInstance::from_service_instance),
+    );
+    usable
 }
 
-/// What the client's cache can answer for `service`, if anything.
+/// What a list of instances can answer for `service`, if anything.
 ///
 /// Some only when the list holds an instance worth serving. An empty list is
 /// deliberately not an answer: `get_all_instances(subscribe = true)` reports a
 /// fetch that failed exactly as it reports a service with no instances
 /// (`naming/mod.rs:368-372`), so from this call shape empty proves nothing, and
 /// answering NXDOMAIN on it would negative-cache an outage. What a `None` means is
-/// the caller's decision - ask the server, or refuse.
+/// the caller's decision - ask the server, or refuse. A caller that does answer
+/// from an empty list owes the same reasoning: the list carries no presence
+/// flag, so "unknown name" and "nothing healthy" both read as authoritative
+/// NXDOMAIN rather than NODATA.
 pub fn cache_hit_of(service: &str, instances: &[ServiceInstance]) -> Option<CatalogAnswer> {
     let usable = usable_instances(instances);
     if usable.is_empty() {
-        tracing::debug!(
-            "the nacos client cache has nothing to answer '{}' with",
-            service
-        );
+        tracing::debug!("nacos has no usable instance of '{}'", service);
         return None;
     }
     Some(CatalogAnswer::Instances(usable))

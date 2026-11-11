@@ -785,6 +785,7 @@ dependencies = [
  "doggy-dns-nacos",
  "doggy-dns-plugin",
  "doggy-dns-testutil",
+ "doggy-dns-xdp-abi",
  "hickory-proto",
  "hickory-server",
  "libc",

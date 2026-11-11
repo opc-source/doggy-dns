@@ -104,20 +104,25 @@ pub fn to_dns_records(
     ttl: u32,
     rtype: RecordType,
 ) -> Vec<Record> {
-    instances
-        .iter()
-        .filter_map(|instance| match (instance.ip, rtype) {
-            (IpAddr::V4(ipv4), RecordType::A) => Some(Record::from_rdata(
-                Name::from(name.clone()),
-                ttl,
-                RData::A(A(ipv4)),
-            )),
-            (IpAddr::V6(ipv6), RecordType::AAAA) => Some(Record::from_rdata(
-                Name::from(name.clone()),
-                ttl,
-                RData::AAAA(AAAA(ipv6)),
-            )),
-            _ => None,
-        })
-        .collect()
+    // One allocation sized to the input: the family filter drops entries, but
+    // a bare `collect` regrows 0→4→8→16 on a ten-instance service.
+    let mut records = Vec::with_capacity(instances.len());
+    records.extend(
+        instances
+            .iter()
+            .filter_map(|instance| match (instance.ip, rtype) {
+                (IpAddr::V4(ipv4), RecordType::A) => Some(Record::from_rdata(
+                    Name::from(name.clone()),
+                    ttl,
+                    RData::A(A(ipv4)),
+                )),
+                (IpAddr::V6(ipv6), RecordType::AAAA) => Some(Record::from_rdata(
+                    Name::from(name.clone()),
+                    ttl,
+                    RData::AAAA(AAAA(ipv6)),
+                )),
+                _ => None,
+            }),
+    );
+    records
 }

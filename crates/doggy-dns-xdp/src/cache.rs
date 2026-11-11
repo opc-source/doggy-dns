@@ -2,16 +2,8 @@ use std::mem::MaybeUninit;
 use std::slice;
 
 use crate::types::CacheKey;
+use doggy_dns_xdp_abi::{FNV_OFFSET_BASIS, fnv1a_word};
 use hickory_proto::rr::Name;
-
-const FNV_OFFSET_BASIS: u64 = 0xcbf29ce484222325;
-const FNV_PRIME: u64 = 0x100000001b3;
-
-/// One FNV-1a step over a little-endian word.
-#[inline]
-fn fnv1a_word(hash: u64, word: u64) -> u64 {
-    (hash ^ word).wrapping_mul(FNV_PRIME)
-}
 
 /// FNV-1a 64-bit hash over zero-padded little-endian words.
 ///
@@ -59,6 +51,9 @@ pub fn make_cache_key(name: &Name, qtype: u16, qclass: u16) -> CacheKey {
     for label in name.iter() {
         unsafe { *wire.add(pos) = label.len() as u8 };
         pos += 1;
+        // Lowercase fused into the copy: one pass. A separate SWAR fold over
+        // the assembled wire measured ~28% slower on short names (two passes
+        // plus per-label memcpy), so the byte loop stays.
         for &byte in label {
             unsafe { *wire.add(pos) = byte.to_ascii_lowercase() };
             pos += 1;

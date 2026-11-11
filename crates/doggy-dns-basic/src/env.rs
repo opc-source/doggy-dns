@@ -46,36 +46,10 @@ pub fn expand_env_in_value(
     value: &mut toml::Value,
     lookup: &impl Fn(&str) -> Option<String>,
 ) -> Result<()> {
-    expand_value(value, "", lookup)
-}
-
-fn expand_value(
-    value: &mut toml::Value,
-    path: &str,
-    lookup: &impl Fn(&str) -> Option<String>,
-) -> Result<()> {
-    match value {
-        toml::Value::String(text) => {
-            let expanded = expand_env(text, lookup)
-                .with_context(|| format!("in configuration value {path}"))?;
-            *text = expanded;
-        }
-        toml::Value::Table(table) => {
-            for (key, child) in table.iter_mut() {
-                let child_path = if path.is_empty() {
-                    key.clone()
-                } else {
-                    format!("{path}.{key}")
-                };
-                expand_value(child, &child_path, lookup)?;
-            }
-        }
-        toml::Value::Array(items) => {
-            for (index, item) in items.iter_mut().enumerate() {
-                expand_value(item, &format!("{path}[{index}]"), lookup)?;
-            }
-        }
-        _ => {}
-    }
-    Ok(())
+    crate::walk::walk_strings(value, "", &mut |path, _key, text| {
+        let expanded =
+            expand_env(text, lookup).with_context(|| format!("in configuration value {path}"))?;
+        *text = expanded;
+        Ok(())
+    })
 }

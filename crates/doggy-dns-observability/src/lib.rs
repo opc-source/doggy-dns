@@ -8,6 +8,8 @@ mod metrics;
 mod profiles;
 mod resource;
 mod sampler;
+#[cfg(test)]
+mod test_util;
 mod traces;
 
 use anyhow::{Context, Result};

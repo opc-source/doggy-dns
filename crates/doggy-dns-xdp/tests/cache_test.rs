@@ -1,6 +1,10 @@
 #![allow(clippy::disallowed_methods)]
 
 use doggy_dns_xdp::cache::{fnv1a_64, make_cache_key};
+use doggy_dns_xdp::types::CacheValue;
+use doggy_dns_xdp_abi::{
+    FLAG_NEGATIVE, FNV_OFFSET_BASIS, MAX_RESPONSE_SIZE, fnv1a_word, lower_word,
+};
 use hickory_proto::rr::Name;
 
 fn name(s: &str) -> Name {
@@ -118,4 +122,72 @@ fn make_cache_key_hashes_wire_form_at_max_length() {
     let wire = wire_qname(&labels);
     assert_eq!(wire.len(), 255);
     assert_eq!(make_cache_key(&name, 1, 1).name_hash, fnv1a_64(&wire));
+}
+
+#[test]
+fn lower_word_matches_byte_wise_for_every_byte() {
+    for b in 0..=u8::MAX {
+        assert_eq!(
+            lower_word(b as u64),
+            b.to_ascii_lowercase() as u64,
+            "byte {b:#04x}"
+        );
+    }
+}
+
+#[test]
+fn lower_word_folds_every_byte_of_a_mixed_word() {
+    // '@' (0x40) and '[' (0x5B) sit just outside 'A'..='Z'; 0xFF already has
+    // the high bit set and must pass through untouched.
+    let bytes = [b'A', b'z', b'0', b'[', b'@', b'Z', b'a', 0xFF];
+    let word = u64::from_le_bytes(bytes);
+    let expected = u64::from_le_bytes(bytes.map(|b| b.to_ascii_lowercase()));
+    assert_eq!(lower_word(word), expected);
+}
+
+#[test]
+fn lower_word_leaves_high_bytes_alone() {
+    let word = u64::from_le_bytes([0x80, 0x9F, 0xC0, 0xDF, 0xE0, 0xEF, 0xF0, 0xFF]);
+    assert_eq!(lower_word(word), word);
+}
+
+#[test]
+fn fnv1a_word_matches_classic_single_byte() {
+    // A lone byte is one zero-padded word: classic FNV-1a of "a".
+    assert_eq!(
+        fnv1a_word(FNV_OFFSET_BASIS, b'a' as u64),
+        0xaf63dc4c8601ec8c
+    );
+}
+
+#[test]
+fn fnv1a_word_chains_to_the_known_eight_byte_vector() {
+    let word = u64::from_le_bytes(*b"abcdefgh");
+    assert_eq!(fnv1a_word(FNV_OFFSET_BASIS, word), 0x3919eeb00ee1e68c);
+}
+
+#[test]
+fn cache_value_zeroes_the_tail_beyond_the_payload() {
+    let value = CacheValue::new_positive(&[0xAB; 64], 42);
+    assert_eq!(&value.resp_data[..64], &[0xAB; 64]);
+    assert!(value.resp_data[64..].iter().all(|&b| b == 0));
+    assert_eq!(value.resp_len, 64);
+    assert_eq!(value.flags, 0);
+    assert_eq!(value.expires_at, 42);
+}
+
+#[test]
+fn cache_value_negative_stamps_the_flag() {
+    let value = CacheValue::new_negative(b"\x00\x01", 7);
+    assert_eq!(value.resp_len, 2);
+    assert_eq!(value.flags, FLAG_NEGATIVE);
+    assert!(value.resp_data[2..].iter().all(|&b| b == 0));
+}
+
+#[test]
+fn cache_value_truncates_oversized_payloads() {
+    let resp = vec![0xCD; MAX_RESPONSE_SIZE + 16];
+    let value = CacheValue::new_positive(&resp, 1);
+    assert_eq!(value.resp_len as usize, MAX_RESPONSE_SIZE);
+    assert_eq!(&value.resp_data[..], &resp[..MAX_RESPONSE_SIZE]);
 }

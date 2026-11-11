@@ -2,6 +2,7 @@ use async_trait::async_trait;
 use doggy_dns_plugin::authority_chain::AuthorityChain;
 use doggy_dns_plugin::naming::{protocol_name, response_code_name};
 use doggy_dns_plugin::{Middleware, MiddlewareAction, RequestOutcome};
+use doggy_dns_xdp_abi::MAX_RESPONSE_SIZE;
 use hickory_proto::op::{Header, HeaderCounts, MessageType, Metadata, OpCode, ResponseCode};
 use hickory_proto::rr::{LowerName, Record, RecordType};
 use hickory_proto::serialize::binary::BinEncoder;
@@ -481,26 +482,24 @@ fn record_outcome(span: &tracing::Span, outcome: &RequestOutcome, duration_ms: u
     span.record("otel.status_code", status);
 }
 
-/// Maximum DNS response size (in bytes) that can be stored in the XDP cache.
-/// Must match `CacheValue::resp_data` length in doggy-dns-xdp and the eBPF program.
-const XDP_CACHE_MAX_SIZE: usize = 512;
-
 /// Serialize a DNS response to wire format for the XDP cache.
 ///
 /// The caller supplies a closure that builds and emits the response into the
-/// provided [`BinEncoder`]. The response is serialized with the client's
-/// advertised max size, then admitted to the cache only when the actual wire
-/// length fits [`XDP_CACHE_MAX_SIZE`] and the response is not truncated.
-/// Returns `None` in all other cases (those responses fall through to userspace).
+/// provided [`BinEncoder`]. The probe is capped at the smaller of the client's
+/// advertised max size and [`MAX_RESPONSE_SIZE`]: an answer that would overflow
+/// the cache is truncated (TC) inside the probe instead of being serialized up
+/// to the client's full EDNS buffer only to be thrown away. The payload is
+/// admitted only when it fits the cache and is not truncated; returns `None`
+/// in all other cases (those responses fall through to userspace).
 fn serialize_for_xdp(
     request: &Request,
     emit_fn: impl FnOnce(&mut BinEncoder<'_>) -> bool,
 ) -> Option<Vec<u8>> {
     let max_size = max_message_size(request.protocol(), request.edns.as_ref());
 
-    let mut bytes = Vec::with_capacity(XDP_CACHE_MAX_SIZE);
+    let mut bytes = Vec::with_capacity(MAX_RESPONSE_SIZE);
     let mut encoder = BinEncoder::new(&mut bytes);
-    encoder.set_max_size(max_size);
+    encoder.set_max_size(max_size.min(MAX_RESPONSE_SIZE as u16));
     if !emit_fn(&mut encoder) {
         tracing::warn!(
             request_id = request.metadata.id,
@@ -509,7 +508,7 @@ fn serialize_for_xdp(
         return None;
     }
 
-    let skip_reason = if bytes.len() > XDP_CACHE_MAX_SIZE {
+    let skip_reason = if bytes.len() > MAX_RESPONSE_SIZE {
         Some("response exceeds XDP cache capacity")
     } else if bytes.get(2).is_some_and(|flags| flags & 0x02 != 0) {
         // TC bit: a partial answer must never be served from cache.
@@ -526,7 +525,7 @@ fn serialize_for_xdp(
                 protocol = ?info.protocol,
                 client = %info.src,
                 bytes = bytes.len(),
-                limit = XDP_CACHE_MAX_SIZE,
+                limit = MAX_RESPONSE_SIZE,
                 reason,
                 "skipping XDP cache"
             );
@@ -534,7 +533,7 @@ fn serialize_for_xdp(
             tracing::debug!(
                 request_id = request.metadata.id,
                 bytes = bytes.len(),
-                limit = XDP_CACHE_MAX_SIZE,
+                limit = MAX_RESPONSE_SIZE,
                 reason,
                 "skipping XDP cache"
             );

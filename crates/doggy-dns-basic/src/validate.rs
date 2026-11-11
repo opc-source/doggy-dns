@@ -139,7 +139,7 @@ fn validate_plugins(plugins: &[PluginConfig]) -> anyhow::Result<()> {
         if !plugin.enabled {
             continue;
         }
-        let label = format!("plugins[{index}] ({})", kind_name(&plugin.kind));
+        let label = format!("plugins[{index}] ({})", plugin.kind.as_str());
         match plugin.kind {
             PluginKind::Nacos => {
                 for (field, value) in [
@@ -181,14 +181,6 @@ fn validate_plugins(plugins: &[PluginConfig]) -> anyhow::Result<()> {
         }
     }
     Ok(())
-}
-
-fn kind_name(kind: &PluginKind) -> &'static str {
-    match kind {
-        PluginKind::Nacos => "nacos",
-        PluginKind::Native => "native",
-        PluginKind::Forward => "forward",
-    }
 }
 
 fn validate_dns_zone(label: &str, zone: &str) -> anyhow::Result<()> {

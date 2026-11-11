@@ -16,6 +16,18 @@ pub enum PluginKind {
     Forward,
 }
 
+impl PluginKind {
+    /// The kind's config spelling — the serde `snake_case` name — shared by
+    /// validation messages and the control plane's snapshot.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Nacos => "nacos",
+            Self::Native => "native",
+            Self::Forward => "forward",
+        }
+    }
+}
+
 /// Flat plugin config. Each field is optional; only the fields relevant
 /// to the plugin's `kind` are used. Unknown fields for a given kind
 /// are simply ignored at runtime.

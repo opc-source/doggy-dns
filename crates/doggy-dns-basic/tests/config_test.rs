@@ -1261,3 +1261,12 @@ fn container_default_config_loads_with_no_environment() {
          to the resolver itself under hostNetwork"
     );
 }
+
+#[test]
+fn plugin_kind_as_str_matches_the_config_spelling() {
+    for spelled in ["nacos", "native", "forward"] {
+        let config: doggy_dns_basic::PluginConfig =
+            toml::from_str(&format!("kind = '{spelled}'")).expect("kind parses");
+        assert_eq!(config.kind.as_str(), spelled);
+    }
+}

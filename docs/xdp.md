@@ -240,9 +240,11 @@ The BPF map layout (`CacheKey`, `CacheValue`, `XdpStats`, `XdpRuntimeConfig`)
 lives in `xdp/doggy-dns-xdp-abi`, which both the eBPF program and
 `crates/doggy-dns-xdp` depend on, so the two sides cannot drift apart; the
 compile-time size assertions live there too. Bump `CACHE_FORMAT_VERSION` in
-that crate with any layout change. The QNAME hash is still implemented on both
-sides — the userspace key builder hashes the wire name, the kernel parser
-hashes packet words in place — so that contract is mirrored by hand.
+that crate with any layout change. The QNAME hash constants and word helpers
+(`FNV_OFFSET_BASIS`, `fnv1a_word`, `lower_word`, the SWAR masks) live there as
+well. The parse loops stay separate — the userspace key builder assembles the
+wire name from a `Name`, the kernel parser hashes packet words in place — but
+both fold the same stream with the same code.
 
 [benchmarks/xdp-kernel-hot-path.md](benchmarks/xdp-kernel-hot-path.md) records
 the kernel-side measurements: static instruction counts for the whole program
