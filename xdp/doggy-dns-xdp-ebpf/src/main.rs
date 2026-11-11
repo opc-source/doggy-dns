@@ -440,13 +440,14 @@ fn write_nxdomain(ctx: &XdpContext, dns: usize, end: usize, txid: u16) -> Result
     let new_flags = 0x8000 | (orig_flags & 0x0100) | 0x0003;
     write_u16_be(dns as *mut u8, 2, new_flags);
 
-    // ANCOUNT, NSCOUNT, ARCOUNT = 0: one u32 and one u16 store instead of
-    // three u16 writes; zero is endian-neutral, and the check above proves
-    // the whole header range.
-    unsafe {
-        *((dns + 6) as *mut u32) = 0;
-        *((dns + 10) as *mut u16) = 0;
-    }
+    // ANCOUNT, NSCOUNT, ARCOUNT = 0.
+    //
+    // Byte-wise on purpose: wider stores here were tried and the verifier's
+    // state exploration went over its 1,000,000-instruction budget (the tail
+    // copy loop below is already near it), so the program failed to load.
+    write_u16_be(dns as *mut u8, 6, 0);
+    write_u16_be(dns as *mut u8, 8, 0);
+    write_u16_be(dns as *mut u8, 10, 0);
 
     Ok(())
 }
@@ -492,17 +493,16 @@ fn write_positive(
 
     let src = entry.resp_data.as_ptr();
     // Copy the cached header words, but not offset 0: the incoming query's
-    // transaction id is already there and must survive the replay. Two wide
-    // moves instead of five u16 read/write pairs — the constant-offset check
-    // above proves every byte written, the same shape as `copy_chunk`, and
-    // plain derefs because the BPF target accepts unaligned packet and map
-    // accesses (read_unaligned would lower to byte loads).
-    unsafe {
-        let lo = *(src.add(2) as *const u64);
-        let hi = *(src.add(10) as *const u16);
-        *((dns + 2) as *mut u64) = lo;
-        *((dns + 10) as *mut u16) = hi;
-    }
+    // transaction id is already there and must survive the replay.
+    //
+    // Byte-wise on purpose: wide moves here were tried and the verifier's
+    // state exploration went over its 1,000,000-instruction budget (the tail
+    // copy loop below is already near it), so the program failed to load.
+    write_u16_be(dns as *mut u8, 2, read_u16_be(src, 2));
+    write_u16_be(dns as *mut u8, 4, read_u16_be(src, 4));
+    write_u16_be(dns as *mut u8, 6, read_u16_be(src, 6));
+    write_u16_be(dns as *mut u8, 8, read_u16_be(src, 8));
+    write_u16_be(dns as *mut u8, 10, read_u16_be(src, 10));
 
     // [DNS_HDR_LEN, DNS_HDR_LEN + question_len) is the incoming question:
     // leave it untouched, case intact. A real cached response always reaches
