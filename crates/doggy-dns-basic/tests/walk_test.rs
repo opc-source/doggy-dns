@@ -44,6 +44,7 @@ fn table_keys_are_passed_and_array_items_have_none() {
         Ok(())
     })
     .expect("walk succeeds");
+    keys.sort();
     assert_eq!(keys, vec![None, Some("password".to_string())]);
 }
 

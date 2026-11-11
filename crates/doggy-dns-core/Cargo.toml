@@ -7,7 +7,6 @@ license = "Apache-2.0"
 [dependencies]
 doggy-dns-basic = { path = "../doggy-dns-basic" }
 doggy-dns-plugin = { path = "../doggy-dns-plugin" }
-doggy-dns-xdp-abi = { path = "../../xdp/doggy-dns-xdp-abi" }
 hickory-server = { workspace = true }
 hickory-proto = { workspace = true }
 tokio = { workspace = true }
@@ -20,6 +19,10 @@ libc = { workspace = true }
 
 [dev-dependencies]
 tracing-subscriber = { workspace = true }
+# Pins the probe cap to the XDP cache layout. A dev-dependency on purpose:
+# production code must not pull the abi crate's `aya` dependency into a
+# default build.
+doggy-dns-xdp-abi = { path = "../../xdp/doggy-dns-xdp-abi" }
 doggy-dns-nacos = { path = "../doggy-dns-nacos" }
 doggy-dns-testutil = { path = "../doggy-dns-testutil" }
 dashmap = { workspace = true }

@@ -9,7 +9,9 @@ use anyhow::Result;
 /// The visitor may rewrite the string in place; a non-string value is
 /// descended into, never visited. An array item has no key of its own
 /// (`None`), so a sensitive table key does not reach into the strings of an
-/// array it names — the same shape redaction had before the walk was shared.
+/// array it names — an array under `token`, say, passes through unredacted.
+/// That is the pre-existing redaction behaviour, pinned by a test in
+/// `doggy-dns-control` so a future change is a decision, not a drift.
 /// The first visitor error stops the walk and propagates.
 pub fn walk_strings(
     value: &mut toml::Value,
