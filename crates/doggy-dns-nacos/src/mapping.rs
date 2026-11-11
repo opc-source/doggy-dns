@@ -105,7 +105,9 @@ pub fn to_dns_records(
     rtype: RecordType,
 ) -> Vec<Record> {
     // One allocation sized to the input: the family filter drops entries, but
-    // a bare `collect` regrows 0→4→8→16 on a ten-instance service.
+    // a bare `collect` regrows 0→4→8→16 on a ten-instance service. A list with
+    // no matching family still reserves the upper bound; that is the same
+    // single allocation, just not all of it used.
     let mut records = Vec::with_capacity(instances.len());
     records.extend(
         instances

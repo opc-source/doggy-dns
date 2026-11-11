@@ -161,7 +161,9 @@ fn fnv1a_word_matches_classic_single_byte() {
 }
 
 #[test]
-fn fnv1a_word_chains_to_the_known_eight_byte_vector() {
+fn fnv1a_word_folds_one_eight_byte_word() {
+    // One word, one multiplication: this is the word-fold, not the classic
+    // byte-wise FNV-1a of "abcdefgh" (0x25da8c1836a8d66d).
     let word = u64::from_le_bytes(*b"abcdefgh");
     assert_eq!(fnv1a_word(FNV_OFFSET_BASIS, word), 0x3919eeb00ee1e68c);
 }

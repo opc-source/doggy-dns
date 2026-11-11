@@ -1,5 +1,6 @@
 pub mod authority;
 mod backoff;
+#[doc(hidden)]
 pub mod bounded;
 pub mod config_watcher;
 mod filter;
