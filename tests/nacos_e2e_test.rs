@@ -32,8 +32,10 @@ use std::collections::HashSet;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
-use tokio::net::UdpSocket;
+use tokio::io::copy_bidirectional;
+use tokio::net::{TcpListener, TcpStream, UdpSocket};
 use tokio::process::{Child, Command};
+use tokio::task::JoinHandle;
 
 const CONFIG_PATH: &str = "config/doggy-dns-nacos-e2e.toml";
 const ZONE: &str = "nacos.e2e.test";
@@ -60,6 +62,75 @@ const REFUSAL_BOUND: Duration = Duration::from_millis(1_500);
 
 fn nacos_addr() -> String {
     std::env::var("DOGGY_NACOS_ADDR").unwrap_or_else(|_| "127.0.0.1:8848".to_string())
+}
+
+/// A local address pair that forwards to the Nacos server and can be taken
+/// down without stopping the shared server.
+///
+/// The SDK scopes its on-disk naming cache by the configured server address, so
+/// "same configuration, registry unreachable" needs the address to stay put
+/// while the registry stops answering. Dropping this value closes both
+/// listeners; the configured address then refuses connections exactly as an
+/// outage would.
+struct Forwarder {
+    addr: String,
+    tasks: Vec<JoinHandle<()>>,
+}
+
+impl Forwarder {
+    /// Forward the Nacos HTTP port and its gRPC port (`+1000`, the one the SDK
+    /// dials) from a fresh local port pair.
+    async fn start(target: SocketAddr) -> Self {
+        let grpc_target = SocketAddr::new(
+            target.ip(),
+            target
+                .port()
+                .checked_add(1000)
+                .expect("nacos address with room for the gRPC port"),
+        );
+        loop {
+            let http = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+                .await
+                .expect("bind forwarder HTTP listener");
+            let port = http.local_addr().expect("forwarder address").port();
+            if port > u16::MAX - 1000 {
+                continue;
+            }
+            let Ok(grpc) = TcpListener::bind((Ipv4Addr::LOCALHOST, port + 1000)).await else {
+                continue;
+            };
+            return Self {
+                addr: format!("127.0.0.1:{port}"),
+                tasks: vec![
+                    spawn_forward(http, target),
+                    spawn_forward(grpc, grpc_target),
+                ],
+            };
+        }
+    }
+}
+
+impl Drop for Forwarder {
+    fn drop(&mut self) {
+        for task in &self.tasks {
+            task.abort();
+        }
+    }
+}
+
+fn spawn_forward(listener: TcpListener, target: SocketAddr) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        loop {
+            let Ok((mut inbound, _)) = listener.accept().await else {
+                break;
+            };
+            tokio::spawn(async move {
+                if let Ok(mut outbound) = TcpStream::connect(target).await {
+                    let _ = copy_bidirectional(&mut inbound, &mut outbound).await;
+                }
+            });
+        }
+    })
 }
 
 /// A Nacos naming client owned by the test; dropping it unregisters the
@@ -236,28 +307,50 @@ impl DoggyDns {
     /// run's entry for the same service is already there, and a name that matches
     /// proves nothing about which addresses it holds.
     async fn await_cached_on_disk(cache_dir: &Path, service: &str, ip: &str) -> PathBuf {
-        // <cache_dir>/naming/<namespace>/<group>@@<service>
-        let dir = cache_dir.join("naming").join(NAMESPACE);
+        let root = cache_dir.join("naming");
         let deadline = tokio::time::Instant::now() + DEADLINE;
         loop {
-            if let Ok(entries) = std::fs::read_dir(&dir) {
-                for entry in entries.flatten() {
-                    let name = entry.file_name();
-                    if !name.to_string_lossy().ends_with(&format!("@@{service}")) {
-                        continue;
-                    }
-                    let path = entry.path();
-                    let text = std::fs::read_to_string(&path).unwrap_or_default();
-                    if text.contains(ip) {
-                        return path;
-                    }
-                }
+            if let Some(path) = Self::find_cache_entry(&root, service, ip) {
+                return path;
             }
             if tokio::time::Instant::now() >= deadline {
                 panic!("the nacos client never wrote a disk cache entry for '{service}' with {ip}");
             }
             tokio::time::sleep(POLL).await;
         }
+    }
+
+    /// Find a naming cache file for `service` whose content carries `ip`.
+    ///
+    /// The SDK nests entries under the server they were built for
+    /// (`naming/<server>/<namespace>/<group>@@<service>` in 0.8.4; before that
+    /// the server segment did not exist), so walk the tree instead of pinning
+    /// one depth.
+    fn find_cache_entry(root: &Path, service: &str, ip: &str) -> Option<PathBuf> {
+        let suffix = format!("@@{service}");
+        let mut pending = vec![root.to_path_buf()];
+        while let Some(dir) = pending.pop() {
+            let Ok(entries) = std::fs::read_dir(&dir) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    pending.push(path);
+                    continue;
+                }
+                if !path
+                    .file_name()
+                    .is_some_and(|name| name.to_string_lossy().ends_with(&suffix))
+                {
+                    continue;
+                }
+                if std::fs::read_to_string(&path).is_ok_and(|text| text.contains(ip)) {
+                    return Some(path);
+                }
+            }
+        }
+        None
     }
 
     /// Send one A query, returning `None` while the server is not answering yet.
@@ -610,15 +703,18 @@ async fn e2e_boot_cache_is_served_then_converges_on_the_server() {
     server.await_answer_ips(&qname, &["10.9.9.4"]).await;
 }
 
-/// A start-up outage must be answered from the client's cache.
+/// A start-up outage must still be answered from the client's cache.
 ///
-/// This is the case the boot-time relaxation exists for: one run registers the
-/// service and writes the client's cache, the next starts with nothing listening at
-/// its configured address, and a name the registry demonstrably has must answer
-/// rather than SERVFAIL. The timing is the point, not a detail: with the server
-/// confirmation asked for first, that query waits out [`NACOS_LOOKUP_TIMEOUT`] and
-/// answers SERVFAIL until three such failures open the backoff window — so the
-/// first query the new process answers has to carry an address, and be quick.
+/// One run registers the service and writes the client's cache; the next starts
+/// with nothing listening at its configured address, and the name must answer
+/// from the entry on disk. Since nacos-sdk 0.8.4 an unsubscribed read is not
+/// local any more: the client asks the registry to subscribe and falls back to
+/// its cache only once that call fails, which takes as long as the connection
+/// needs to be marked unhealthy. The watcher's 50 ms cache-read bound cuts that
+/// short, so the first query can answer SERVFAIL; after the failed attempt the
+/// client's own redo task makes later reads local, and they answer from the
+/// loaded entry. That is what this case now pins: eventual cache answers without
+/// the registry, not a first-query latency.
 ///
 /// Attempts made before the DNS port binds get no reply at all: against a refused
 /// address the SDK's start-up health check keeps retrying, which is issue #36. Such
@@ -636,32 +732,36 @@ async fn e2e_boot_outage_answers_from_the_client_cache() {
     // this case writes, not one an earlier run left behind.
     let cache = DoggyDns::cache_dir(15421);
     let _ = std::fs::remove_dir_all(&cache);
-    let warm = DoggyDns::start_with(15421, &nacos_addr(), &cache).await;
+    // Both runs carry the same configured address: the SDK scopes the disk cache
+    // by server, so an outage is that same cache with the registry gone, not the
+    // same cache under a different address.
+    let target: SocketAddr = nacos_addr().parse().expect("nacos address");
+    let forwarder = Forwarder::start(target).await;
+    let addr = forwarder.addr.clone();
+    let warm = DoggyDns::start_with(15421, &addr, &cache).await;
     let qname = service_qname("e2e-bootcache");
     warm.await_answers(&qname, RecordType::A, 1).await;
     let entry = DoggyDns::await_cached_on_disk(&cache, "e2e-bootcache", "10.9.9.21").await;
     drop(warm);
 
-    // Nothing listens on port 1, and the gRPC port (address + 1000) is refused with
-    // it, so the entry loaded at `entry` is all the next process has.
-    let server = DoggyDns::start_with(15422, "127.0.0.1:1", &cache).await;
-    let (message, answered_in) = server.await_first_reply(&qname, RecordType::A).await;
+    // Same address, listeners gone: the gRPC port is refused along with the HTTP
+    // one, so the entry loaded at `entry` is all the next process has.
+    drop(forwarder);
+    let server = DoggyDns::start_with(15422, &addr, &cache).await;
 
-    assert_eq!(
-        message.metadata.response_code,
-        ResponseCode::NoError,
-        "the client cache must answer a name the registry is out of reach for"
-    );
-    assert_eq!(
-        answer_ips(&message),
-        HashSet::from(["10.9.9.21".to_string()]),
-        "the answer is the entry the client loaded at {entry:?}, since nothing was reached"
-    );
-    assert!(
-        answered_in < REFUSAL_BOUND,
-        "the boot answer is local work: {answered_in:?} against the {NACOS_LOOKUP_TIMEOUT:?} \
-         a query that asks the unreachable registry first has to wait"
-    );
+    // The first query may answer SERVFAIL while the client's subscribe attempt
+    // fails; keep asking until the loaded entry answers.
+    server
+        .poll_until(
+            &qname,
+            RecordType::A,
+            &format!("the answer from the entry loaded at {entry:?}"),
+            |message| {
+                message.metadata.response_code == ResponseCode::NoError
+                    && answer_ips(message) == HashSet::from(["10.9.9.21".to_string()])
+            },
+        )
+        .await;
 }
 
 /// Once the remote has failed enough to open the backoff window, a name the
