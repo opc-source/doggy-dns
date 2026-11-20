@@ -108,6 +108,19 @@ impl Forwarder {
             };
         }
     }
+
+    /// Close both listeners and wait for the accept loops to end, so the
+    /// configured address is refused before the next process starts. `Drop`
+    /// only aborts; it cannot await.
+    async fn stop(mut self) {
+        let tasks = std::mem::take(&mut self.tasks);
+        for task in &tasks {
+            task.abort();
+        }
+        for task in tasks {
+            let _ = task.await;
+        }
+    }
 }
 
 impl Drop for Forwarder {
@@ -744,9 +757,10 @@ async fn e2e_boot_outage_answers_from_the_client_cache() {
     let entry = DoggyDns::await_cached_on_disk(&cache, "e2e-bootcache", "10.9.9.21").await;
     drop(warm);
 
-    // Same address, listeners gone: the gRPC port is refused along with the HTTP
-    // one, so the entry loaded at `entry` is all the next process has.
-    drop(forwarder);
+    // Same address, listeners closed and joined: the gRPC port is refused along
+    // with the HTTP one, so the entry loaded at `entry` is all the next process
+    // has.
+    forwarder.stop().await;
     let server = DoggyDns::start_with(15422, &addr, &cache).await;
 
     // The first query may answer SERVFAIL while the client's subscribe attempt

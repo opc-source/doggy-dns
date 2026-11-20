@@ -22,7 +22,7 @@ pub(crate) fn build_live_state(
     Arc::new(live)
 }
 
-pub(crate) async fn start_control_plane(
+pub(crate) fn start_control_plane(
     config: &DoggyDnsConfig,
     config_content: &str,
     live: Arc<LiveState>,

@@ -21,9 +21,10 @@ mod xdp;
 #[path = "xdp/stub.rs"]
 mod xdp;
 
-/// Grace a background task gets to finish its own shutdown before we stop
-/// waiting for it. `server.shutdown_timeout` bounds the DNS drain; this bounds
-/// the poller and control plane behind it.
+/// How long the background tasks and the DNS runtime's own teardown get to
+/// finish before we stop waiting. `server.shutdown_timeout` bounds the DNS
+/// drain; this bounds the poller, the control plane and the runtime shutdown
+/// behind it.
 const BACKGROUND_TASK_SHUTDOWN_GRACE: Duration = Duration::from_secs(2);
 
 fn main() -> Result<()> {
@@ -69,7 +70,7 @@ fn main() -> Result<()> {
     // The DNS sockets are bound and served on the DNS runtime's workers; the
     // management runtime on this thread carries everything else.
     let dns_runtime = dns::build_runtime(&config)?;
-    let dns = dns_runtime.handle().clone();
+    let dns_handle = dns_runtime.handle();
 
     let management = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -77,7 +78,12 @@ fn main() -> Result<()> {
         .context("failed to build the management runtime")?;
     tracing::info!("management runtime built");
 
-    let drained = management.block_on(async_main(config, &config_content, &mut telemetry, dns))?;
+    let drained = management.block_on(async_main(
+        config,
+        &config_content,
+        &mut telemetry,
+        dns_handle,
+    ))?;
 
     // A clean drain ends with every DNS task finished; a forced exit cancels
     // whatever is still running instead of waiting for it.
@@ -97,7 +103,7 @@ async fn async_main(
     config: DoggyDnsConfig,
     config_content: &str,
     telemetry: &mut Observability,
-    dns: tokio::runtime::Handle,
+    dns_handle: &tokio::runtime::Handle,
 ) -> Result<bool> {
     // Profiles need a Tokio runtime for their HTTP exporter.
     telemetry.spawn_profiles();
@@ -150,7 +156,7 @@ async fn async_main(
     let dns::ServerHandle {
         stop: server_stop,
         mut done,
-    } = dns::start_server(dns, config.clone(), handler).await?;
+    } = dns::start_server(dns_handle, config.clone(), handler).await?;
 
     tracing::info!("doggy-dns is ready");
 
@@ -159,7 +165,7 @@ async fn async_main(
     // attach flag is fixed after startup — the manager lives as long as this
     // function and dropping it detaches the program.
     let live = control_plane::build_live_state(&watchers, xdp.enabled());
-    let mcp_handle = control_plane::start_control_plane(&config, config_content, live).await;
+    let mcp_handle = control_plane::start_control_plane(&config, config_content, live);
 
     // Run server until shutdown signal
     let shutdown_timeout = Duration::from_secs(config.server.shutdown_timeout);
