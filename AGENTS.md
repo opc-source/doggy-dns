@@ -96,8 +96,13 @@ handed). `entry_of(ledgered, ever_confirmed, window_open)` then picks the source
   last-instance removal push empties that cache and the next query answers
   `NXDOMAIN`.
 - an unledgered name in a process the registry has never answered (start-up) gets
-  that same cache read first and is confirmed only when the cache has nothing to
-  serve — the disk-loaded cache is what answers names during a start-up outage.
+  that same cache read first — the disk-loaded cache is what answers names during
+  a start-up outage. Since nacos-sdk 0.8.4 that read is not purely local: for a
+  name this process has not subscribed, the SDK asks the registry to subscribe
+  and falls back to its cache only after that call fails, so the 50 ms bound cuts
+  the fallback short and the first query can answer `SERVFAIL` (after the 3 s
+  server path) even though the entry is on disk. Once that attempt has failed the
+  SDK's redo task makes later reads local, and they answer from the cache.
 - an unledgered name in a process the registry *has* answered is first confirmed
   with `get_all_instances(..., subscribe = false)`, the only shape the SDK has that
   reports a failed request; a failed confirmation tries the client's

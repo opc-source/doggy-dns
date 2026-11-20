@@ -16,7 +16,7 @@ struct ConfigReloadListener<F: Fn(String) + Send + Sync + 'static> {
 }
 
 impl<F: Fn(String) + Send + Sync + 'static> ConfigChangeListener for ConfigReloadListener<F> {
-    fn notify(&self, config_resp: ConfigResponse) {
+    fn notify(&self, config_resp: Arc<ConfigResponse>) {
         let content = config_resp.content().to_owned();
         tracing::info!(
             data_id = %config_resp.data_id(),

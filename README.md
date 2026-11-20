@@ -122,7 +122,6 @@ cargo tarpaulin --config tarpaulin.toml
 - [ ] etcd backend (`etcd-rs`)
 - [ ] Redis backend (`redis-rs`)
 - [ ] Database backend (`sqlx`)
-- [ ] Dynamic plugin registry (load plugins at runtime)
 - [ ] Config hot-reload via Nacos config service (watcher implemented, wiring pending)
 - [x] OTLP/gRPC export (HTTP/protobuf is supported today)
 - [x] Multi-target OTLP fan-out (use a Collector/Vector today)
