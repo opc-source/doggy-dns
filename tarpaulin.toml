@@ -1,5 +1,5 @@
 [default]
 workspace = true
 out = ["Xml", "Html"]
-exclude-files = ["src/main.rs"]
+exclude-files = ["src/**"]
 timeout = "120s"

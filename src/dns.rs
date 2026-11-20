@@ -50,7 +50,7 @@ pub(crate) fn build_runtime(config: &DoggyDnsConfig) -> Result<tokio::runtime::R
 /// Start the DNS server on the runtime and wait until every socket is bound,
 /// so a bind failure is still a startup error.
 pub(crate) async fn start_server(
-    dns: tokio::runtime::Handle,
+    dns_handle: &tokio::runtime::Handle,
     config: DoggyDnsConfig,
     handler: DoggyDnsHandler,
 ) -> Result<ServerHandle> {
@@ -58,7 +58,7 @@ pub(crate) async fn start_server(
     let (done_tx, done_rx) = mpsc::channel::<Result<()>>(1);
     let (stop_tx, stop_rx) = watch::channel(false);
 
-    dns.spawn(serve(config, handler, started_tx, done_tx, stop_rx));
+    dns_handle.spawn(serve(config, handler, started_tx, done_tx, stop_rx));
 
     match started_rx.await {
         Ok(Ok(())) => {}
@@ -96,7 +96,8 @@ async fn serve(
         result = server.block_until_done() => {
             ServeExit::Finished(result.map_err(anyhow::Error::from))
         }
-        _ = wait_for_stop_request(&mut stop) => ServeExit::StopRequested,
+        // A dropped sender means management is gone, which is also a reason to stop serving.
+        _ = stop.wait_for(|requested| *requested) => ServeExit::StopRequested,
     };
 
     let result = match exit {
@@ -112,12 +113,6 @@ async fn serve(
 enum ServeExit {
     Finished(Result<()>),
     StopRequested,
-}
-
-/// Resolve when management asks the server to stop. A dropped sender means
-/// management is gone, which is also a reason to stop serving.
-async fn wait_for_stop_request(stop: &mut watch::Receiver<bool>) {
-    let _ = stop.wait_for(|requested| *requested).await;
 }
 
 /// Configure CPU affinity for the DNS runtime's worker threads.
@@ -142,6 +137,10 @@ fn configure_cpu_affinity(
     let affinity = affinity.clone();
     builder.on_thread_start(move || {
         let Some(worker_index) = worker_index_from_thread_name() else {
+            tracing::warn!(
+                thread = ?std::thread::current().name(),
+                "thread carries no worker index; leaving it unpinned"
+            );
             return;
         };
         let Some(core_id) = affinity
@@ -149,6 +148,11 @@ fn configure_cpu_affinity(
             .and_then(|&core_idx| core_ids.get(core_idx))
             .copied()
         else {
+            tracing::warn!(
+                worker_index,
+                affinity_len = affinity.len(),
+                "no cpu_affinity entry for this worker; leaving it unpinned"
+            );
             return;
         };
         if core_affinity::set_for_current(core_id) {
@@ -156,6 +160,12 @@ fn configure_cpu_affinity(
                 worker_index,
                 core_id = core_id.id,
                 "pinned worker thread to CPU core"
+            );
+        } else {
+            tracing::warn!(
+                worker_index,
+                core_id = core_id.id,
+                "failed to pin worker thread to CPU core"
             );
         }
     });

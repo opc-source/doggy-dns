@@ -158,9 +158,10 @@ pinning the client too.
 
 Two caveats: a core id is a hard mask on Linux/Android, Windows and the BSDs but
 only an L2-placement *hint* on Apple platforms (the Apple Silicon host checked here
-rejected the call outright, kern 46), and only a successful pin is logged
-(`pinned worker thread to CPU core`); a silent thread was not pinned, so confirm on
-the target with `taskset -p`/`ps -o psr`. The management runtime
+rejected the call outright, kern 46), and every unpinned worker says why
+(`pinned worker thread to CPU core` on success, `failed to pin worker thread to CPU
+core` on failure), so confirm on the target with `taskset -p`/`ps -o psr`. The
+management runtime
 (control plane, XDP polling, CPU profile collection) is not pinned and can share any
 core, including a DNS worker's.
 

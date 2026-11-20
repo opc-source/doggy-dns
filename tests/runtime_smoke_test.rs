@@ -42,6 +42,13 @@ fn temp_config_path(label: &str) -> PathBuf {
     ))
 }
 
+/// Write the fixture to a per-test temp path and remove it on drop.
+fn write_config(label: &str, port: u16) -> (PathBuf, RemoveFileOnDrop) {
+    let path = temp_config_path(label);
+    std::fs::write(&path, config(port)).expect("write smoke-test config");
+    (path.clone(), RemoveFileOnDrop(path))
+}
+
 struct KillOnDrop(Child);
 
 impl Drop for KillOnDrop {
@@ -109,11 +116,20 @@ fn collect_output(readers: Vec<JoinHandle<()>>, lines: &mpsc::Receiver<String>) 
     output
 }
 
+/// Wait up to 30 s for the child to exit.
+fn wait_for_exit(child: &mut Child) -> Option<std::process::ExitStatus> {
+    for _ in 0..600 {
+        if let Some(exit) = child.try_wait().expect("try_wait") {
+            return Some(exit);
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    None
+}
+
 #[test]
 fn dns_and_management_runtime_start_and_stop() {
-    let config_path = temp_config_path("runtime-smoke");
-    std::fs::write(&config_path, config(0)).expect("write smoke-test config");
-    let _config_guard = RemoveFileOnDrop(config_path.clone());
+    let (config_path, _config_guard) = write_config("runtime-smoke", 0);
 
     let (mut guard, lines_rx, readers) = start_binary(&config_path);
 
@@ -162,16 +178,7 @@ fn dns_and_management_runtime_start_and_stop() {
         .expect("run kill");
     assert!(kill.success(), "failed to send SIGTERM: {kill}");
 
-    let mut status = None;
-    for _ in 0..600 {
-        if let Some(exit) = guard.0.try_wait().expect("try_wait") {
-            status = Some(exit);
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(50));
-    }
-
-    let status = match status {
+    let status = match wait_for_exit(&mut guard.0) {
         Some(status) => status,
         None => panic!("doggy-dns did not exit after SIGTERM; output:\n{seen}"),
     };
@@ -197,21 +204,11 @@ fn bind_failure_exits_non_zero() {
     let held = std::net::TcpListener::bind("127.0.0.1:0").expect("hold a tcp port");
     let port = held.local_addr().expect("held address").port();
 
-    let config_path = temp_config_path("bind-failure");
-    std::fs::write(&config_path, config(port)).expect("write bind-failure config");
-    let _config_guard = RemoveFileOnDrop(config_path.clone());
+    let (config_path, _config_guard) = write_config("bind-failure", port);
 
     let (mut guard, lines_rx, readers) = start_binary(&config_path);
 
-    let mut status = None;
-    for _ in 0..600 {
-        if let Some(exit) = guard.0.try_wait().expect("try_wait") {
-            status = Some(exit);
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(50));
-    }
-    let status = match status {
+    let status = match wait_for_exit(&mut guard.0) {
         Some(status) => status,
         None => panic!("doggy-dns did not exit after a bind failure"),
     };
