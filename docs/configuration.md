@@ -130,18 +130,17 @@ If no `[[plugins]]` are configured, defaults to forwarding to `8.8.8.8` and
 
 ## CPU affinity
 
-`cpu_affinity` gives each tokio worker thread its own core, so a worker keeps that
+`cpu_affinity` gives each DNS worker thread its own core, so a worker keeps that
 core's caches for the process lifetime instead of being re-placed wherever the
 scheduler finds room. The list must be as long as `worker_threads` with unique core
-ids; threads claim entries in start order, so the core *set* is fixed while which
-worker lands on which core is not.
+ids; worker `i` (thread name `doggy-dns-worker-i`) is pinned to `cpu_affinity[i]`.
 
 ```text
   cpu_affinity = [0, 2, 4, 6], worker_threads = 4
 
   kernel scheduler                userspace: doggy-dns process
   ------------------              ------------------------------------
-  core 0  ─────────────────────▶  worker #0  (first thread to start)
+  core 0  ─────────────────────▶  worker #0
   core 1   (no worker here)       free for the load generator / OS
   core 2  ─────────────────────▶  worker #1
   core 3   (no worker here)       free for the load generator / OS
@@ -159,10 +158,11 @@ pinning the client too.
 
 Two caveats: a core id is a hard mask on Linux/Android, Windows and the BSDs but
 only an L2-placement *hint* on Apple platforms (the Apple Silicon host checked here
-rejected the call outright, kern 46), and nothing in the log says whether a pin
-landed — confirm on the target with `taskset -p`/`ps -o psr`. Blocking threads,
-such as CPU profile collection, draw from the same list round-robin and can share a
-worker's core.
+rejected the call outright, kern 46), and only a successful pin is logged
+(`pinned worker thread to CPU core`); a silent thread was not pinned, so confirm on
+the target with `taskset -p`/`ps -o psr`. The management runtime
+(control plane, XDP polling, CPU profile collection) is not pinned and can share any
+core, including a DNS worker's.
 
 ## Answer rotation
 

@@ -111,7 +111,24 @@ through on lookup failure so a later `forward` plugin can still answer.
 | TLS (DoT) | 853 | DNS over TLS, requires `[server.tls]` |
 | HTTPS (DoH) | 443 | DNS over HTTPS at `/dns-query`, requires `[server.https]` |
 
-The tokio runtime is built manually in `main()` with configurable `worker_threads`.
+Two Tokio runtimes are built in `main()`. The management runtime is
+single-threaded on the main thread and runs the control plane, XDP polling,
+pprof, signal handling and shutdown orchestration. The DNS runtime is a
+`worker_threads` runtime whose workers are named `doggy-dns-worker-{id}`; it
+binds every DNS socket and serves it. `cpu_affinity` applies to those DNS
+workers only.
+
+```text
+main thread ── block_on: current_thread runtime (management)
+                 ├─ control plane (axum/rmcp, /healthz /readyz /mcp)
+                 ├─ XDP stats poller / kernel-log drain
+                 ├─ pprof (spawn_blocking collection, process-wide sampling)
+                 └─ signals + shutdown orchestration
+
+worker threads ── multi_thread runtime (DNS)
+                 ├─ doggy-dns-worker-{id} → cpu_affinity[id] when configured
+                 └─ hickory UDP / TCP / DoT / DoH
+```
 
 ## Logging events
 

@@ -186,6 +186,7 @@ Points worth knowing before reading a failure:
 | `crates/doggy-dns-xdp/tests/*` | 37 + 9 ignored | Userspace cache/interface/middleware/stats; XDP attach tests need root + Linux |
 | `crates/doggy-dns-control/tests/*` | 27 | Control plane: HTTP contract, endpoint selection, token scoping, live signals, state snapshots, redaction |
 | `tests/integration_test.rs` | 3 | End-to-end chain: Nacos hit, outside-zone fallthrough, in-zone miss stays authoritative |
+| `tests/runtime_smoke_test.rs` | 1 | Process-level topology (unix): the real binary boots (`/healthz` on the management runtime once every DNS socket is bound), Linux worker thread name `doggy-dns-worker-*`, SIGTERM drains gracefully |
 | `tests/nacos_e2e_test.rs` | 10 ignored | Live Nacos: boot-time instances, push after start-up, last-instance deletion, in-zone NXDOMAIN, IPv4-only NODATA, `service_pattern` exclusion, unreachable Nacos answers SERVFAIL, a boot cache entry is answered and then converges on the server's current list, a start-up outage answers from the client's cache without waiting on the registry, the backoff window refuses without waiting |
 
 Forward tests run against a local mock upstream, native tests make real

@@ -205,7 +205,12 @@ then only spreads misses).
 
 `build_server()` binds UDP + TCP on the configured port. Optionally registers TLS (DoT, port 853) and HTTPS (DoH, port 443, path `/dns-query`) when `[server.tls]`/`[server.https]` are enabled. Uses `rustls` for TLS.
 
-The tokio runtime is built manually in `main()` with configurable `worker_threads`.
+Two Tokio runtimes are built in `main()`. The management runtime is
+single-threaded on the main thread and runs the control plane, XDP polling,
+pprof, signal handling and shutdown orchestration. The DNS runtime is a
+`worker_threads` runtime whose workers are named `doggy-dns-worker-{id}`; it
+binds every DNS socket and serves it. `cpu_affinity` applies to those DNS
+workers only.
 
 ## Enforced Coding Rules
 
