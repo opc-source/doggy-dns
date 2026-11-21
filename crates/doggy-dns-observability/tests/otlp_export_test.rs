@@ -57,6 +57,7 @@ async fn exports_logs_metrics_and_traces_with_openobserve_headers() {
 
     let mut telemetry = Observability::init(&common::full_config(config), None)
         .expect("observability should initialize");
+    telemetry.register_tokio_runtimes(&[(&tokio::runtime::Handle::current(), "dns")]);
     tracing::warn!("otlp integration log message");
     tokio::time::sleep(Duration::from_millis(200)).await;
     let span = tracing::info_span!("dns.request", "dns.question.name" = "example.com.");
@@ -159,6 +160,41 @@ async fn exports_logs_metrics_and_traces_with_openobserve_headers() {
     assert!(metric_names.contains(&"dns.queries"));
     assert!(metric_names.contains(&"dns.query.duration"));
     assert!(metric_names.contains(&"dns.queries.in_flight"));
+    assert!(metric_names.contains(&"tokio.runtime.workers"));
+    assert!(metric_names.contains(&"tokio.runtime.alive_tasks"));
+    assert!(metric_names.contains(&"tokio.runtime.global_queue_depth"));
+
+    let workers = metrics.resource_metrics[0].scope_metrics[0]
+        .metrics
+        .iter()
+        .find(|metric| metric.name == "tokio.runtime.workers")
+        .expect("tokio.runtime.workers should be exported");
+    let Some(opentelemetry_proto::tonic::metrics::v1::metric::Data::Gauge(gauge)) =
+        workers.data.as_ref()
+    else {
+        panic!("tokio.runtime.workers should be a gauge");
+    };
+    assert_eq!(gauge.data_points.len(), 1, "one point per runtime");
+    assert_eq!(
+        gauge.data_points[0].value,
+        Some(opentelemetry_proto::tonic::metrics::v1::number_data_point::Value::AsInt(2)),
+        "num_workers should report the test runtime's worker count"
+    );
+    let runtime_label = gauge.data_points[0]
+        .attributes
+        .iter()
+        .find(|attribute| attribute.key == "tokio.runtime.name")
+        .and_then(|attribute| attribute.value.as_ref())
+        .and_then(|value| value.value.as_ref());
+    assert!(
+        matches!(
+            runtime_label,
+            Some(
+                opentelemetry_proto::tonic::common::v1::any_value::Value::StringValue(name)
+            ) if name == "dns"
+        ),
+        "unexpected runtime attribute: {runtime_label:?}"
+    );
 
     let traces =
         ExportTraceServiceRequest::decode(traces_request.body.as_slice()).expect("decode traces");

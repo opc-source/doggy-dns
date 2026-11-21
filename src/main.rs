@@ -78,6 +78,9 @@ fn main() -> Result<()> {
         .context("failed to build the management runtime")?;
     tracing::info!("management runtime built");
 
+    // Only the DNS runtime serves queries, so only its runtime gauges are exported.
+    telemetry.register_tokio_runtimes(&[(dns_handle, "dns")]);
+
     let drained = management.block_on(async_main(
         config,
         &config_content,

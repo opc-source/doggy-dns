@@ -237,10 +237,18 @@ single-target OTLP producer. Keep `observability.profiles.enabled = false`.
 | `dns.query.duration` | histogram | `ms` | same |
 | `dns.queries.in_flight` | up/down counter | `1` | — |
 | `dns.xdp.queries` | counter | `1` | `dns.xdp.result` (`hit`, `negative_hit`, `miss`, `expired`, `drop`) |
+| `tokio.runtime.workers` | gauge | `1` | `tokio.runtime.name` (`dns`) |
+| `tokio.runtime.alive_tasks` | gauge | `1` | same |
+| `tokio.runtime.global_queue_depth` | gauge | `1` | same |
 
 Buckets: `0.1, 0.25, 0.5, 1, 2.5, 5, 10, 25, 50, 100, 250, 500, 1000, 2500,
 5000` ms. Query names and client IPs are intentionally **not** metric
 attributes (cardinality); use logs/traces for those.
+
+The `tokio.runtime.*` gauges come from Tokio's stable `RuntimeMetrics` API and
+are read by the metric reader at each export, so a point is a snapshot taken at
+the `interval_secs` tick rather than a continuously updated value. Only the DNS
+runtime is instrumented; the management runtime's tasks are not represented.
 
 The `dns.xdp.queries` instrument is created whenever metrics are enabled, but
 only emits data points when `xdp.enabled` is also true on Linux with the `xdp`
