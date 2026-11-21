@@ -1,3 +1,4 @@
+use crate::log_control::LogLevelState;
 use serde::Serialize;
 use serde_json::Value;
 use std::collections::BTreeMap;
@@ -26,6 +27,9 @@ struct XdpSignal {
 #[derive(Serialize)]
 struct RuntimeSnapshot {
     signals: BTreeMap<String, Value>,
+    /// Only the MCP `get_runtime_status` payload carries it; `/readyz` does not.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    logs: Option<LogLevelState>,
 }
 
 /// Registry of live runtime signals behind the control plane's `/readyz`
@@ -83,11 +87,21 @@ impl LiveState {
 
     /// Evaluate every probe once. Shape: `{"signals": {name: value, ...}}`.
     pub fn snapshot(&self) -> Value {
+        self.snapshot_with(None)
+    }
+
+    /// Like [`snapshot`](Self::snapshot), with the log filter state under `logs`.
+    pub fn snapshot_with_logs(&self, logs: LogLevelState) -> Value {
+        self.snapshot_with(Some(logs))
+    }
+
+    fn snapshot_with(&self, logs: Option<LogLevelState>) -> Value {
         let signals = self
             .probes
             .iter()
             .map(|(name, probe)| (name.clone(), probe()))
             .collect();
-        serde_json::to_value(RuntimeSnapshot { signals }).expect("runtime snapshot is serializable")
+        serde_json::to_value(RuntimeSnapshot { signals, logs })
+            .expect("runtime snapshot is serializable")
     }
 }

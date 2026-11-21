@@ -1,23 +1,25 @@
 # doggy-dns-control
 
 Node-side service control plane for doggy-dns: one HTTP listener exposing the
-read-only MCP (Model Context Protocol) introspection endpoint plus plain
-health probes backed by live runtime signals.
+MCP (Model Context Protocol) endpoint — introspection tools plus one runtime
+control — and plain health probes backed by live runtime signals.
 
 ## Overview
 
 This crate provides the control plane listener. The MCP protocol side serves
-read-only tools over Streamable HTTP; the health endpoints report live runtime
-signals sampled at request time. It is designed for integration with the
-doggy-dns-console project and other AI-powered management tools, and as a
-Kubernetes probe target.
+tools over Streamable HTTP; all but `set_log_level` are read-only. The health
+endpoints report live runtime signals sampled at request time. It is designed
+for integration with the doggy-dns-console project and other AI-powered
+management tools, and as a Kubernetes probe target.
 
 **Key properties:**
 
 - **Disabled by default** — set `[control].enabled = true` to activate.
 - **Endpoint selection** — `control.endpoints` decides which routes exist
   (`mcp`, `healthz`, `readyz`); everything else 404s.
-- **Read-only** — all four tools carry `readOnlyHint = true`, `destructiveHint = false`.
+- **One runtime control** — `set_log_level` retargets the log filters
+  (`readOnlyHint = false`, non-destructive, idempotent); the other four tools
+  are read-only, and the current filters ride along in `get_runtime_status`.
 - **Non-fatal** — if the control plane port is already in use, the DNS server continues running and the bind is retried every 10s until the port frees (see `BIND_RETRY_INTERVAL`). The control port is deliberately *not* in the `SO_REUSEPORT` group the DNS sockets join: two processes answering `/readyz` for one node would look like two instances.
 - **Config redaction** — `get_config` recursively replaces sensitive values (`password`, `token`, `secret`, `authorization`, `api_key`, `apikey`, `passwd`) with `"***"`.
 - **Optional Bearer auth** — set `[control].token` to require `Authorization: Bearer <token>` on `/mcp`; health endpoints never require it.
@@ -151,8 +153,9 @@ validation normally prevents this):
 
 ### `get_runtime_status`
 
-Returns live runtime signals sampled at call time — the same payload
-`/readyz` serves over GET. One signal per registered source:
+Returns live runtime signals sampled at call time — the same `signals` object
+`/readyz` serves over GET — plus the current log filter directives under
+`logs` when the log control is available. One signal per registered source:
 
 **Input:** `{}` (no arguments)
 
@@ -167,6 +170,10 @@ Returns live runtime signals sampled at call time — the same payload
     "xdp": {
       "attached": true
     }
+  },
+  "logs": {
+    "stdout": "info",
+    "otlp": "info"
   }
 }
 ```
@@ -176,6 +183,36 @@ lives in the Nacos client's cache, so the control plane reports no cache size
 or push timestamp. `xdp.attached` is only reported by builds with the fast path
 wired in; the flag is fixed after startup because dropping the manager detaches
 the program.
+
+### `set_log_level`
+
+Replaces or restores the process's log filters (see
+[observability.md](../../docs/observability.md#runtime-log-level)); the current
+directives are part of `get_runtime_status`. It touches no configuration file,
+nothing on disk, and nothing that affects DNS answers; the change does not
+survive a restart.
+
+**Input:** exactly one of `directives` and `reset`.
+
+```json
+{ "directives": "doggy_dns_nacos=debug,hickory_proto=info" }
+```
+
+- `directives` — `EnvFilter`-style string applied to every enabled log output,
+  replacing its filter wholesale
+- `"reset": true` — restore the filters each output started with
+- passing both is rejected; so are passing neither, unparsable directives, and
+  directives that name an `opentelemetry*` target (the OTLP output always
+  excludes the OTel SDK's own crates), which leave the current filter untouched
+
+**Output:** the directives now in force; `null` means that output is disabled.
+
+```json
+{ "stdout": "doggy_dns_nacos=debug,hickory_proto=info", "otlp": "doggy_dns_nacos=debug,hickory_proto=info" }
+```
+
+Every filter installed on the OTLP output appends exclusions for the OTel SDK's
+own crates, so the bridge never re-exports the SDK's logs.
 
 ## Authentication
 
@@ -195,7 +232,9 @@ The following JSON field names are part of the stable contract and must not be r
 - `get_status` → `instanceId`, `host`, `version`, `pid`, `uptimeSeconds`, `startedAt`, `listenAddr`, `protocols`, `status`
 - `list_plugins` → `plugins[].order`, `kind`, `enabled`, `details`
 - `get_config` → `format`, `content`, `redactedKeys`
-- `get_runtime_status` / `GET /readyz` → `signals`
+- `get_runtime_status` → `signals`, `logs.stdout`, `logs.otlp`
+- `GET /readyz` → `signals`
+- `set_log_level` → `stdout`, `otlp`
 - `GET /healthz` → `status`
 
 ## Smoke Test
@@ -222,11 +261,11 @@ curl -s http://127.0.0.1:19090/mcp \
   -d '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}'
 ```
 
-## Read-Only Guarantee
+## Mutating Surface
 
-This server provides **no write operations**. There are no tools, resources, or prompts that modify configuration, clear caches, restart services, or perform any destructive action. All tool annotations declare:
-
-- `readOnlyHint = true`
-- `destructiveHint = false`
-- `idempotentHint = true`
-- `openWorldHint = false`
+`set_log_level` is the only tool that changes process state, and the only state
+it changes is the in-memory log filter. It declares `readOnlyHint = false`,
+`destructiveHint = false` and `idempotentHint = true`; the other four tools
+declare `readOnlyHint = true`. There are no tools, resources, or prompts that
+modify configuration, clear caches, restart services, or perform any
+destructive action.

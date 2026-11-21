@@ -11,10 +11,26 @@ authentication) changes.
 
 | Signal | Endpoint | Default | Notes |
 |--------|----------|---------|-------|
-| Logs | `/v1/logs` | enabled, level `warn` | stdout logging stays independent |
+| Logs | `/v1/logs` | enabled, level `warn` | stdout uses the same level |
 | Metrics | `/v1/metrics` | enabled, 15s interval | DNS-aware histogram buckets |
 | Traces | `/v1/traces` | enabled, 5% sampling | `dns.request` / `dns.resolve` / `dns.forward` spans |
 | Profiles | `/v1/profiles` | disabled | CPU only, Linux/macOS, OTLP Profiles Alpha |
+
+## Runtime log level
+
+Both filters start from the same directives: `RUST_LOG` when it parses,
+`observability.logs.level` otherwise (default `warn`). On a running instance the
+control plane's `set_log_level` MCP tool replaces both with one `EnvFilter`-style
+directive string, e.g. `doggy_dns_nacos=debug,hickory_proto=info`;
+`get_runtime_status` reports the current directives under `logs`, and `reset`
+restores the startup ones. Outputs that started disabled (`logs.stdout = false`,
+`logs.enabled = false`) stay disabled. The switch affects events only — trace
+span sampling is unchanged — and does not persist: a restart starts from the
+configured levels. Every filter installed on the OTLP output appends exclusions
+for the OTel SDK's own crates, so the bridge never re-exports the SDK's logs;
+directives naming an `opentelemetry*` target are refused (and such a `RUST_LOG`
+is ignored), because `EnvFilter` picks the longest matching target and a more
+specific one would out-rank those exclusions.
 
 ## Quick start: OpenObserve
 
@@ -92,7 +108,7 @@ resource_attributes = {}
 
 [observability.logs]
 enabled = true
-level = "warn"                 # trace | debug | info | warn | error
+level = "warn"                 # stdout + OTLP; RUST_LOG overrides; trace|debug|info|warn|error
 stdout = true
 endpoint = ""                  # full URL override
 
@@ -325,5 +341,5 @@ Requirements and caveats:
 | `404` on all signals | Endpoint must be the base (`.../api/default`), not a full `/v1/...` URL |
 | No profiles in OpenObserve | Generate CPU load (empty collection windows are skipped), enable `profiles.enabled`, then check `GET /api/<org>/streams?type=profiles&offset=0&limit=10` |
 | Traces missing under load | Lower `sample_ratio` or increase `max_queue_size`; `tracing::error!` spans are force-sampled and should still appear |
-| Logs missing | OTLP log level defaults to `warn`; set `observability.logs.level` |
+| Logs missing | Log level defaults to `warn` for both outputs; set `observability.logs.level` or `RUST_LOG` |
 | Collector rejects profiles | Start with `--feature-gates=+service.profilesSupport` and add a profiles pipeline |

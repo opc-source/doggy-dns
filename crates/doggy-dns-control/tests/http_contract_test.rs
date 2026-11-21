@@ -2,7 +2,7 @@
 
 mod common;
 
-use common::{forward_plugins, test_live, test_state};
+use common::{FakeLogs, forward_plugins, test_live, test_state, test_state_with_logs};
 use doggy_dns_control::ControlConfig;
 use doggy_dns_control::transport;
 use std::sync::Arc;
@@ -74,8 +74,31 @@ async fn get_path(addr: std::net::SocketAddr, path: &str) -> reqwest::Response {
         .unwrap()
 }
 
+/// Call one tool over the wire and return the JSON text its result carries.
+async fn call_tool(
+    addr: std::net::SocketAddr,
+    session_id: Option<&str>,
+    name: &str,
+    arguments: serde_json::Value,
+) -> serde_json::Value {
+    let body = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 3,
+        "method": "tools/call",
+        "params": { "name": name, "arguments": arguments }
+    });
+    let resp = match session_id {
+        Some(sid) => post_mcp_with_session(addr, sid, &body).await,
+        None => post_mcp(addr, None, &body).await,
+    };
+    assert_eq!(resp.status(), 200);
+    let json = parse_sse_or_json(&resp.text().await.unwrap());
+    let text = json["result"]["content"][0]["text"].as_str().unwrap();
+    serde_json::from_str(text).unwrap()
+}
+
 #[tokio::test]
-async fn lists_four_read_only_tools_and_calls_status() {
+async fn lists_tools_and_calls_status() {
     let state = Arc::new(test_state(forward_plugins(), ""));
     let cfg = ControlConfig {
         port: 0,
@@ -101,19 +124,64 @@ async fn lists_four_read_only_tools_and_calls_status() {
     let body = resp.text().await.unwrap();
     let json: serde_json::Value = parse_sse_or_json(&body);
     let tools = json["result"]["tools"].as_array().unwrap();
-    assert_eq!(tools.len(), 4);
+    assert_eq!(tools.len(), 5);
 
     let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
     assert!(names.contains(&"get_status"));
     assert!(names.contains(&"list_plugins"));
     assert!(names.contains(&"get_config"));
     assert!(names.contains(&"get_runtime_status"));
+    assert!(names.contains(&"set_log_level"));
 
     for tool in tools {
         let annotations = tool["annotations"].as_object().unwrap();
-        assert_eq!(annotations["readOnlyHint"], true);
+        assert_eq!(annotations["readOnlyHint"], tool["name"] != "set_log_level");
         assert_eq!(annotations["destructiveHint"], false);
     }
+
+    handle.cancel.cancel();
+}
+
+#[tokio::test]
+async fn set_log_level_accepts_the_documented_json_arguments() {
+    let state = Arc::new(test_state_with_logs(
+        forward_plugins(),
+        "",
+        FakeLogs::new("info"),
+    ));
+    let cfg = ControlConfig {
+        port: 0,
+        token: None,
+        ..Default::default()
+    };
+    let handle = transport::start(state, test_live(), cfg).await.unwrap();
+
+    let resp = post_mcp(handle.addr, None, &initialize_request()).await;
+    assert_eq!(resp.status(), 200);
+    let session_id = resp
+        .headers()
+        .get("mcp-session-id")
+        .map(|v| v.to_str().unwrap().to_string());
+
+    // Omitting `reset` proves it is an optional boolean on the wire.
+    let reported = call_tool(
+        handle.addr,
+        session_id.as_deref(),
+        "set_log_level",
+        serde_json::json!({ "directives": "doggy_dns_nacos=debug" }),
+    )
+    .await;
+    assert_eq!(reported["stdout"], "doggy_dns_nacos=debug");
+    assert!(reported["otlp"].is_null());
+
+    let reported = call_tool(
+        handle.addr,
+        session_id.as_deref(),
+        "set_log_level",
+        serde_json::json!({ "reset": true }),
+    )
+    .await;
+    assert_eq!(reported["stdout"], "info");
 
     handle.cancel.cancel();
 }

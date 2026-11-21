@@ -3,6 +3,7 @@ mod endpoint;
 mod error_events;
 mod exporter;
 mod exposure;
+mod log_control;
 mod logs;
 mod metrics;
 mod profiles;
@@ -12,7 +13,7 @@ mod sampler;
 mod test_util;
 mod traces;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use doggy_dns_basic::{DoggyDnsConfig, ObservabilityBackend, ObservabilityConfig};
 use doggy_dns_plugin::Middleware;
 use opentelemetry::metrics::Meter;
@@ -32,6 +33,7 @@ use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::{Layer, Registry, fmt};
 
 pub use exposure::detect_hostname;
+pub use log_control::{LogLevelHandle, LogLevels};
 pub use metrics::{DnsMetrics, XdpMetrics};
 
 /// Holds the OTel providers and the profile task. Drop (or call
@@ -47,6 +49,7 @@ pub struct Observability {
     profile_exporter: Option<profiles::ProfileExporter>,
     profile_task: Option<JoinHandle<()>>,
     profile_stopper: Option<Arc<profiles::ProfileStopper>>,
+    log_level: LogLevelHandle,
 }
 
 impl Observability {
@@ -67,6 +70,7 @@ impl Observability {
             profile_exporter: None,
             profile_task: None,
             profile_stopper: None,
+            log_level: LogLevelHandle::default(),
         };
 
         let mut resource = None;
@@ -122,7 +126,7 @@ impl Observability {
             }
         }
 
-        install_subscriber(
+        observability.log_level = install_subscriber(
             config,
             log_format,
             observability.logger_provider.as_ref(),
@@ -134,6 +138,11 @@ impl Observability {
         }
 
         Ok(observability)
+    }
+
+    /// Handle for changing the log filters of the installed subscriber at runtime.
+    pub fn log_level(&self) -> LogLevelHandle {
+        self.log_level.clone()
     }
 
     /// Middleware that records DNS query metrics. `None` when OTLP metrics are disabled.
@@ -219,56 +228,27 @@ fn install_subscriber(
     log_format: Option<&str>,
     logger_provider: Option<&SdkLoggerProvider>,
     tracer_provider: Option<&SdkTracerProvider>,
-) -> Result<()> {
+) -> Result<LogLevelHandle> {
     let stdout = !config.enabled || config.logs.stdout;
     let json = stdout && log_format.is_some_and(|format| format.eq_ignore_ascii_case("json"));
 
-    if json {
-        let fmt_layer = fmt::layer().json().with_filter(env_filter(stdout));
-        install_layers(fmt_layer, config, logger_provider, tracer_provider)
+    let stdout_inner: log_control::BoxedLayer<Registry> = if json {
+        fmt::layer::<Registry>().json().boxed()
     } else {
-        let fmt_layer = fmt::layer().with_filter(env_filter(stdout));
-        install_layers(fmt_layer, config, logger_provider, tracer_provider)
-    }
-}
-
-fn env_filter(stdout: bool) -> EnvFilter {
-    if !stdout {
-        return EnvFilter::new("off");
-    }
-    EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"))
-}
-
-fn install_layers<F>(
-    fmt_layer: F,
-    config: &ObservabilityConfig,
-    logger_provider: Option<&SdkLoggerProvider>,
-    tracer_provider: Option<&SdkTracerProvider>,
-) -> Result<()>
-where
-    F: Layer<Registry> + Send + Sync + 'static,
-{
-    let log_layer = match logger_provider {
-        Some(provider) => {
-            let level = config
-                .logs
-                .level
-                .to_ascii_lowercase()
-                .parse::<Level>()
-                .with_context(|| {
-                    format!("invalid observability.logs.level: {}", config.logs.level)
-                })?;
-            // Never forward the OTel SDK's own logs through the bridge; doing
-            // so can recursively trigger another export.
-            let filter = FilterFn::new(move |metadata: &Metadata<'_>| {
-                *metadata.level() <= level
-                    && !metadata.target().starts_with("opentelemetry")
-                    && !metadata.target().starts_with("tracing_opentelemetry")
-            });
-            Some(OpenTelemetryTracingBridge::new(provider).with_filter(filter))
-        }
-        None => None,
+        fmt::layer::<Registry>().boxed()
     };
+
+    // Both outputs start from the same directives; the bridge carries the
+    // SDK's own logs as exclusions on top.
+    let directives = startup_directives(&config.logs.level);
+    let otlp_inner: Option<(log_control::BoxedLayer<log_control::WithStdout>, String)> =
+        logger_provider.map(|provider| {
+            let bridge: log_control::BoxedLayer<log_control::WithStdout> =
+                OpenTelemetryTracingBridge::new(provider).boxed();
+            (bridge, directives.clone())
+        });
+
+    let layers = log_control::build(stdout_inner, stdout.then_some(directives), otlp_inner)?;
 
     let trace_layer = tracer_provider.map(|provider| {
         let tracer = provider.tracer(doggy_dns_plugin::APP_NAME);
@@ -287,12 +267,25 @@ where
     let error_layer = tracer_provider.map(|_| error_events::ErrorEventLayer);
 
     tracing_subscriber::registry()
-        .with(fmt_layer)
-        .with(log_layer)
+        .with(layers.stdout)
+        .with(layers.otlp)
         .with(trace_layer)
         .with(error_layer)
         .try_init()
-        .map_err(|error| anyhow::anyhow!("failed to install tracing subscriber: {error}"))
+        .map_err(|error| anyhow::anyhow!("failed to install tracing subscriber: {error}"))?;
+
+    Ok(layers.handle)
+}
+
+/// The directives both log outputs start with: `RUST_LOG` when it parses to a
+/// non-blank filter that does not name an OTel target, `logs.level` otherwise.
+fn startup_directives(level: &str) -> String {
+    std::env::var("RUST_LOG")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .filter(|value| !log_control::targets_otel(value))
+        .filter(|value| EnvFilter::try_new(value).is_ok())
+        .unwrap_or_else(|| level.to_string())
 }
 
 fn log_startup(config: &ObservabilityConfig, resource: Option<&opentelemetry_sdk::Resource>) {
