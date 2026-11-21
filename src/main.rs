@@ -168,7 +168,8 @@ async fn async_main(
     // attach flag is fixed after startup — the manager lives as long as this
     // function and dropping it detaches the program.
     let live = control_plane::build_live_state(&watchers, xdp.enabled());
-    let mcp_handle = control_plane::start_control_plane(&config, config_content, live);
+    let mcp_handle =
+        control_plane::start_control_plane(&config, config_content, live, telemetry.log_level());
 
     // Run server until shutdown signal
     let shutdown_timeout = Duration::from_secs(config.server.shutdown_timeout);

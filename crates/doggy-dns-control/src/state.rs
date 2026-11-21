@@ -1,10 +1,12 @@
 use chrono::{DateTime, Utc};
+use std::sync::Arc;
 
 use doggy_dns_basic::DoggyDnsConfig;
 
-use crate::{ConfigSnapshot, PluginSnapshot};
+use crate::{ConfigSnapshot, LogLevelAdmin, PluginSnapshot};
 
-/// Immutable snapshot of a doggy-dns instance's state, built once at startup.
+/// Snapshot of a doggy-dns instance's startup state, plus the live log-filter
+/// control the `set_log_level` tool operates on.
 #[derive(Debug, Clone)]
 pub struct McpState {
     pub instance_id: String,
@@ -16,6 +18,7 @@ pub struct McpState {
     pub protocols: Vec<String>,
     pub plugins: Vec<PluginSnapshot>,
     pub config: ConfigSnapshot,
+    pub log_control: Arc<dyn LogLevelAdmin>,
 }
 
 impl McpState {
@@ -41,6 +44,7 @@ impl McpState {
         protocols: Vec<String>,
         plugins: Vec<PluginSnapshot>,
         config_content: &str,
+        log_control: Arc<dyn LogLevelAdmin>,
     ) -> Self {
         let instance_id = format!("{host}-{pid}");
         let config = ConfigSnapshot::capture(config_content);
@@ -54,6 +58,7 @@ impl McpState {
             protocols,
             plugins,
             config,
+            log_control,
         }
     }
 }

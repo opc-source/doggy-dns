@@ -49,7 +49,7 @@ basic_auth = { username = "root@example.com", password = "${OPENOBSERVE_PASSWORD
 
 [observability.logs]
 enabled = true
-level = "warn"
+level = "warn"                        # stdout + OTLP; RUST_LOG overrides
 stdout = true
 
 [observability.metrics]
@@ -99,8 +99,9 @@ group = "DOGGY_DNS"
 data_id = "doggy-dns.toml"
 
 # Optional: node-side service control plane (one HTTP listener).
-# `endpoints` selects what is exposed: "mcp" (read-only JSON-RPC tools at
-# /mcp), "healthz" (liveness probe), "readyz" (live runtime signals report).
+# `endpoints` selects what is exposed: "mcp" (JSON-RPC tools at /mcp, plus
+# the set_log_level runtime control), "healthz" (liveness probe), "readyz"
+# (live runtime signals report).
 [control]
 enabled = true
 listen_addr = "127.0.0.1"
@@ -308,13 +309,16 @@ and `readyz` (no duplicates) when the control plane is enabled.
 ## Control plane
 
 One HTTP listener whose exposed surface is chosen by `control.endpoints`;
-disabled by default. `mcp` nests the read-only JSON-RPC tools at `/mcp` over
+disabled by default. `mcp` nests the JSON-RPC tools at `/mcp` over
 Streamable HTTP — `get_status` (instance identity/uptime), `list_plugins`
 (authority chain), `get_config` (TOML with secrets redacted) and
-`get_runtime_status` (live signals sampled at call time); the Bearer token
-guards this endpoint only. `healthz` is a trivial liveness probe and `readyz`
-reports live runtime signals (per-zone Nacos subscribed-name count, XDP
-attach state); both are plain GET, never require auth and
+`get_runtime_status` (live signals sampled at call time, plus the current log
+filter directives), and `set_log_level`, the one runtime control: it replaces
+or resets the log filter of every enabled output (see
+[observability.md](observability.md#runtime-log-level)); the Bearer token
+guards this endpoint only. `healthz` is a trivial liveness probe
+and `readyz` reports live runtime signals (per-zone Nacos subscribed-name
+count, XDP attach state); both are plain GET, never require auth and
 always answer 200 — `readyz` is a report, not a verdict, so deciding what
 counts as "not ready" stays with the operator or doggy-dns-console. Full
 contract: [crates/doggy-dns-control/README.md](../crates/doggy-dns-control/README.md).

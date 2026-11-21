@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use rmcp::{
     ServerHandler,
+    handler::server::wrapper::Parameters,
     model::{CallToolResult, ContentBlock, ErrorData, ServerCapabilities, ServerConfig},
     tool, tool_handler, tool_router,
 };
@@ -60,6 +61,27 @@ struct ErrorDetail<'a> {
 struct ErrorBody<'a> {
     error: ErrorDetail<'a>,
 }
+
+// The `JsonSchema` derive's generated impl calls `unwrap`, which this
+// workspace bans; the allow covers that impl and nothing hand-written.
+mod args {
+    #![allow(clippy::disallowed_methods)]
+
+    use rmcp::schemars;
+
+    /// Arguments of `set_log_level`; exactly one of `directives` and `reset` is required.
+    #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+    pub struct LogLevelArgs {
+        /// EnvFilter-style directives applied to every enabled log output, e.g.
+        /// `"doggy_dns_nacos=debug,hickory_proto=info"`.
+        pub directives: Option<String>,
+        /// Restore the directives each output started with.
+        #[serde(default)]
+        pub reset: bool,
+    }
+}
+
+pub use args::LogLevelArgs;
 
 impl DoggyMcpServer {
     pub fn new(state: Arc<McpState>, live: Arc<LiveState>) -> Self {
@@ -148,7 +170,7 @@ impl DoggyMcpServer {
 
     #[tool(
         name = "get_runtime_status",
-        description = "Return live runtime signals (per-zone subscription counts, fast-path state) sampled at call time.",
+        description = "Return live runtime signals (per-zone subscription counts, fast-path state) and the current log filter directives, sampled at call time.",
         annotations(
             title = "Get live runtime signals",
             read_only_hint = true,
@@ -158,7 +180,57 @@ impl DoggyMcpServer {
         )
     )]
     pub async fn get_runtime_status(&self) -> Result<CallToolResult, ErrorData> {
-        json_text(&self.live.snapshot())
+        let logs = self.state.log_control.current();
+        json_text(&self.live.snapshot_with_logs(logs))
+    }
+
+    #[tool(
+        name = "set_log_level",
+        description = "Replace or restore the process's log filters at runtime; a change applies to stdout and OTLP logs until reset or the next call.",
+        annotations(
+            title = "Set runtime log level",
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    pub async fn set_log_level(
+        &self,
+        Parameters(args): Parameters<LogLevelArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let state = match (args.directives, args.reset) {
+            (Some(_), true) => {
+                return Err(ErrorData::invalid_params(
+                    "pass either `directives` or `reset`, not both",
+                    None,
+                ));
+            }
+            (None, false) => {
+                return Err(ErrorData::invalid_params(
+                    "pass `directives` or `reset`; read the current filters with `get_runtime_status`",
+                    None,
+                ));
+            }
+            (Some(directives), false) => self
+                .state
+                .log_control
+                .set(&directives)
+                .map_err(|message| ErrorData::invalid_params(message, None))?,
+            (None, true) => self
+                .state
+                .log_control
+                .reset()
+                .map_err(|message| ErrorData::internal_error(message, None))?,
+        };
+
+        if state.stdout.is_none() && state.otlp.is_none() {
+            return Err(ErrorData::internal_error(
+                "no log output is enabled; check the observability.logs settings",
+                None,
+            ));
+        }
+        json_text(&state)
     }
 }
 
@@ -175,6 +247,6 @@ impl ServerHandler for DoggyMcpServer {
                 "doggy-dns-control",
                 env!("CARGO_PKG_VERSION"),
             ))
-            .with_instructions("Read-only introspection of a doggy-dns instance.")
+            .with_instructions("Introspection and runtime controls of a doggy-dns instance.")
     }
 }

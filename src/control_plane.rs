@@ -1,8 +1,11 @@
 //! Control plane wiring: the live signals it reports and the listener itself.
 
 use doggy_dns_control::live::LiveState;
+use doggy_dns_control::log_control::{LogLevelAdmin, LogLevelState};
 use doggy_dns_core::config::DoggyDnsConfig;
 use doggy_dns_nacos::watcher::NacosServiceWatcher;
+use doggy_dns_observability::{LogLevelHandle, LogLevels};
+use std::fmt;
 use std::sync::Arc;
 
 /// Register the live runtime signals the control plane reports: one per
@@ -26,6 +29,7 @@ pub(crate) fn start_control_plane(
     config: &DoggyDnsConfig,
     config_content: &str,
     live: Arc<LiveState>,
+    log_level: LogLevelHandle,
 ) -> Option<doggy_dns_control::ControlPlaneHandle> {
     if !config.control.enabled {
         return None;
@@ -42,6 +46,7 @@ pub(crate) fn start_control_plane(
         doggy_dns_control::state::McpState::enabled_protocols(config),
         doggy_dns_control::snapshots_from(&config.plugins),
         config_content,
+        Arc::new(ObservabilityLogs(log_level)),
     ));
 
     let control_config = config.control.clone();
@@ -65,5 +70,35 @@ pub(crate) fn start_control_plane(
             tracing::error!(%error, "failed to start control plane; continuing with dns only");
             None
         }
+    }
+}
+
+/// The control plane's log-filter contract over the observability subscriber.
+struct ObservabilityLogs(LogLevelHandle);
+
+impl fmt::Debug for ObservabilityLogs {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_tuple("ObservabilityLogs").finish_non_exhaustive()
+    }
+}
+
+impl LogLevelAdmin for ObservabilityLogs {
+    fn current(&self) -> LogLevelState {
+        to_control(self.0.current())
+    }
+
+    fn set(&self, directives: &str) -> Result<LogLevelState, String> {
+        self.0.set(directives).map(to_control)
+    }
+
+    fn reset(&self) -> Result<LogLevelState, String> {
+        self.0.reset().map(to_control)
+    }
+}
+
+fn to_control(levels: LogLevels) -> LogLevelState {
+    LogLevelState {
+        stdout: levels.stdout,
+        otlp: levels.otlp,
     }
 }

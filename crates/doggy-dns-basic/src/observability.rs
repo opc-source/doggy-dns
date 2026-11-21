@@ -172,7 +172,7 @@ impl fmt::Debug for BasicAuthConfig {
 #[serde(default)]
 pub struct LogsConfig {
     pub enabled: bool,
-    /// OTLP log level. Independent of the stdout `RUST_LOG` filter.
+    /// Startup level for both log outputs. `RUST_LOG` takes precedence when it parses.
     pub level: String,
     pub stdout: bool,
     /// Full OTLP URL override, e.g. `http://host:4318/v1/logs`.
