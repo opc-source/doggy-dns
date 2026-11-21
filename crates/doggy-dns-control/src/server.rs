@@ -1,16 +1,12 @@
-// The `JsonSchema` derive and `#[tool]` macro expansions call `unwrap`, which
-// this workspace bans; the allow is scoped to this module's tool declarations.
-#![allow(clippy::disallowed_methods)]
-
 use std::sync::Arc;
 
 use rmcp::{
     ServerHandler,
     handler::server::wrapper::Parameters,
     model::{CallToolResult, ContentBlock, ErrorData, ServerCapabilities, ServerConfig},
-    schemars, tool, tool_handler, tool_router,
+    tool, tool_handler, tool_router,
 };
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
 use crate::ConfigSnapshot;
 use crate::PluginSnapshot;
@@ -66,16 +62,26 @@ struct ErrorBody<'a> {
     error: ErrorDetail<'a>,
 }
 
-/// Arguments of `set_log_level`; exactly one of `directives` and `reset` is required.
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct LogLevelArgs {
-    /// EnvFilter-style directives applied to every enabled log output, e.g.
-    /// `"doggy_dns_nacos=debug,hickory_proto=info"`.
-    pub directives: Option<String>,
-    /// Restore the directives each output started with.
-    #[serde(default)]
-    pub reset: bool,
+// The `JsonSchema` derive's generated impl calls `unwrap`, which this
+// workspace bans; the allow covers that impl and nothing hand-written.
+mod args {
+    #![allow(clippy::disallowed_methods)]
+
+    use rmcp::schemars;
+
+    /// Arguments of `set_log_level`; exactly one of `directives` and `reset` is required.
+    #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+    pub struct LogLevelArgs {
+        /// EnvFilter-style directives applied to every enabled log output, e.g.
+        /// `"doggy_dns_nacos=debug,hickory_proto=info"`.
+        pub directives: Option<String>,
+        /// Restore the directives each output started with.
+        #[serde(default)]
+        pub reset: bool,
+    }
 }
+
+pub use args::LogLevelArgs;
 
 impl DoggyMcpServer {
     pub fn new(state: Arc<McpState>, live: Arc<LiveState>) -> Self {
@@ -174,10 +180,8 @@ impl DoggyMcpServer {
         )
     )]
     pub async fn get_runtime_status(&self) -> Result<CallToolResult, ErrorData> {
-        match &self.state.log_control {
-            Some(admin) => json_text(&self.live.snapshot_with_logs(admin.current())),
-            None => json_text(&self.live.snapshot()),
-        }
+        let logs = self.state.log_control.current();
+        json_text(&self.live.snapshot_with_logs(logs))
     }
 
     #[tool(
@@ -195,13 +199,6 @@ impl DoggyMcpServer {
         &self,
         Parameters(args): Parameters<LogLevelArgs>,
     ) -> Result<CallToolResult, ErrorData> {
-        let Some(admin) = &self.state.log_control else {
-            return Err(ErrorData::internal_error(
-                "log control is not available in this process",
-                None,
-            ));
-        };
-
         let state = match (args.directives, args.reset) {
             (Some(_), true) => {
                 return Err(ErrorData::invalid_params(
@@ -215,10 +212,14 @@ impl DoggyMcpServer {
                     None,
                 ));
             }
-            (Some(directives), false) => admin
+            (Some(directives), false) => self
+                .state
+                .log_control
                 .set(&directives)
                 .map_err(|message| ErrorData::invalid_params(message, None))?,
-            (None, true) => admin
+            (None, true) => self
+                .state
+                .log_control
                 .reset()
                 .map_err(|message| ErrorData::internal_error(message, None))?,
         };

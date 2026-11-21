@@ -35,7 +35,7 @@ pub(crate) fn start_control_plane(
         return None;
     }
 
-    let state = doggy_dns_control::build_state(
+    let state = Arc::new(doggy_dns_control::build_state(
         // The control plane reports this hostname as its identity; the OTel
         // resource derives the same value for `host.name`.
         doggy_dns_observability::detect_hostname(),
@@ -46,9 +46,8 @@ pub(crate) fn start_control_plane(
         doggy_dns_control::state::McpState::enabled_protocols(config),
         doggy_dns_control::snapshots_from(&config.plugins),
         config_content,
-    )
-    .with_log_control(Arc::new(ObservabilityLogs(log_level)));
-    let state = Arc::new(state);
+        Arc::new(ObservabilityLogs(log_level)),
+    ));
 
     let control_config = config.control.clone();
 

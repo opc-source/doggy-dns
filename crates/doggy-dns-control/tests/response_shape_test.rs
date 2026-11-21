@@ -1,5 +1,7 @@
 #![allow(clippy::disallowed_methods)]
 
+mod common;
+
 use chrono::Utc;
 use doggy_dns_control::live::LiveState;
 use doggy_dns_control::server::DoggyMcpServer;
@@ -20,6 +22,7 @@ async fn config_error_body_carries_only_code_and_message() {
         vec!["udp".into()],
         Vec::new(),
         "this is = = not valid toml",
+        common::FakeLogs::new("info"),
     );
     let server = DoggyMcpServer::new(Arc::new(state), Arc::new(LiveState::new()));
     let result = server.get_config().await.unwrap();

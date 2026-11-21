@@ -1,5 +1,7 @@
 #![allow(clippy::disallowed_methods)]
 
+mod common;
+
 use chrono::Utc;
 use doggy_dns_basic::PluginConfig;
 use doggy_dns_control::state::McpState;
@@ -29,6 +31,7 @@ fn instance_id_contains_host_and_pid() {
         vec!["udp".into(), "tcp".into()],
         Vec::new(),
         "",
+        common::FakeLogs::new("info"),
     );
     assert_eq!(state.instance_id, "dns-node-1-4242");
     assert_eq!(state.host, "dns-node-1");
@@ -46,6 +49,7 @@ fn state_preserves_protocols_and_listen_addr() {
         vec!["udp".into(), "tcp".into(), "dot".into(), "doh".into()],
         Vec::new(),
         "",
+        common::FakeLogs::new("info"),
     );
     assert_eq!(state.version, "0.2.0");
     assert_eq!(state.listen_addr, "127.0.0.1:5353");

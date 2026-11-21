@@ -18,7 +18,7 @@ pub struct McpState {
     pub protocols: Vec<String>,
     pub plugins: Vec<PluginSnapshot>,
     pub config: ConfigSnapshot,
-    pub log_control: Option<Arc<dyn LogLevelAdmin>>,
+    pub log_control: Arc<dyn LogLevelAdmin>,
 }
 
 impl McpState {
@@ -44,6 +44,7 @@ impl McpState {
         protocols: Vec<String>,
         plugins: Vec<PluginSnapshot>,
         config_content: &str,
+        log_control: Arc<dyn LogLevelAdmin>,
     ) -> Self {
         let instance_id = format!("{host}-{pid}");
         let config = ConfigSnapshot::capture(config_content);
@@ -57,13 +58,7 @@ impl McpState {
             protocols,
             plugins,
             config,
-            log_control: None,
+            log_control,
         }
-    }
-
-    /// Attach the runtime log control that backs the `set_log_level` tool.
-    pub fn with_log_control(mut self, log_control: Arc<dyn LogLevelAdmin>) -> Self {
-        self.log_control = Some(log_control);
-        self
     }
 }
