@@ -241,14 +241,10 @@ fn install_subscriber(
     // Both outputs start from the same directives; the bridge carries the
     // SDK's own logs as exclusions on top.
     let directives = startup_directives(&config.logs.level);
-    let otlp_inner: Option<(log_control::BoxedLayer<log_control::WithStdout>, String)> =
-        logger_provider.map(|provider| {
-            let bridge: log_control::BoxedLayer<log_control::WithStdout> =
-                OpenTelemetryTracingBridge::new(provider).boxed();
-            (bridge, directives.clone())
-        });
+    let otlp_inner: Option<log_control::BoxedLayer<log_control::WithStdout>> =
+        logger_provider.map(|provider| OpenTelemetryTracingBridge::new(provider).boxed());
 
-    let layers = log_control::build(stdout_inner, stdout.then_some(directives), otlp_inner)?;
+    let layers = log_control::build(stdout_inner, stdout, otlp_inner, &directives)?;
 
     let trace_layer = tracer_provider.map(|provider| {
         let tracer = provider.tracer(doggy_dns_plugin::APP_NAME);

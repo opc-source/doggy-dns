@@ -3,13 +3,13 @@
 mod common;
 
 use chrono::Utc;
-use common::{forward_plugins, test_live, test_state};
+use common::{FakeLogs, forward_plugins, test_live, test_state, test_state_with_logs};
 use doggy_dns_control::server::{DoggyMcpServer, LogLevelArgs};
 use doggy_dns_control::state::McpState;
 use doggy_dns_control::{LogLevelAdmin, LogLevelState};
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::ErrorCode;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 /// The raw config the fixture reports; `get_config` reads it back.
 const CONFIG_TEXT: &str = "[server]\nlisten_addr = \"0.0.0.0\"\nport = 15353\n";
@@ -79,6 +79,7 @@ password = "hunter2"
         vec!["udp".into()],
         Vec::new(),
         raw,
+        FakeLogs::new("info"),
     );
     let server = DoggyMcpServer::new(Arc::new(state), test_live());
     let result = server.get_config().await.unwrap();
@@ -103,6 +104,7 @@ async fn get_config_returns_parse_error_for_malformed_content() {
         vec![],
         Vec::new(),
         "this is = = not valid toml",
+        FakeLogs::new("info"),
     );
     let server = DoggyMcpServer::new(Arc::new(state), test_live());
     let result = server.get_config().await.unwrap();
@@ -152,54 +154,10 @@ async fn get_runtime_status_returns_registered_signals() {
         json["signals"]["nacos.nacos.local"]["subscribedServices"],
         3
     );
-    assert!(json.get("logs").is_none(), "no log control, no `logs`");
-}
-
-/// A log control with one recorded output, so the tool's wiring can be tested
-/// without installing a subscriber.
-#[derive(Debug)]
-struct FakeLogs {
-    baseline: String,
-    directives: Mutex<String>,
-}
-
-impl FakeLogs {
-    fn new(directives: &str) -> Arc<Self> {
-        Arc::new(Self {
-            baseline: directives.to_string(),
-            directives: Mutex::new(directives.to_string()),
-        })
-    }
-
-    fn state(&self) -> LogLevelState {
-        LogLevelState {
-            stdout: Some(self.directives.lock().unwrap().clone()),
-            otlp: None,
-        }
-    }
-}
-
-impl LogLevelAdmin for FakeLogs {
-    fn current(&self) -> LogLevelState {
-        self.state()
-    }
-
-    fn set(&self, directives: &str) -> Result<LogLevelState, String> {
-        if directives == "bogus" {
-            return Err("invalid filter directive".to_string());
-        }
-        *self.directives.lock().unwrap() = directives.to_string();
-        Ok(self.state())
-    }
-
-    fn reset(&self) -> Result<LogLevelState, String> {
-        *self.directives.lock().unwrap() = self.baseline.clone();
-        Ok(self.state())
-    }
 }
 
 fn server_with_logs(logs: Arc<dyn LogLevelAdmin>) -> DoggyMcpServer {
-    let state = test_state(forward_plugins(), CONFIG_TEXT).with_log_control(logs);
+    let state = test_state_with_logs(forward_plugins(), CONFIG_TEXT, logs);
     DoggyMcpServer::new(Arc::new(state), test_live())
 }
 
@@ -272,12 +230,29 @@ async fn set_log_level_rejects_bad_and_ambiguous_input() {
     assert_eq!(error.code, ErrorCode::INVALID_PARAMS);
 }
 
+/// A log control whose outputs are all disabled; `set_log_level` must refuse it.
+struct NoOutputs;
+
+impl LogLevelAdmin for NoOutputs {
+    fn current(&self) -> LogLevelState {
+        LogLevelState {
+            stdout: None,
+            otlp: None,
+        }
+    }
+
+    fn set(&self, _directives: &str) -> Result<LogLevelState, String> {
+        Ok(self.current())
+    }
+
+    fn reset(&self) -> Result<LogLevelState, String> {
+        Ok(self.current())
+    }
+}
+
 #[tokio::test]
-async fn set_log_level_errors_without_log_control() {
-    let server = DoggyMcpServer::new(
-        Arc::new(test_state(forward_plugins(), CONFIG_TEXT)),
-        test_live(),
-    );
+async fn set_log_level_errors_when_no_output_is_enabled() {
+    let server = server_with_logs(Arc::new(NoOutputs));
     let error = server
         .set_log_level(log_level_args(Some("debug"), false))
         .await

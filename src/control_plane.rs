@@ -5,7 +5,6 @@ use doggy_dns_control::log_control::{LogLevelAdmin, LogLevelState};
 use doggy_dns_core::config::DoggyDnsConfig;
 use doggy_dns_nacos::watcher::NacosServiceWatcher;
 use doggy_dns_observability::{LogLevelHandle, LogLevels};
-use std::fmt;
 use std::sync::Arc;
 
 /// Register the live runtime signals the control plane reports: one per
@@ -35,7 +34,7 @@ pub(crate) fn start_control_plane(
         return None;
     }
 
-    let state = doggy_dns_control::build_state(
+    let state = Arc::new(doggy_dns_control::build_state(
         // The control plane reports this hostname as its identity; the OTel
         // resource derives the same value for `host.name`.
         doggy_dns_observability::detect_hostname(),
@@ -46,9 +45,8 @@ pub(crate) fn start_control_plane(
         doggy_dns_control::state::McpState::enabled_protocols(config),
         doggy_dns_control::snapshots_from(&config.plugins),
         config_content,
-    )
-    .with_log_control(Arc::new(ObservabilityLogs(log_level)));
-    let state = Arc::new(state);
+        Arc::new(ObservabilityLogs(log_level)),
+    ));
 
     let control_config = config.control.clone();
 
@@ -76,12 +74,6 @@ pub(crate) fn start_control_plane(
 
 /// The control plane's log-filter contract over the observability subscriber.
 struct ObservabilityLogs(LogLevelHandle);
-
-impl fmt::Debug for ObservabilityLogs {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_tuple("ObservabilityLogs").finish_non_exhaustive()
-    }
-}
 
 impl LogLevelAdmin for ObservabilityLogs {
     fn current(&self) -> LogLevelState {

@@ -155,7 +155,7 @@ validation normally prevents this):
 
 Returns live runtime signals sampled at call time — the same `signals` object
 `/readyz` serves over GET — plus the current log filter directives under
-`logs` when the log control is available. One signal per registered source:
+`logs`. One signal per registered source:
 
 **Input:** `{}` (no arguments)
 

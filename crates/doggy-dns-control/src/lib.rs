@@ -14,6 +14,7 @@ pub use log_control::{LogLevelAdmin, LogLevelState};
 pub use transport::{BIND_RETRY_INTERVAL, ControlPlaneHandle, start, start_retrying};
 
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 
 use doggy_dns_basic::{
     NACOS_DEFAULT_DNS_ZONE, NACOS_DEFAULT_GROUP, NACOS_DEFAULT_NAMESPACE,
@@ -172,6 +173,7 @@ pub fn build_state(
     protocols: Vec<String>,
     plugins: Vec<PluginSnapshot>,
     config_content: &str,
+    log_control: Arc<dyn LogLevelAdmin>,
 ) -> state::McpState {
     state::McpState::from_parts(
         host,
@@ -182,5 +184,6 @@ pub fn build_state(
         protocols,
         plugins,
         config_content,
+        log_control,
     )
 }
