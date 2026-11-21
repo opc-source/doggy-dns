@@ -15,6 +15,7 @@ mod traces;
 use anyhow::{Context, Result};
 use doggy_dns_basic::{DoggyDnsConfig, ObservabilityBackend, ObservabilityConfig};
 use doggy_dns_plugin::Middleware;
+use opentelemetry::metrics::Meter;
 use opentelemetry::trace::TracerProvider as _;
 use opentelemetry_appender_tracing::layer::OpenTelemetryTracingBridge;
 use opentelemetry_sdk::logs::SdkLoggerProvider;
@@ -39,6 +40,7 @@ pub struct Observability {
     config: ObservabilityConfig,
     logger_provider: Option<SdkLoggerProvider>,
     meter_provider: Option<SdkMeterProvider>,
+    meter: Option<Meter>,
     tracer_provider: Option<SdkTracerProvider>,
     metrics: Option<Arc<DnsMetrics>>,
     xdp: Option<Arc<XdpMetrics>>,
@@ -58,6 +60,7 @@ impl Observability {
             config: config.clone(),
             logger_provider: None,
             meter_provider: None,
+            meter: None,
             tracer_provider: None,
             metrics: None,
             xdp: None,
@@ -96,11 +99,12 @@ impl Observability {
             }
 
             if config.metrics.enabled {
-                let (provider, metrics, xdp_metrics) =
+                let (provider, meter, metrics, xdp_metrics) =
                     metrics::build_meter_provider(config, built_resource.clone(), headers.clone())?;
                 observability.metrics = Some(Arc::new(metrics));
                 observability.xdp = Some(Arc::new(xdp_metrics));
                 observability.meter_provider = Some(provider);
+                observability.meter = Some(meter);
             }
 
             if config.traces.enabled {
@@ -140,6 +144,13 @@ impl Observability {
     /// Recorder for kernel-side XDP counters. `None` when OTLP metrics are disabled.
     pub fn xdp_metrics(&self) -> Option<Arc<XdpMetrics>> {
         self.xdp.clone()
+    }
+
+    /// Register Tokio runtime gauges for the given runtimes. No-op when OTLP metrics are disabled.
+    pub fn register_tokio_runtimes(&self, runtimes: &[(&tokio::runtime::Handle, &'static str)]) {
+        if let Some(meter) = &self.meter {
+            metrics::register_tokio_runtimes(meter, runtimes);
+        }
     }
 
     /// Start the background CPU profiler. Must be called from within a Tokio runtime.

@@ -98,11 +98,64 @@ impl XdpMetrics {
     }
 }
 
+/// Register the three stable Tokio runtime metrics; each export reads a fresh snapshot.
+pub(crate) fn register_tokio_runtimes(
+    meter: &Meter,
+    runtimes: &[(&tokio::runtime::Handle, &'static str)],
+) {
+    let sources: Arc<[(KeyValue, tokio::runtime::RuntimeMetrics)]> = runtimes
+        .iter()
+        .map(|(handle, name)| (KeyValue::new("tokio.runtime.name", *name), handle.metrics()))
+        .collect();
+
+    runtime_gauge(
+        meter,
+        "tokio.runtime.workers",
+        "Number of worker threads used by the runtime",
+        Arc::clone(&sources),
+        |metrics| metrics.num_workers() as u64,
+    );
+    runtime_gauge(
+        meter,
+        "tokio.runtime.alive_tasks",
+        "Number of currently alive tasks in the runtime",
+        Arc::clone(&sources),
+        |metrics| metrics.num_alive_tasks() as u64,
+    );
+    runtime_gauge(
+        meter,
+        "tokio.runtime.global_queue_depth",
+        "Number of tasks currently scheduled in the runtime's global queue",
+        sources,
+        |metrics| metrics.global_queue_depth() as u64,
+    );
+}
+
+/// One instrument with one data point per runtime; a new runtime adds a series, not a name.
+fn runtime_gauge(
+    meter: &Meter,
+    name: &'static str,
+    description: &'static str,
+    sources: Arc<[(KeyValue, tokio::runtime::RuntimeMetrics)]>,
+    read: fn(&tokio::runtime::RuntimeMetrics) -> u64,
+) {
+    meter
+        .u64_observable_gauge(name)
+        .with_description(description)
+        .with_unit("1")
+        .with_callback(move |observer| {
+            for (attribute, metrics) in sources.iter() {
+                observer.observe(read(metrics), std::slice::from_ref(attribute));
+            }
+        })
+        .build();
+}
+
 pub(crate) fn build_meter_provider(
     config: &ObservabilityConfig,
     resource: Resource,
     headers: HashMap<String, String>,
-) -> Result<(SdkMeterProvider, DnsMetrics, XdpMetrics)> {
+) -> Result<(SdkMeterProvider, Meter, DnsMetrics, XdpMetrics)> {
     let endpoint = endpoint::resolve_signal_endpoint(config, Signal::Metrics)?;
     let temporality = match config.metrics.temporality {
         MetricsTemporality::Cumulative => Temporality::Cumulative,
@@ -131,7 +184,7 @@ pub(crate) fn build_meter_provider(
     let meter = provider.meter(doggy_dns_plugin::APP_NAME);
     let metrics = DnsMetrics::new(&meter);
     let xdp_metrics = XdpMetrics::new(&meter);
-    Ok((provider, metrics, xdp_metrics))
+    Ok((provider, meter, metrics, xdp_metrics))
 }
 
 struct DnsMetricsMiddleware {
@@ -416,5 +469,60 @@ mod tests {
 
         let attributes: Vec<KeyValue> = points[0].attributes().cloned().collect();
         assert_eq!(attribute(&attributes, "dns.xdp.result"), Some("hit"));
+    }
+
+    #[test]
+    fn tokio_runtime_gauges_are_exported_with_runtime_attribute() {
+        use opentelemetry_sdk::metrics::InMemoryMetricExporter;
+        use opentelemetry_sdk::metrics::data::{AggregatedMetrics, MetricData};
+
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap();
+        let exporter = InMemoryMetricExporter::default();
+        let provider = SdkMeterProvider::builder()
+            .with_reader(PeriodicReader::builder(exporter.clone()).build())
+            .build();
+        let meter = provider.meter("test");
+
+        register_tokio_runtimes(&meter, &[(runtime.handle(), "dns")]);
+        provider.force_flush().expect("flush metrics");
+
+        let exported = exporter.get_finished_metrics().expect("metrics exported");
+        let metrics: Vec<_> = exported
+            .iter()
+            .flat_map(|resource| resource.scope_metrics())
+            .flat_map(|scope| scope.metrics())
+            .collect();
+
+        let assert_gauge = |name: &str| -> u64 {
+            let metric = metrics
+                .iter()
+                .find(|metric| metric.name() == name)
+                .unwrap_or_else(|| panic!("{name} must be exported"));
+            assert_eq!(metric.unit(), "1", "{name} must carry unit \"1\"");
+            let AggregatedMetrics::U64(MetricData::Gauge(gauge)) = metric.data() else {
+                panic!("{name} must be a u64 gauge");
+            };
+            let points: Vec<_> = gauge.data_points().collect();
+            assert_eq!(points.len(), 1, "{name} must have one point per runtime");
+            let attributes: Vec<KeyValue> = points[0].attributes().cloned().collect();
+            assert_eq!(
+                attribute(&attributes, "tokio.runtime.name"),
+                Some("dns"),
+                "{name} must carry the runtime attribute"
+            );
+            points[0].value()
+        };
+
+        let workers = assert_gauge("tokio.runtime.workers");
+        assert_gauge("tokio.runtime.alive_tasks");
+        assert_gauge("tokio.runtime.global_queue_depth");
+        assert_eq!(
+            workers, 2,
+            "num_workers must report the configured worker count"
+        );
     }
 }
