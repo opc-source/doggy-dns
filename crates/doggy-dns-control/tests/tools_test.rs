@@ -4,9 +4,12 @@ mod common;
 
 use chrono::Utc;
 use common::{forward_plugins, test_live, test_state};
-use doggy_dns_control::server::DoggyMcpServer;
+use doggy_dns_control::server::{DoggyMcpServer, LogLevelArgs};
 use doggy_dns_control::state::McpState;
-use std::sync::Arc;
+use doggy_dns_control::{LogLevelAdmin, LogLevelState};
+use rmcp::handler::server::wrapper::Parameters;
+use rmcp::model::ErrorCode;
+use std::sync::{Arc, Mutex};
 
 /// The raw config the fixture reports; `get_config` reads it back.
 const CONFIG_TEXT: &str = "[server]\nlisten_addr = \"0.0.0.0\"\nport = 15353\n";
@@ -108,23 +111,29 @@ async fn get_config_returns_parse_error_for_malformed_content() {
 }
 
 #[tokio::test]
-async fn tools_declare_read_only_annotations() {
+async fn tools_declare_annotations() {
     let server = DoggyMcpServer::new(
         Arc::new(test_state(forward_plugins(), CONFIG_TEXT)),
         test_live(),
     );
     let tools = server.tool_declarations();
-    assert_eq!(tools.len(), 4);
+    assert_eq!(tools.len(), 5);
 
     let names: Vec<&str> = tools.iter().map(|t| t.name.as_ref()).collect();
     assert!(names.contains(&"get_status"));
     assert!(names.contains(&"list_plugins"));
     assert!(names.contains(&"get_config"));
     assert!(names.contains(&"get_runtime_status"));
+    assert!(names.contains(&"set_log_level"));
 
     for tool in &tools {
         let annotations = tool.annotations.as_ref().unwrap();
-        assert_eq!(annotations.read_only_hint, Some(true));
+        assert_eq!(
+            annotations.read_only_hint,
+            Some(tool.name.as_ref() != "set_log_level"),
+            "unexpected read_only_hint on {}",
+            tool.name
+        );
         assert_eq!(annotations.destructive_hint, Some(false));
         assert_eq!(annotations.idempotent_hint, Some(true));
         assert_eq!(annotations.open_world_hint, Some(false));
@@ -143,4 +152,135 @@ async fn get_runtime_status_returns_registered_signals() {
         json["signals"]["nacos.nacos.local"]["subscribedServices"],
         3
     );
+    assert!(json.get("logs").is_none(), "no log control, no `logs`");
+}
+
+/// A log control with one recorded output, so the tool's wiring can be tested
+/// without installing a subscriber.
+#[derive(Debug)]
+struct FakeLogs {
+    baseline: String,
+    directives: Mutex<String>,
+}
+
+impl FakeLogs {
+    fn new(directives: &str) -> Arc<Self> {
+        Arc::new(Self {
+            baseline: directives.to_string(),
+            directives: Mutex::new(directives.to_string()),
+        })
+    }
+
+    fn state(&self) -> LogLevelState {
+        LogLevelState {
+            stdout: Some(self.directives.lock().unwrap().clone()),
+            otlp: None,
+        }
+    }
+}
+
+impl LogLevelAdmin for FakeLogs {
+    fn current(&self) -> LogLevelState {
+        self.state()
+    }
+
+    fn set(&self, directives: &str) -> Result<LogLevelState, String> {
+        if directives == "bogus" {
+            return Err("invalid filter directive".to_string());
+        }
+        *self.directives.lock().unwrap() = directives.to_string();
+        Ok(self.state())
+    }
+
+    fn reset(&self) -> Result<LogLevelState, String> {
+        *self.directives.lock().unwrap() = self.baseline.clone();
+        Ok(self.state())
+    }
+}
+
+fn server_with_logs(logs: Arc<dyn LogLevelAdmin>) -> DoggyMcpServer {
+    let state = test_state(forward_plugins(), CONFIG_TEXT).with_log_control(logs);
+    DoggyMcpServer::new(Arc::new(state), test_live())
+}
+
+fn log_level_args(directives: Option<&str>, reset: bool) -> Parameters<LogLevelArgs> {
+    Parameters(LogLevelArgs {
+        directives: directives.map(str::to_string),
+        reset,
+    })
+}
+
+#[tokio::test]
+async fn get_runtime_status_reports_log_directives() {
+    let server = server_with_logs(FakeLogs::new("info"));
+    let json = first_text_json(&server.get_runtime_status().await.unwrap());
+    assert_eq!(json["logs"]["stdout"], "info");
+    assert!(json["logs"]["otlp"].is_null());
+}
+
+#[tokio::test]
+async fn set_log_level_changes_the_filter() {
+    let server = server_with_logs(FakeLogs::new("info"));
+
+    let json = first_text_json(
+        &server
+            .set_log_level(log_level_args(Some("doggy_dns_nacos=debug"), false))
+            .await
+            .unwrap(),
+    );
+    assert_eq!(json["stdout"], "doggy_dns_nacos=debug");
+    assert!(json["otlp"].is_null());
+}
+
+#[tokio::test]
+async fn set_log_level_resets_to_the_startup_filter() {
+    let server = server_with_logs(FakeLogs::new("warn"));
+    server
+        .set_log_level(log_level_args(Some("debug"), false))
+        .await
+        .unwrap();
+
+    let json = first_text_json(
+        &server
+            .set_log_level(log_level_args(None, true))
+            .await
+            .unwrap(),
+    );
+    assert_eq!(json["stdout"], "warn");
+}
+
+#[tokio::test]
+async fn set_log_level_rejects_bad_and_ambiguous_input() {
+    let server = server_with_logs(FakeLogs::new("info"));
+
+    let error = server
+        .set_log_level(log_level_args(Some("bogus"), false))
+        .await
+        .unwrap_err();
+    assert_eq!(error.code, ErrorCode::INVALID_PARAMS);
+
+    let error = server
+        .set_log_level(log_level_args(Some("debug"), true))
+        .await
+        .unwrap_err();
+    assert_eq!(error.code, ErrorCode::INVALID_PARAMS);
+
+    let error = server
+        .set_log_level(log_level_args(None, false))
+        .await
+        .unwrap_err();
+    assert_eq!(error.code, ErrorCode::INVALID_PARAMS);
+}
+
+#[tokio::test]
+async fn set_log_level_errors_without_log_control() {
+    let server = DoggyMcpServer::new(
+        Arc::new(test_state(forward_plugins(), CONFIG_TEXT)),
+        test_live(),
+    );
+    let error = server
+        .set_log_level(log_level_args(Some("debug"), false))
+        .await
+        .unwrap_err();
+    assert_eq!(error.code, ErrorCode::INTERNAL_ERROR);
 }

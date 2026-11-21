@@ -54,9 +54,10 @@ doggy-dns/                    # Binary entrypoint
 - **OTLP observability**: logs/metrics/traces on by default, CPU profiles opt-in;
   presets for OpenObserve, OTel Collector, Vector. → [docs/observability.md](docs/observability.md)
 - **Service control plane**: one HTTP listener with selectable endpoints —
-  read-only MCP introspection (`get_status`, `list_plugins`, `get_config`,
-  `get_runtime_status`) at `/mcp`, plus unauthenticated `/healthz` and
-  `/readyz` probes. → [crates/doggy-dns-control/README.md](crates/doggy-dns-control/README.md)
+  MCP tools at `/mcp` (`get_status`, `list_plugins`, `get_config`,
+  `get_runtime_status`, plus the `set_log_level` runtime control), and
+  unauthenticated `/healthz` and `/readyz` probes.
+  → [crates/doggy-dns-control/README.md](crates/doggy-dns-control/README.md)
 - **XDP fast path** (optional, Linux): answers cached DNS queries in the kernel
   via an aya eBPF program. → [docs/xdp.md](docs/xdp.md)
 

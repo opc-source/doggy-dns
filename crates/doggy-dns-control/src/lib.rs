@@ -1,14 +1,16 @@
 //! Node-side service control plane: one HTTP listener whose endpoints are
-//! selected by configuration — the read-only MCP introspection protocol at
-//! `/mcp`, plus unauthenticated `healthz`/`readyz` probes backed by live
-//! runtime signals.
+//! selected by configuration — the MCP introspection protocol at `/mcp`, with
+//! one runtime control (`set_log_level`), plus unauthenticated
+//! `healthz`/`readyz` probes backed by live runtime signals.
 
 pub mod live;
+pub mod log_control;
 pub mod redact;
 pub mod server;
 pub mod state;
 pub mod transport;
 
+pub use log_control::{LogLevelAdmin, LogLevelState};
 pub use transport::{BIND_RETRY_INTERVAL, ControlPlaneHandle, start, start_retrying};
 
 use serde::{Deserialize, Serialize};

@@ -75,7 +75,7 @@ async fn get_path(addr: std::net::SocketAddr, path: &str) -> reqwest::Response {
 }
 
 #[tokio::test]
-async fn lists_four_read_only_tools_and_calls_status() {
+async fn lists_tools_and_calls_status() {
     let state = Arc::new(test_state(forward_plugins(), ""));
     let cfg = ControlConfig {
         port: 0,
@@ -101,17 +101,18 @@ async fn lists_four_read_only_tools_and_calls_status() {
     let body = resp.text().await.unwrap();
     let json: serde_json::Value = parse_sse_or_json(&body);
     let tools = json["result"]["tools"].as_array().unwrap();
-    assert_eq!(tools.len(), 4);
+    assert_eq!(tools.len(), 5);
 
     let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
     assert!(names.contains(&"get_status"));
     assert!(names.contains(&"list_plugins"));
     assert!(names.contains(&"get_config"));
     assert!(names.contains(&"get_runtime_status"));
+    assert!(names.contains(&"set_log_level"));
 
     for tool in tools {
         let annotations = tool["annotations"].as_object().unwrap();
-        assert_eq!(annotations["readOnlyHint"], true);
+        assert_eq!(annotations["readOnlyHint"], tool["name"] != "set_log_level");
         assert_eq!(annotations["destructiveHint"], false);
     }
 
