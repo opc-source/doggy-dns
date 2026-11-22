@@ -49,8 +49,9 @@ jobs:
   performance:
     name: Performance
     runs-on: ubuntu-latest
-    # Two LTO builds plus six criterion runs on two vCPUs; without a bound a
-    # stuck build would hold the concurrency slot until the default timeout.
+    # Several release builds (base/PR benches and the two end-to-end arms) and
+    # six criterion runs on two vCPUs; without a bound a stuck build would hold
+    # the concurrency slot until the default timeout.
     timeout-minutes: 60
     permissions:
       contents: read
@@ -121,18 +122,29 @@ jobs:
       # The server outlives its step now that the dnsperf passes are a separate
       # composite-action step, so its output goes to a file: a background child
       # holding the step's stdout pipe would keep the step from finishing.
-      - name: Build and start server (userspace path)
+      #
+      # The allocator matrix runs two arms in sequence on this same runner: the
+      # default build and one with the opt-in `jemalloc` feature. It is a
+      # same-run pair, not an interleaved A/B, so a few-percent delta is noise;
+      # the local measurement put the gap near 13% (docs/benchmarks/allocator-ab.md).
+      - name: Build and start server (system allocator)
         run: |
           cargo build --release
           RUST_LOG=warn ./target/release/doggy-dns config/doggy-dns-stress.toml > /tmp/e2e-server.log 2>&1 &
           echo $! > /tmp/server.pid
-          sleep 2
+          for i in $(seq 1 50); do
+            if ss -lunH 'sport = :5353' | grep -q . && ss -ltnH 'sport = :5353' | grep -q .; then break; fi
+            sleep 0.1
+          done
+          if ! ss -lunH 'sport = :5353' | grep -q . || ! ss -ltnH 'sport = :5353' | grep -q .; then
+            echo "system-allocator arm never bound :5353"; cat /tmp/e2e-server.log; exit 1
+          fi
       # `-n 100000` rather than `-n 10` so the `-l 30` wall-clock limit is
       # what ends the run: 10 cycles of a 1000-name file finish in a quarter
       # of a second on this transport (~40k QPS), which measured a startup
       # burst instead of steady state. Same window as the XDP stress job, so
       # the two reports are comparable.
-      - name: Run dnsperf (end-to-end)
+      - name: Run dnsperf (system allocator)
         uses: ./.github/actions/dnsperf-run
         with:
           install: false
@@ -142,19 +154,79 @@ jobs:
           duration: 30
           port: 5353
           queries-file: /tmp/queries.txt
-      - name: Stop server
-        run: kill $(cat /tmp/server.pid) 2>/dev/null || echo "server had already exited"
+      - name: Stop server (system allocator)
+        run: |
+          pid=$(cat /tmp/server.pid)
+          kill "$pid" 2>/dev/null || echo "server had already exited"
+          # Wait for the old pid, otherwise a slow drain plus a warm-cache build
+          # would let the next arm bind alongside it through SO_REUSEPORT.
+          for i in $(seq 1 100); do
+            kill -0 "$pid" 2>/dev/null || break
+            sleep 0.1
+          done
+          if kill -0 "$pid" 2>/dev/null; then echo "system-allocator server $pid still running"; exit 1; fi
+      - name: Build and start server (jemalloc arm)
+        run: |
+          cargo build --release --features jemalloc
+          # Fail the arm if the feature silently no-ops, otherwise the matrix
+          # would compare two system-allocator builds. The kill-after bounds the
+          # wait: the startup line is all this pass needs, and the next line
+          # starts the real arm on the same port.
+          RUST_LOG=info timeout -k 10 2 ./target/release/doggy-dns config/doggy-dns-stress.toml > /tmp/jemalloc-identify.log 2>&1 || true
+          grep -q 'allocator.*jemalloc' /tmp/jemalloc-identify.log || { echo "jemalloc arm did not select jemalloc"; cat /tmp/jemalloc-identify.log; exit 1; }
+          RUST_LOG=warn ./target/release/doggy-dns config/doggy-dns-stress.toml > /tmp/e2e-jemalloc-server.log 2>&1 &
+          echo $! > /tmp/server-jemalloc.pid
+          for i in $(seq 1 50); do
+            if ss -lunH 'sport = :5353' | grep -q . && ss -ltnH 'sport = :5353' | grep -q .; then break; fi
+            sleep 0.1
+          done
+          if ! ss -lunH 'sport = :5353' | grep -q . || ! ss -ltnH 'sport = :5353' | grep -q .; then
+            echo "jemalloc arm never bound :5353"; cat /tmp/e2e-jemalloc-server.log; exit 1
+          fi
+      - name: Run dnsperf (jemalloc arm)
+        uses: ./.github/actions/dnsperf-run
+        with:
+          install: false
+          output: /tmp/e2e-jemalloc-result.txt
+          count: 100000
+          threads: 4
+          duration: 30
+          port: 5353
+          queries-file: /tmp/queries.txt
+      - name: Stop server (jemalloc arm)
+        run: |
+          pid=$(cat /tmp/server-jemalloc.pid)
+          kill "$pid" 2>/dev/null || echo "server had already exited"
+          for i in $(seq 1 100); do
+            kill -0 "$pid" 2>/dev/null || break
+            sleep 0.1
+          done
+          if kill -0 "$pid" 2>/dev/null; then echo "jemalloc server $pid still running"; exit 1; fi
       - name: Generate report
         run: |
+          for arm in e2e e2e-jemalloc; do
+            if ! grep -q 'Queries per second' "/tmp/${arm}-result.txt"; then
+              echo "${arm} produced no dnsperf result"; cat "/tmp/${arm}-result.txt"; exit 1
+            fi
+          done
           python3 scripts/xdp_stress_report.py --single /tmp/e2e-result.txt > /tmp/e2e-report.md \
             || echo "E2E report generation skipped (dnsperf produced no parseable output)" > /tmp/e2e-report.md
+          python3 scripts/xdp_stress_report.py --single /tmp/e2e-jemalloc-result.txt > /tmp/e2e-jemalloc-report.md \
+            || echo "Jemalloc E2E report generation skipped (dnsperf produced no parseable output)" > /tmp/e2e-jemalloc-report.md
       - name: Write job summary
         if: always()
         run: |
           {
             echo "## Userspace Performance (report-only)"
-            echo "E2E measured with \`RUST_LOG=warn\` (per-query info logs suppressed); component benches are base-vs-PR on this same runner."
+            echo "E2E measured with \`RUST_LOG=warn\` (per-query info logs suppressed); component benches are base-vs-PR on this same runner. The two allocator arms run sequentially on this runner."
+            echo '### Allocator arm: system (default build)'
             cat /tmp/e2e-report.md 2>/dev/null || echo "no e2e report"
+            echo '### Allocator arm: jemalloc (`--features jemalloc`)'
+            cat /tmp/e2e-jemalloc-report.md 2>/dev/null || echo "no jemalloc e2e report"
+            echo 'Allocator selected by the jemalloc arm:'
+            echo '```'
+            grep -a -m1 'allocator' /tmp/jemalloc-identify.log 2>/dev/null || echo "allocator line missing"
+            echo '```'
             if [ "${{ github.event_name }}" = "pull_request" ]; then
               echo '### Component benchmarks: base (main)'
               echo '```'
@@ -171,14 +243,16 @@ jobs:
               echo '```'
             fi
           } >> "$GITHUB_STEP_SUMMARY"
-          if [ -f /tmp/e2e-server.log ]; then
-            {
-              echo '### Server log (end-to-end arm)'
-              echo '```'
-              tail -n 50 /tmp/e2e-server.log
-              echo '```'
-            } >> "$GITHUB_STEP_SUMMARY"
-          fi
+          for arm in e2e e2e-jemalloc; do
+            if [ -f "/tmp/${arm}-server.log" ]; then
+              {
+                echo "### Server log (${arm} arm)"
+                echo '```'
+                tail -n 50 "/tmp/${arm}-server.log"
+                echo '```'
+              } >> "$GITHUB_STEP_SUMMARY"
+            fi
+          done
       # Assembles the body the old inline template built. Both files can
       # legitimately be absent: an earlier step may have produced nothing, and
       # this is a report-only job. Reading them unguarded would turn a missing
@@ -189,10 +263,17 @@ jobs:
           github.event.pull_request.head.repo.full_name == github.repository
         run: |
           {
+            printf '## Userspace E2E — system (default build)\n\n'
             if [ -f /tmp/e2e-report.md ]; then
               cat /tmp/e2e-report.md
             else
               printf '_/tmp/e2e-report.md was not produced by this run_\n'
+            fi
+            printf '\n## Userspace E2E — jemalloc (`--features jemalloc`)\n\n'
+            if [ -f /tmp/e2e-jemalloc-report.md ]; then
+              cat /tmp/e2e-jemalloc-report.md
+            else
+              printf '_/tmp/e2e-jemalloc-report.md was not produced by this run_\n'
             fi
             printf '\n## Component Benchmarks (PR vs main)\n\n```\n'
             if [ -f /tmp/bench-pr.txt ]; then

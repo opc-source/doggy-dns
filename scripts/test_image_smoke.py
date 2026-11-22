@@ -2,8 +2,8 @@
 """Unit tests for the pure helpers in scripts/image_smoke.py.
 
 The container work itself cannot be exercised here (it needs docker/podman), so
-these cover the two pieces that decide pass/fail: the DNS query builder and the
-response-header reader.
+these cover the pieces that decide pass/fail: the DNS query builder, the
+response-header reader, and the startup-allocator line matcher.
 """
 
 import socket
@@ -198,6 +198,31 @@ class ExpectedUserTests(unittest.TestCase):
     def test_an_explicit_expectation_wins_over_the_variant(self):
         args = image_smoke.parse_args(["--image", "doggy-dns:test", "--expect-user", "root"])
         self.assertEqual(image_smoke.expected_user(args), "root")
+
+
+class AllocatorLineTests(unittest.TestCase):
+    """The startup event is the only proof the image's allocator is the one asked for."""
+
+    # tracing styles the field name and `=` with ANSI even to a pipe; a plain
+    # `allocator=` substring would miss the real event.
+    STARTUP = (
+        '\u001b[2m2026-11-22T10:00:00Z\u001b[0m  INFO '
+        '\u001b[2mdoggy_dns\u001b[0m\u001b[2m:\u001b[0m loaded configuration '
+        '\u001b[3mallocator\u001b[0m\u001b[2m=\u001b[0m"jemalloc"'
+    )
+
+    def test_the_expected_allocator_is_found(self):
+        self.assertIn('allocator="jemalloc"', image_smoke.allocator_line(self.STARTUP, "jemalloc"))
+
+    def test_a_different_allocator_is_not_accepted(self):
+        self.assertIsNone(image_smoke.allocator_line(self.STARTUP, "system"))
+
+    def test_a_longer_name_does_not_match(self):
+        text = 'loaded configuration allocator="jemalloc_prof"'
+        self.assertIsNone(image_smoke.allocator_line(text, "jemalloc"))
+
+    def test_an_absent_event_is_not_accepted(self):
+        self.assertIsNone(image_smoke.allocator_line("doggy-dns is ready", "jemalloc"))
 
 
 class ConfigTextTests(unittest.TestCase):

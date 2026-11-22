@@ -13,7 +13,8 @@ What it proves, in order:
 1. the image declares the user it is meant to run as (uid 65532 userspace, root
    with the XDP fast path) and, started with no arguments, looks for its config at
    /app/config/doggy-dns.toml — the path the image ships its default at — and the
-   config mounted there passes `validate_config`;
+   config mounted there passes `validate_config`; with `--expect-allocator`, the
+   startup event must also name that allocator;
 2. the control plane answers `/healthz` and then `/readyz` with 200;
 3. a raw UDP A query is answered, and the same query over TCP is answered, with
    the address the fake upstream handed out;
@@ -35,6 +36,7 @@ interface that accepts an XDP program.
 import argparse
 import os
 import random
+import re
 import shutil
 import socket
 import struct
@@ -492,8 +494,12 @@ def stop_container(args, name):
 
 
 def container_logs(args, name, tail=150):
+    """Container output, optionally the last `tail` lines (None means all)."""
     result = runtime_command(args, "logs", name, check=False)
-    return "\n".join(combined(result).splitlines()[-tail:])
+    lines = combined(result).splitlines()
+    if tail is not None:
+        lines = lines[-tail:]
+    return "\n".join(lines)
 
 
 def expected_user(args):
@@ -521,6 +527,37 @@ def check_image_user(args, expected):
             f"{args.image} declares user {declared!r}, expected {expected!r}: "
             f"{combined(result)}"
         )
+
+
+ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;]*m")
+
+
+def allocator_line(text, allocator):
+    """The startup event that names `allocator`, or None.
+
+    The event is text-format, so the value is quoted (`allocator="jemalloc"`).
+    The quotes also stop a shorter name from matching a longer one. tracing
+    styles the field name and `=` with ANSI even when stdout is not a terminal,
+    so strip the escapes before looking for the plain pair.
+    """
+    text = ANSI_ESCAPE.sub("", text)
+    wanted = f'allocator="{allocator}"'
+    for line in text.splitlines():
+        if wanted in line:
+            return line.strip()
+    return None
+
+
+def check_allocator(args, name):
+    """The startup event has to report the allocator the image was built with."""
+    expected = args.expect_allocator
+    if not expected:
+        return
+    # The event is at the top of the log; the error tail is not enough once
+    # per-query logging has pushed it out of the last lines.
+    logs = container_logs(args, name, tail=None)
+    if allocator_line(logs, expected) is None:
+        raise SmokeFailure(f"startup did not report allocator={expected!r}; logs:\n{logs}")
 
 
 def check_pinned_map(args, name):
@@ -600,6 +637,7 @@ def smoke(args):
                     args, root, run_tag="first", upstream=f"{HOST}:{upstream.port}", xdp=args.xdp
                 )
                 check_serving(args, name, "forwarded")
+                check_allocator(args, name)
                 if upstream.requests == 0:
                     raise SmokeFailure(
                         "the fake upstream saw no traffic, so nothing was forwarded to it; "
@@ -659,6 +697,12 @@ def parse_args(argv):
         default="",
         help="user the image must declare (default: 65532:65532, or root with --xdp). "
         "CI smokes the XDP image without --xdp, so it passes root here",
+    )
+    parser.add_argument(
+        "--expect-allocator",
+        default="",
+        choices=("", "system", "jemalloc"),
+        help="allocator the startup event must report; empty skips the check",
     )
     parser.add_argument("--timeout", type=float, default=60.0, help="seconds to wait for readiness")
     parser.add_argument("--name", default="doggy-dns-smoke", help="container name prefix")

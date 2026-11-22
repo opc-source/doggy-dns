@@ -20,6 +20,10 @@ description = "A Rust-based service discovery DNS server built on hickory-dns"
 
 [features]
 xdp = ["dep:doggy-dns-xdp"]
+# Opt-in global allocator. The dependency and `src/main.rs`'s
+# `#[global_allocator]` share one cfg: non-musl, non-MSVC. Enabling the feature
+# on musl/MSVC is a no-op and the binary keeps the system allocator.
+jemalloc = ["dep:tikv-jemallocator"]
 default = []
 
 [dependencies]
@@ -40,6 +44,14 @@ dashmap = { workspace = true }
 hickory-proto = { workspace = true }
 # tests/nacos_e2e_test.rs registers instances with a live Nacos server.
 nacos-sdk = { workspace = true }
+
+# musl is excluded conservatively: it is not among the crate's tested targets
+# and jemalloc's background-thread support is disabled there. MSVC is upstream's
+# own exclusion: tikv-jemalloc-sys lists it as an untested target and its README
+# shows the same `not(msvc)` gate. Linux/glibc and macOS are the targets this
+# project builds.
+[target.'cfg(all(not(target_env = "msvc"), not(target_env = "musl")))'.dependencies]
+tikv-jemallocator = { workspace = true, optional = true }
 
 [workspace.dependencies]
 hickory-server = { version = "0.26", features = ["tls-ring", "https-ring", "resolver"] }
@@ -63,6 +75,9 @@ criterion = { version = "0.8", features = ["html_reports", "async_tokio"] }
 # Platform / process control
 libc = "0.2"
 core_affinity = "0.8"
+
+# Opt-in allocator, non-musl/non-MSVC targets (feature `jemalloc`)
+tikv-jemallocator = "0.7"
 
 # Observability (OTLP -> OpenObserve / OTel Collector / Vector)
 opentelemetry = { version = "0.33", default-features = false, features = ["trace", "metrics", "logs", "internal-logs"] }

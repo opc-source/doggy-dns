@@ -11,6 +11,11 @@
 #   docker build --build-arg FEATURES=xdp --target runtime-xdp \
 #          -t ghcr.io/<org>/doggy-dns:main-xdp .
 #
+#   # opt-in jemalloc global allocator (glibc image; non-musl/non-MSVC gate; composes with xdp).
+#   # Local build only: the published matrix is userspace/xdp.
+#   docker build --build-arg FEATURES=jemalloc --target runtime \
+#          -t doggy-dns:local-jemalloc .
+#
 # The eBPF stage needs nightly + rust-src + bpf-linker, so it only runs for the
 # `xdp` feature; the userspace image then costs nothing for it. Both variants
 # compile `aws-lc-sys`/`ring` (rustls default features), which is why the builder
@@ -104,7 +109,10 @@ RUN set -eux; \
     if [ -n "${RUSTUP_MIRROR}" ]; then \
         export RUSTUP_DIST_SERVER="${RUSTUP_MIRROR}" RUSTUP_UPDATE_ROOT="${RUSTUP_MIRROR}/rustup"; \
     fi; \
-    if [ -n "${FEATURES}" ]; then \
+    # FEATURES may be any list (e.g. jemalloc); only xdp needs the eBPF stage.
+    needs_xdp=; \
+    case ",${FEATURES}," in *,xdp,*) needs_xdp=1 ;; esac; \
+    if [ -n "${needs_xdp}" ]; then \
         rustup toolchain install nightly --profile minimal --component rust-src; \
         arch="${TARGETARCH:-$(uname -m)}"; \
         case "${arch}" in \
@@ -126,6 +134,11 @@ RUN set -eux; \
         cargo build -Z build-std=core,alloc --release --target bpfel-unknown-none; \
         cd /src; \
     fi; \
+    # An arm64 jemalloc build must assume the largest page size a host may use:
+    # one built for 4 KiB pages aborts on a 64 KiB-page host. The variable is
+    # only read by jemalloc-sys, so it is harmless on the other arms.
+    arch="${TARGETARCH:-$(uname -m)}"; \
+    case "${arch}" in arm64|aarch64) export JEMALLOC_SYS_WITH_LG_PAGE=16 ;; esac; \
     if [ -n "${FEATURES}" ]; then \
         cargo build --release --features "${FEATURES}" ${CARGO_EXTRA_ARGS}; \
     else \

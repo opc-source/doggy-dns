@@ -21,6 +21,32 @@ mod xdp;
 #[path = "xdp/stub.rs"]
 mod xdp;
 
+// Non-musl, non-MSVC: the dependency lives under the matching target cfg in
+// Cargo.toml. musl is excluded conservatively (not among the crate's tested
+// targets; background-thread support is disabled there). MSVC is upstream's own
+// exclusion (untested target; its README shows the same `not(msvc)` gate).
+// Enabling the feature on either is a no-op.
+#[cfg(all(
+    feature = "jemalloc",
+    not(target_env = "msvc"),
+    not(target_env = "musl")
+))]
+#[global_allocator]
+static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
+/// The allocator this binary links, under the same condition as the
+/// `#[global_allocator]` above. Logged at startup so an image built with the
+/// feature can be told apart at runtime.
+const ALLOCATOR: &str = if cfg!(all(
+    feature = "jemalloc",
+    not(target_env = "msvc"),
+    not(target_env = "musl")
+)) {
+    "jemalloc"
+} else {
+    "system"
+};
+
 /// How long the background tasks and the DNS runtime's own teardown get to
 /// finish before we stop waiting. `server.shutdown_timeout` bounds the DNS
 /// drain; this bounds the poller, the control plane and the runtime shutdown
@@ -55,6 +81,7 @@ fn main() -> Result<()> {
         plugin_count = config.plugins.len(),
         remote_config_enabled = config.remote_config.enabled,
         observability_enabled = config.observability.enabled,
+        allocator = ALLOCATOR,
         "loaded configuration"
     );
 
