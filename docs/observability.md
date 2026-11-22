@@ -30,7 +30,9 @@ configured levels. Every filter installed on the OTLP output appends exclusions
 for the OTel SDK's own crates, so the bridge never re-exports the SDK's logs;
 directives naming an `opentelemetry*` target are refused (and such a `RUST_LOG`
 is ignored), because `EnvFilter` picks the longest matching target and a more
-specific one would out-rank those exclusions.
+specific one would out-rank those exclusions. Each change emits one `INFO`
+event (fields `change` and `directives`) before the new filters take effect, so
+the record is governed by the filters being replaced.
 
 ## Quick start: OpenObserve
 

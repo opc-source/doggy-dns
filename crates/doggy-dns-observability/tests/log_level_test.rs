@@ -110,6 +110,12 @@ async fn runtime_log_level_retargets_the_otlp_filter() {
             .any(|message| message.contains("stays out of the bridge")),
         "the OTel crates' own logs must never be re-exported: {before:?}"
     );
+    assert!(
+        !before
+            .iter()
+            .any(|message| message.contains("changing log filters")),
+        "no audit event before any change: {before:?}"
+    );
 
     let state = handle.set("debug").expect("debug should parse");
     assert_eq!(state.otlp.as_deref(), Some("debug"));
@@ -128,6 +134,14 @@ async fn runtime_log_level_retargets_the_otlp_filter() {
         !after.iter().any(|message| message.contains("after set")),
         "a retarget must keep the OTel exclusions: {after:?}"
     );
+    if no_rust_log {
+        assert!(
+            after
+                .iter()
+                .any(|message| message.contains("changing log filters")),
+            "the change is audited under the filter being replaced: {after:?}"
+        );
+    }
 
     let state = handle.reset().expect("reset should succeed");
     assert_eq!(state.otlp.as_deref(), Some(startup.as_str()));
@@ -143,6 +157,12 @@ async fn runtime_log_level_retargets_the_otlp_filter() {
             "reset must restore the info-level filter: {third:?}"
         );
     }
+    assert!(
+        third
+            .iter()
+            .any(|message| message.contains("changing log filters")),
+        "a reset is audited too: {third:?}"
+    );
 
     assert!(handle.set("").is_err(), "empty directives must be rejected");
     assert!(

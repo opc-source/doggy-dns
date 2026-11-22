@@ -169,12 +169,12 @@ impl LogLevelHandle {
                     .to_string(),
             );
         }
-        self.0.swap(directives)
+        self.0.swap("set", directives)
     }
 
     /// Restore each output to the directives it started with.
     pub fn reset(&self) -> Result<LogLevels, String> {
-        self.0.swap(&self.0.baseline)
+        self.0.swap("reset", &self.0.baseline)
     }
 }
 
@@ -202,7 +202,7 @@ impl Inner {
     /// the install so the reported state and the installed filters move together.
     /// Each entry is stamped only after its own install succeeds, so a failed
     /// second install still leaves the report truthful.
-    fn swap(&self, directives: &str) -> Result<LogLevels, String> {
+    fn swap(&self, change: &'static str, directives: &str) -> Result<LogLevels, String> {
         let mut applied = self.lock();
         let stdout = self
             .stdout
@@ -214,6 +214,9 @@ impl Inner {
             .as_ref()
             .map(|output| output.filter(directives))
             .transpose()?;
+        // Emitted under the filters being replaced, so a change to a lower level
+        // or `off` still leaves a record; a rejected string never reaches here.
+        tracing::info!(change, directives, "changing log filters");
         if let (Some(output), Some(filter)) = (&self.stdout, stdout) {
             output.install(filter)?;
             applied.stdout = Some(directives.to_string());
