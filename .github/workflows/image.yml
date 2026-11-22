@@ -13,6 +13,11 @@ name: Image
 # tests it, and pushes a per-arch tag. The publish job then joins the two
 # per-arch images into a manifest list under the rolling names, so a node pulls
 # `:main-xdp` and gets the image built for its own architecture.
+#
+# A separate arm64 job build-checks the opt-in jemalloc image as
+# `FEATURES=jemalloc`. Its smoke asserts the startup event names the allocator,
+# so a silent no-op fails; it also keeps the jemalloc-only path (no eBPF stage)
+# covered. It publishes nothing: the rolling tags stay userspace/xdp.
 
 on:
   push:
@@ -125,6 +130,27 @@ jobs:
         run: |
           set -euo pipefail
           docker push "${IMAGE}:tmp-${GITHUB_SHA}-${{ matrix.variant }}-${{ matrix.arch }}"
+
+  # The allocator is opt-in and not part of the rolling images; this job exists
+  # so the documented `FEATURES=jemalloc` container path, including the arm64
+  # 64 KiB-page jemalloc build and the no-eBPF-stage path, is exercised. It
+  # publishes nothing.
+  jemalloc-build:
+    name: Build check (jemalloc, arm64)
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build
+        run: |
+          set -euo pipefail
+          docker build --build-arg FEATURES=jemalloc --target runtime \
+            -t doggy-dns:jemalloc-arm64 .
+      - name: Smoke test
+        run: |
+          set -euo pipefail
+          python3 scripts/image_smoke.py --image doggy-dns:jemalloc-arm64 --runtime docker \
+            --expect-user 65532:65532 --expect-allocator jemalloc
 
   publish:
     name: Publish manifest (${{ matrix.variant }})

@@ -60,6 +60,11 @@ doggy-dns/                    # Binary entrypoint
   → [crates/doggy-dns-control/README.md](crates/doggy-dns-control/README.md)
 - **XDP fast path** (optional, Linux): answers cached DNS queries in the kernel
   via an aya eBPF program. → [docs/xdp.md](docs/xdp.md)
+- **Optional jemalloc allocator** (Linux/glibc and macOS, feature `jemalloc`,
+  off by default): on the forward path with a warm resolver cache it measured
+  +13% QPS and −15% CPU per query on Linux aarch64, and ≈ parity (~+1%, within
+  the run-to-run spread) on macOS aarch64.
+  → [docs/benchmarks/allocator-ab.md](docs/benchmarks/allocator-ab.md)
 
 ## Configuration
 
@@ -112,6 +117,7 @@ cargo tarpaulin --config tarpaulin.toml
 | [docs/configuration.md](docs/configuration.md) | Full TOML reference, validation rules, MCP |
 | [docs/observability.md](docs/observability.md) | OTLP signals, backend presets, metrics/traces/profiles, troubleshooting |
 | [docs/xdp.md](docs/xdp.md) | XDP kernel fast path: build, enable, how it works, limits |
+| [docs/benchmarks/allocator-ab.md](docs/benchmarks/allocator-ab.md) | Local system-vs-jemalloc A/B: method, numbers, caveats |
 | [docs/deployment.md](docs/deployment.md) | Container images, ghcr publishing, image smoke test, Docker/podman & Kubernetes deployment |
 | [examples/deploy/README.md](examples/deploy/README.md) | Ready-to-edit manifests (ConfigMap + two DaemonSets) and their apply order |
 | [docs/development.md](docs/development.md) | Build/test/bench commands, coding rules, CI, test & benchmark structure, dependencies |

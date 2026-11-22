@@ -56,6 +56,20 @@ docker build --target runtime -t doggy-dns:local .
 docker build --build-arg FEATURES=xdp --target runtime-xdp -t doggy-dns:local-xdp .
 ```
 
+`FEATURES` composes, and CI build-checks the arm64 `FEATURES=jemalloc` image
+(its smoke asserts the startup log reports `allocator="jemalloc"`, so a silent
+no-op fails). The opt-in jemalloc allocator is available on non-musl, non-MSVC
+targets (Linux/glibc and macOS are the supported builds) and is off by default;
+add `jemalloc` to the list (`FEATURES=jemalloc`, or `FEATURES=xdp,jemalloc`).
+The published `:main`/`:main-xdp` images do not include it. arm64 builds export
+`JEMALLOC_SYS_WITH_LG_PAGE=16`, so the same image runs on 4, 16 and 64 KiB-page
+hosts; a non-image arm64 build needs the same variable when the build host's
+page size is smaller than the runtime host's. Runtime tuning uses jemalloc's
+prefixed `_RJEM_MALLOC_CONF` (plain `MALLOC_CONF` is silently ignored), and the
+startup event reports `allocator=system|jemalloc` at info level. macOS support
+is locally verified, not built in CI. Its local A/B is in
+[docs/benchmarks/allocator-ab.md](benchmarks/allocator-ab.md).
+
 The XDP stage installs a pinned `bpf-linker` and the nightly toolchain inside the
 build, so the eBPF object is compiled by the image build itself — nothing has to
 be built on the host first.

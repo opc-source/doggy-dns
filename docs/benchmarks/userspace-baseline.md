@@ -11,7 +11,9 @@ Two kinds of number live here, and they are not interchangeable:
   below came from, and it did not set `RUST_LOG=warn`, so it is a
   same-order-of-magnitude reference rather than a comparable baseline.) The
   `Performance` job's first run lands with this PR, so the end-to-end row below
-  is that historical run, not a measurement taken by this job.
+  is that historical run, not a measurement taken by this job. The job now
+  reports two allocator arms (system and `--features jemalloc`); the 43,288 QPS
+  reference below is the historical XDP-stress run, not either arm.
 
 Numbers are runner/machine specific; only same-job base-vs-PR comparisons are
 meaningful.

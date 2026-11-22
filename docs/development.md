@@ -24,6 +24,12 @@ cargo tarpaulin --workspace --out Stdout       # Coverage quick summary
 # Nacos end-to-end (requires a standalone Nacos server; see "CI pipeline")
 DOGGY_NACOS_ADDR=127.0.0.1:8848 cargo test --test nacos_e2e_test -- --ignored --nocapture
 
+# Optional allocator (non-musl/non-MSVC targets; off by default; needs a C
+# toolchain and make, because jemalloc-sys runs configure+make). On arm64 Linux,
+# set JEMALLOC_SYS_WITH_LG_PAGE=16 when the build host's page size is smaller
+# than the runtime host's, or the binary aborts there.
+cargo build --release --features jemalloc      # jemalloc global allocator
+
 # XDP (optional feature; requires Linux + bpf-linker; see xdp.md for usage)
 cargo build --features xdp                     # Root binary with XDP support
 cd xdp && cargo build --target bpfel-unknown-none --release  # eBPF program
@@ -44,11 +50,15 @@ sudo env "PATH=$PATH" cargo test -p doggy-dns-xdp --test xdp_integration_test --
 > numbers are not comparable with runs recorded before that profile existed.
 
 > The `Performance` job runs the component benches twice in one job (main first,
-> PR second) and prints criterion `change:` lines, plus one end-to-end dnsperf run
-> against `config/doggy-dns-stress.toml` with `RUST_LOG=warn`. It never fails a PR:
-> shared-runner variance is not characterised well enough to gate merges. The
-> comparison is lenient, so a bench ID that is new or renamed on the PR side is
-> measured but has no `change:` line. The end-to-end Nacos scenario is absent by
+> PR second) and prints criterion `change:` lines, plus two end-to-end dnsperf
+> runs against `config/doggy-dns-stress.toml` with `RUST_LOG=warn` — the default
+> build and one built `--features jemalloc` — reported side by side as the
+> allocator matrix. The arms run sequentially on the same runner, so read the
+> pair as a same-run comparison, not an interleaved A/B. It never fails a PR on
+> a performance delta: shared-runner variance is not characterised well enough
+> to gate merges, though a build failure or the allocator no-op guard still
+> fails the job. The comparison is lenient, so a bench ID that is new or renamed
+> on the PR side is measured but has no `change:` line. The end-to-end Nacos scenario is absent by
 > necessity — the server aborts boot when Nacos is unreachable — so the Nacos
 > paths are covered by benches only. `docs/benchmarks/userspace-baseline.md`
 > holds the reference numbers, and `docs/benchmarks/xdp-kernel-hot-path.md`
@@ -99,11 +109,11 @@ Reports: `cobertura.xml` (for CI/Codecov) and `tarpaulin-report.html` (local).
 |-----|-------------|
 | **Lint** | `cargo fmt --check` + `cargo clippy -- -D warnings` |
 | **Build & Test** | `cargo build` + `cargo test` |
-| **Benchmarks** | `cargo bench --no-run` (compile check) + `Performance` job (component benches base-vs-PR, one end-to-end dnsperf run) |
+| **Benchmarks** | `cargo bench --no-run` (compile check) + `Performance` job (component benches base-vs-PR, two end-to-end dnsperf runs: system and `--features jemalloc`) |
 | **Coverage** | `cargo-tarpaulin` -> Codecov (target: 60% project, 70% patch) |
 | **XDP CI** | fmt, integration tests (`--ignored`, root), component benches vs. base, dnsperf stress |
 | **Nacos CI** | standalone Nacos server + `--ignored` end-to-end tests (subscribe → push → DNS answer) |
-| **Image** | builds both container variants on native amd64/arm64 runners, smoke-tests each, then publishes multi-arch manifests to ghcr.io |
+| **Image** | builds both container variants on native amd64/arm64 runners, smoke-tests each, then publishes multi-arch manifests to ghcr.io; also build-checks the arm64 `FEATURES=jemalloc` image without publishing it, with the smoke asserting `allocator="jemalloc"` |
 
 Every job that compiles Rust caches the dependency build
 (`Swatinem/rust-cache@v2`); the format-only checks do not need it, and the Image
