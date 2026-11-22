@@ -200,6 +200,8 @@ impl Inner {
     /// Parse, install and report one directive string on every enabled output.
     /// Both outputs parse before either is changed, and the guard is held across
     /// the install so the reported state and the installed filters move together.
+    /// Each entry is stamped only after its own install succeeds, so a failed
+    /// second install still leaves the report truthful.
     fn swap(&self, directives: &str) -> Result<LogLevels, String> {
         let mut applied = self.lock();
         let stdout = self
@@ -214,16 +216,13 @@ impl Inner {
             .transpose()?;
         if let (Some(output), Some(filter)) = (&self.stdout, stdout) {
             output.install(filter)?;
+            applied.stdout = Some(directives.to_string());
         }
         if let (Some(output), Some(filter)) = (&self.otlp, otlp) {
             output.install(filter)?;
+            applied.otlp = Some(directives.to_string());
         }
-        let state = LogLevels {
-            stdout: self.stdout.as_ref().map(|_| directives.to_string()),
-            otlp: self.otlp.as_ref().map(|_| directives.to_string()),
-        };
-        *applied = state.clone();
-        Ok(state)
+        Ok(applied.clone())
     }
 }
 
