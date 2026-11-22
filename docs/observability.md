@@ -327,8 +327,8 @@ Requirements and caveats:
 
 - Export never blocks DNS serving; OTel batch processors drop on queue
   overflow. Increase `max_queue_size` or lower `sample_ratio` under high QPS.
-- OTLP logs default to `warn` because the existing per-query `info` logs are
-  very chatty at DNS QPS. Set `level = "info"` if you need them, and consider
+- Both outputs default to `info`, so the per-query `info` logs are on by default
+  and very chatty at DNS QPS. Set `level = "warn"` in production, and consider
   `middleware.logging = false`.
 - On shutdown, providers are flushed with `timeout_secs`; the profile task is
   aborted.
