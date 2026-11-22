@@ -1,4 +1,4 @@
-# Baked into both images at /app/config/doggy-dns.toml, which is the path the
+# Baked into every image at /app/config/doggy-dns.toml, which is the path the
 # binary uses when it is started without a config argument. It is deliberately
 # the smallest thing that answers DNS: forward-only (no `native`, so a
 # hostNetwork pod cannot read the node's own /etc/resolv.conf and loop back into

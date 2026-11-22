@@ -236,7 +236,8 @@ Read `/proc/<pid>/stat` before and after, and `VmHWM` before the kill.
   `JEMALLOC_SYS_WITH_LG_PAGE=16`: a binary built for 4 KiB pages aborts on
   64 KiB-page hosts. The Dockerfile sets it for the image.
 - CI: the `Performance` job runs the system build and the jemalloc build as two
-  sequential end-to-end arms and reports both; the arm64 image job builds
-  `FEATURES=jemalloc` and its smoke asserts `allocator="jemalloc"`.
+  sequential end-to-end arms and reports both; the image matrix builds and
+  publishes the `jemalloc` and `xdp,jemalloc` variants on amd64 and arm64, and
+  each smoke asserts the startup allocator.
 - Runtime tuning uses `_RJEM_MALLOC_CONF` (the prefixed env name), not
   `MALLOC_CONF`; see the malloc_conf arms above. No tuning is shipped.

@@ -113,20 +113,26 @@ Reports: `cobertura.xml` (for CI/Codecov) and `tarpaulin-report.html` (local).
 | **Coverage** | `cargo-tarpaulin` -> Codecov (target: 60% project, 70% patch) |
 | **XDP CI** | fmt, integration tests (`--ignored`, root), component benches vs. base, dnsperf stress |
 | **Nacos CI** | standalone Nacos server + `--ignored` end-to-end tests (subscribe → push → DNS answer) |
-| **Image** | builds both container variants on native amd64/arm64 runners, smoke-tests each, then publishes multi-arch manifests to ghcr.io; also build-checks the arm64 `FEATURES=jemalloc` image without publishing it, with the smoke asserting `allocator="jemalloc"` |
+| **Image** | builds all four container variants (userspace/xdp × system/jemalloc) on native amd64/arm64 runners, smoke-tests each with the expected user and allocator, then publishes multi-arch manifests to ghcr.io |
 
 Every job that compiles Rust caches the dependency build
 (`Swatinem/rust-cache@v2`); the format-only checks do not need it, and the Image
 job cannot use it because it compiles inside a container.
 
-The Image job is the only workflow that produces artifacts rather than verdicts,
-so it is a push trigger on `main` alone. [deployment.md](deployment.md) covers the
+The Image job is the only workflow that produces artifacts rather than
+verdicts; it publishes automatically on a push to `main`. A dispatch from `main`
+can publish when `dry_run` is false (it defaults to true); other refs build and
+smoke only. [deployment.md](deployment.md) covers the
 Dockerfile's build arguments, the `CARGO_EXTRA_ARGS` memory workaround for small
 build machines, and how to run the same smoke locally:
 
 ```bash
 python3 scripts/image_smoke.py --image <tag> --runtime podman          # userspace
+python3 scripts/image_smoke.py --image <tag> --runtime podman \
+  --expect-allocator jemalloc                                          # jemalloc image
 python3 scripts/image_smoke.py --image <tag> --runtime podman --xdp    # + pinned-map reuse
+python3 scripts/image_smoke.py --image <tag> --runtime podman \
+  --expect-user root --expect-xdp-compiled                             # CI's no-bpffs XDP check
 python3 -m unittest scripts.test_image_smoke                          # the script's own tests
 ```
 
