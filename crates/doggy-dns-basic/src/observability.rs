@@ -183,7 +183,7 @@ impl Default for LogsConfig {
     fn default() -> Self {
         Self {
             enabled: true,
-            level: "warn".to_string(),
+            level: "info".to_string(),
             stdout: true,
             endpoint: None,
         }

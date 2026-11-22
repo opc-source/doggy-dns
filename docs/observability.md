@@ -11,7 +11,7 @@ authentication) changes.
 
 | Signal | Endpoint | Default | Notes |
 |--------|----------|---------|-------|
-| Logs | `/v1/logs` | enabled, level `warn` | stdout uses the same level |
+| Logs | `/v1/logs` | enabled, level `info` | stdout uses the same level |
 | Metrics | `/v1/metrics` | enabled, 15s interval | DNS-aware histogram buckets |
 | Traces | `/v1/traces` | enabled, 5% sampling | `dns.request` / `dns.resolve` / `dns.forward` spans |
 | Profiles | `/v1/profiles` | disabled | CPU only, Linux/macOS, OTLP Profiles Alpha |
@@ -19,7 +19,7 @@ authentication) changes.
 ## Runtime log level
 
 Both filters start from the same directives: `RUST_LOG` when it parses,
-`observability.logs.level` otherwise (default `warn`). On a running instance the
+`observability.logs.level` otherwise (default `info`). On a running instance the
 control plane's `set_log_level` MCP tool replaces both with one `EnvFilter`-style
 directive string, e.g. `doggy_dns_nacos=debug,hickory_proto=info`;
 `get_runtime_status` reports the current directives under `logs`, and `reset`
@@ -327,8 +327,8 @@ Requirements and caveats:
 
 - Export never blocks DNS serving; OTel batch processors drop on queue
   overflow. Increase `max_queue_size` or lower `sample_ratio` under high QPS.
-- OTLP logs default to `warn` because the existing per-query `info` logs are
-  very chatty at DNS QPS. Set `level = "info"` if you need them, and consider
+- Both outputs default to `info`, so the per-query `info` logs are on by default
+  and very chatty at DNS QPS. Set `level = "warn"` in production, and consider
   `middleware.logging = false`.
 - On shutdown, providers are flushed with `timeout_secs`; the profile task is
   aborted.
@@ -343,5 +343,5 @@ Requirements and caveats:
 | `404` on all signals | Endpoint must be the base (`.../api/default`), not a full `/v1/...` URL |
 | No profiles in OpenObserve | Generate CPU load (empty collection windows are skipped), enable `profiles.enabled`, then check `GET /api/<org>/streams?type=profiles&offset=0&limit=10` |
 | Traces missing under load | Lower `sample_ratio` or increase `max_queue_size`; `tracing::error!` spans are force-sampled and should still appear |
-| Logs missing | Log level defaults to `warn` for both outputs; set `observability.logs.level` or `RUST_LOG` |
+| Logs missing | Log level defaults to `info` for both outputs; set `observability.logs.level` or `RUST_LOG` |
 | Collector rejects profiles | Start with `--feature-gates=+service.profilesSupport` and add a profiles pipeline |
