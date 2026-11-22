@@ -57,7 +57,7 @@ basic_auth = { username = "root@example.com", password = "${OPENOBSERVE_PASSWORD
 
 [observability.logs]
 enabled = true
-level = "info"                       # OTLP log level; stdout uses RUST_LOG
+level = "info"                       # stdout + OTLP log level; RUST_LOG overrides
 stdout = true
 
 [observability.metrics]

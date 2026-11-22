@@ -21,6 +21,10 @@ fn nacos_zone_signal_reports_subscribed_services() {
         signal.get("cachedServices").is_none(),
         "the signal does not pretend to count a cache doggy-dns does not keep"
     );
+    assert!(
+        snapshot.get("logs").is_none(),
+        "the snapshot behind /readyz carries no log filter state"
+    );
 }
 
 #[test]

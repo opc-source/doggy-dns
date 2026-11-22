@@ -143,5 +143,6 @@ Structured logging via `tracing`. Key log events:
 | Middleware short-circuit | `WARN` | `duration_ms`, `response_code=Refused` |
 | Configuration loaded | `INFO` | `listen_addr`, `port`, `worker_threads`, `plugin_count`, ... |
 
-Control log level via the `RUST_LOG` environment variable. OTLP export of the
+Control log level at startup via `RUST_LOG` or `observability.logs.level`, or at
+runtime through the control plane's `set_log_level` MCP tool. OTLP export of the
 same events is covered in [observability.md](observability.md).
