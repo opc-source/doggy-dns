@@ -1,26 +1,29 @@
 # syntax=docker/dockerfile:1
-# Build the doggy-dns image, in two variants that share every stage below and
-# differ only in the cargo feature set and the user the container runs as:
+# Build the doggy-dns image, in four variants that share every stage below and
+# differ only in the cargo features and the user the container runs as:
 #
 #   # userspace resolver, runs as a non-root user. `--target runtime` is not
 #   # optional: an untargeted build produces the LAST stage, i.e. the root XDP
 #   # image, under whatever tag you passed.
 #   docker build --target runtime -t ghcr.io/<org>/doggy-dns:main .
 #
+#   # userspace with the opt-in jemalloc allocator
+#   docker build --build-arg FEATURES=jemalloc --target runtime \
+#          -t ghcr.io/<org>/doggy-dns:main-jemalloc .
+#
 #   # same binary plus the XDP fast path (feature `xdp`, eBPF program embedded)
 #   docker build --build-arg FEATURES=xdp --target runtime-xdp \
 #          -t ghcr.io/<org>/doggy-dns:main-xdp .
 #
-#   # opt-in jemalloc global allocator (glibc image; non-musl/non-MSVC gate; composes with xdp).
-#   # Local build only: the published matrix is userspace/xdp.
-#   docker build --build-arg FEATURES=jemalloc --target runtime \
-#          -t doggy-dns:local-jemalloc .
+#   # XDP plus the opt-in jemalloc allocator
+#   docker build --build-arg FEATURES=xdp,jemalloc --target runtime-xdp \
+#          -t ghcr.io/<org>/doggy-dns:main-xdp-jemalloc .
 #
 # The eBPF stage needs nightly + rust-src + bpf-linker, so it only runs for the
-# `xdp` feature; the userspace image then costs nothing for it. Both variants
-# compile `aws-lc-sys`/`ring` (rustls default features), which is why the builder
-# carries a C toolchain and cmake, and why the runtime is glibc-based Debian
-# rather than a static musl link.
+# `xdp` feature; the userspace and jemalloc-only images then cost nothing for it.
+# All variants compile `aws-lc-sys`/`ring` (rustls default features), which is
+# why the builder carries a C toolchain and cmake, and why the runtime is
+# glibc-based Debian rather than a static musl link.
 #
 # Registry mirrors are ARGs so a build behind a slow or blocked path can be
 # redirected without editing this file:

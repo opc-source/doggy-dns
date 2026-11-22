@@ -14,7 +14,9 @@ What it proves, in order:
    with the XDP fast path) and, started with no arguments, looks for its config at
    /app/config/doggy-dns.toml — the path the image ships its default at — and the
    config mounted there passes `validate_config`; with `--expect-allocator`, the
-   startup event must also name that allocator;
+   startup event must also name that allocator; with `--expect-xdp-compiled`, the
+   `[xdp]` block is enabled and the compiled-in fast path must log its fallback
+   (a userspace image logs nothing);
 2. the control plane answers `/healthz` and then `/readyz` with 200;
 3. a raw UDP A query is answered, and the same query over TCP is answered, with
    the address the fake upstream handed out;
@@ -66,6 +68,7 @@ QTYPE_NUMBERS = {"A": 1, "AAAA": 28}
 FAKE_ANSWER_IP = "192.0.2.1"
 DEFAULT_XDP_PIN_PATH = "/sys/fs/bpf/doggy-dns-smoke/dns_cache"
 REUSE_LOG_LINE = "reusing the pinned DNS_CACHE map"
+XDP_FALLBACK_LINE = "failed to initialize XDP fast path, continuing without it"
 
 
 class NotDnsResponse(Exception):
@@ -438,17 +441,24 @@ def mount_spec(directory, target, runtime):
     return f"{directory}:{target}:ro{suffix}"
 
 
-def start_container(args, root, *, run_tag, upstream, xdp):
+def start_container(args, root, *, run_tag, upstream, xdp, xdp_config=None):
     """Start one instance and return its container name.
 
     Each run gets its own config directory under `root`: the bind mount is
     read-only, so a replacement container has to be handed a freshly written file
     rather than the one the previous run read.
+
+    `xdp` selects the privileged launch used by the full reuse test.
+    `xdp_config` only decides whether the smoke config enables `[xdp]`; it
+    defaults to `xdp`, so the CI probe can enable the block while staying
+    unprivileged and proving the compiled-in fallback.
     """
+    if xdp_config is None:
+        xdp_config = xdp
     directory = os.path.join(root, run_tag)
     os.makedirs(directory, exist_ok=True)
     with open(os.path.join(directory, "doggy-dns.toml"), "w") as handle:
-        handle.write(config_text(args, upstream=upstream, xdp=xdp))
+        handle.write(config_text(args, upstream=upstream, xdp=xdp_config))
     name = f"{args.name}-{run_tag}"
     command = ["run", "-d", "--name", name, "--network", "host"]
     if xdp:
@@ -560,6 +570,25 @@ def check_allocator(args, name):
         raise SmokeFailure(f"startup did not report allocator={expected!r}; logs:\n{logs}")
 
 
+def xdp_fallback_line(text):
+    """True when a compiled-in fast path tried to attach and stood down."""
+    return XDP_FALLBACK_LINE in text
+
+
+def check_xdp_compiled(args, name):
+    """The image has the fast path compiled in.
+
+    CI cannot pass `--xdp` (no bpffs/caps), so it enables `[xdp]` in the smoke
+    config instead: a userspace image ignores the block silently, while an XDP
+    image tries to attach, fails without privileges, and logs the fallback. This
+    proves the code is compiled in, not that a working fast path loads; `--xdp`
+    proves the latter.
+    """
+    logs = container_logs(args, name, tail=None)
+    if not xdp_fallback_line(logs):
+        raise SmokeFailure(f"startup did not show the compiled-in XDP fallback; logs:\n{logs}")
+
+
 def check_pinned_map(args, name):
     """The pinned map file must exist inside the container at its pin path."""
     pinned = f"{DEFAULT_XDP_PIN_PATH}_v1"
@@ -634,10 +663,17 @@ def smoke(args):
             check_image_user(args, expected_user(args))
             with FakeUpstream(args.upstream_port) as upstream:
                 name = start_container(
-                    args, root, run_tag="first", upstream=f"{HOST}:{upstream.port}", xdp=args.xdp
+                    args,
+                    root,
+                    run_tag="first",
+                    upstream=f"{HOST}:{upstream.port}",
+                    xdp=args.xdp,
+                    xdp_config=(args.xdp or args.expect_xdp_compiled),
                 )
                 check_serving(args, name, "forwarded")
                 check_allocator(args, name)
+                if args.expect_xdp_compiled:
+                    check_xdp_compiled(args, name)
                 if upstream.requests == 0:
                     raise SmokeFailure(
                         "the fake upstream saw no traffic, so nothing was forwarded to it; "
@@ -648,9 +684,14 @@ def smoke(args):
                 stop_container(args, name)
                 name = None
             if not args.xdp:
+                xdp_note = (
+                    "compiled-in XDP fast path fell back without privileges, "
+                    if args.expect_xdp_compiled
+                    else ""
+                )
                 print(
                     f"[ok] {args.image}: declares {expected_user(args)}, ran with no capabilities, "
-                    f"answered {args.name_to_query} over UDP and TCP, "
+                    f"{xdp_note}answered {args.name_to_query} over UDP and TCP, "
                     f"forwarded {upstream.requests} queries"
                 )
                 return
@@ -696,13 +737,19 @@ def parse_args(argv):
         "--expect-user",
         default="",
         help="user the image must declare (default: 65532:65532, or root with --xdp). "
-        "CI smokes the XDP image without --xdp, so it passes root here",
+        "Pass root for an XDP image smoked without --xdp; CI uses the matrix value",
     )
     parser.add_argument(
         "--expect-allocator",
         default="",
         choices=("", "system", "jemalloc"),
         help="allocator the startup event must report; empty skips the check",
+    )
+    parser.add_argument(
+        "--expect-xdp-compiled",
+        action="store_true",
+        help="enable [xdp] and require the compiled-in fast path's fallback line; "
+        "CI uses it without --xdp to tell an XDP image from a userspace one",
     )
     parser.add_argument("--timeout", type=float, default=60.0, help="seconds to wait for readiness")
     parser.add_argument("--name", default="doggy-dns-smoke", help="container name prefix")
@@ -711,6 +758,8 @@ def parse_args(argv):
         parser.exit(2, "every port the smoke uses must be unprivileged\n")
     if len({args.dns_port, args.control_port, args.upstream_port, args.dead_port}) != 4:
         parser.exit(2, "the smoke ports must be distinct\n")
+    if args.xdp and args.expect_xdp_compiled:
+        parser.exit(2, "--xdp and --expect-xdp-compiled are alternatives\n")
     return args
 
 

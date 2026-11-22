@@ -243,5 +243,39 @@ class ConfigTextTests(unittest.TestCase):
         self.assertIn('interface = "eth0"', self.xdp_config("--interface", "eth0"))
 
 
+class XdpCompiledTests(unittest.TestCase):
+    """CI has no bpffs, so the compiled-in path is proven by its fallback line."""
+
+    FALLBACK = (
+        '\u001b[33m WARN\u001b[0m doggy_dns::xdp: '
+        "failed to initialize XDP fast path, continuing without it"
+    )
+
+    def test_the_fallback_line_is_found(self):
+        self.assertTrue(image_smoke.xdp_fallback_line(self.FALLBACK))
+
+    def test_a_stub_log_is_not_accepted(self):
+        self.assertFalse(image_smoke.xdp_fallback_line("doggy-dns is ready"))
+
+    def test_the_flag_keeps_the_userspace_user_default(self):
+        # The flag says the binary has XDP; it does not change the image's user.
+        # CI passes the matrix's --expect-user root for the XDP tags.
+        args = image_smoke.parse_args(["--image", "doggy-dns:test", "--expect-xdp-compiled"])
+        self.assertEqual(image_smoke.expected_user(args), "65532:65532")
+
+    def test_xdp_and_compiled_are_alternatives(self):
+        with self.assertRaises(SystemExit):
+            image_smoke.parse_args(
+                ["--image", "doggy-dns:test", "--xdp", "--expect-xdp-compiled"]
+            )
+
+    def test_the_flag_enables_the_xdp_block(self):
+        args = image_smoke.parse_args(["--image", "doggy-dns:test", "--expect-xdp-compiled"])
+        text = image_smoke.config_text(
+            args, upstream="127.0.0.1:15399", xdp=(args.xdp or args.expect_xdp_compiled)
+        )
+        self.assertIn("[xdp]\nenabled = true", text)
+
+
 if __name__ == "__main__":
     unittest.main()

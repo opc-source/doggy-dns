@@ -1,25 +1,29 @@
 # Deployment
 
 How to build, publish and run doggy-dns as a service: container images, the
-Kubernetes manifests in `examples/deploy/`, and what the two image variants
+Kubernetes manifests in `examples/deploy/`, and what the four image variants
 actually differ in.
 
 Configuration keys are documented in
 [`configuration.md`](configuration.md); the XDP fast path itself, including how
 it is compiled into the binary, is in [`xdp.md`](xdp.md).
 
-## The two images
+## The four images
 
-Both are the same Rust binary on the same Debian 12 slim root filesystem. They
-differ in one cargo feature and one user:
+All four are the same Rust binary on the same Debian 12 slim root filesystem.
+They differ in the cargo features and the user:
 
-| | `:main` | `:main-xdp` |
-|---|---|---|
-| build | `--target runtime` | `--target runtime-xdp --build-arg FEATURES=xdp` |
-| fast path | not compiled in | eBPF program embedded in the binary |
-| runs as | uid 65532 | root |
-| host access needed | bind port 53 (`NET_BIND_SERVICE`) | `BPF` + `PERFMON` + `NET_ADMIN` + `NET_BIND_SERVICE`, and the host's bpffs |
-| reads `[xdp]` | ignores it | acts on it |
+| tag | target | features | runs as | host access needed |
+|---|---|---|---|---|
+| `:main` | `runtime` | — | uid 65532 | bind port 53 (`NET_BIND_SERVICE`) |
+| `:main-jemalloc` | `runtime` | `jemalloc` | uid 65532 | bind port 53 (`NET_BIND_SERVICE`) |
+| `:main-xdp` | `runtime-xdp` | `xdp` | root | `BPF` + `PERFMON` + `NET_ADMIN` + `NET_BIND_SERVICE`, and the host's bpffs |
+| `:main-xdp-jemalloc` | `runtime-xdp` | `xdp,jemalloc` | root | same as `:main-xdp` |
+
+The `xdp` tags embed the eBPF program and are the only ones that read `[xdp]`;
+the others ignore it. The `-jemalloc` tags use jemalloc as the global allocator.
+The allocator A/B is aarch64-only; the amd64 jemalloc images are built and
+smoked but were not benchmarked.
 
 The runtime base is glibc Debian rather than a musl or distroless image because
 `aws-lc-sys` and `ring` — pulled in by rustls for DoT and DoH — are built with
@@ -41,27 +45,39 @@ The runtime base is glibc Debian rather than a musl or distroless image because
 With the fast path on, the answer a client gets on a hit was produced by an
 earlier request: the kernel replays the payload pinned in the `DNS_CACHE` map. A
 cold name goes up to userspace, is resolved by the authority chain, and its
-answer is written back into that map.
+answer is written back into that map. The `-jemalloc` tags are the same two
+topologies with jemalloc as the global allocator; expect a few MiB more peak
+RSS at the measured 2-worker setting, and more arenas/threads can widen that.
 
 ## Building an image
 
-`Dockerfile` takes both variants out of one file:
+`Dockerfile` takes all four variants out of one file:
 
 ```bash
 # userspace only. `--target` is required: without it the build stops at the
 # last stage, which is the root XDP image.
 docker build --target runtime -t doggy-dns:local .
 
+# userspace + jemalloc
+docker build --build-arg FEATURES=jemalloc --target runtime \
+  -t doggy-dns:local-jemalloc .
+
 # with the XDP fast path
 docker build --build-arg FEATURES=xdp --target runtime-xdp -t doggy-dns:local-xdp .
+
+# XDP + jemalloc
+docker build --build-arg FEATURES=xdp,jemalloc --target runtime-xdp \
+  -t doggy-dns:local-xdp-jemalloc .
 ```
 
-`FEATURES` composes, and CI build-checks the arm64 `FEATURES=jemalloc` image
-(its smoke asserts the startup log reports `allocator="jemalloc"`, so a silent
-no-op fails). The opt-in jemalloc allocator is available on non-musl, non-MSVC
-targets (Linux/glibc and macOS are the supported builds) and is off by default;
-add `jemalloc` to the list (`FEATURES=jemalloc`, or `FEATURES=xdp,jemalloc`).
-The published `:main`/`:main-xdp` images do not include it. arm64 builds export
+`FEATURES` composes, and CI builds and publishes both allocator variants on
+amd64 and arm64; each smoke asserts the startup log reports the allocator the
+matrix built (`system` or `jemalloc`), so a silent no-op fails. The opt-in
+jemalloc allocator is available on non-musl, non-MSVC targets (Linux/glibc and
+macOS are the supported builds); add `jemalloc` to the list
+(`FEATURES=jemalloc`, or `FEATURES=xdp,jemalloc`). The default
+`:main`/`:main-xdp` images keep the system allocator; `:main-jemalloc` and
+`:main-xdp-jemalloc` enable it. arm64 builds export
 `JEMALLOC_SYS_WITH_LG_PAGE=16`, so the same image runs on 4, 16 and 64 KiB-page
 hosts; a non-image arm64 build needs the same variable when the build host's
 page size is smaller than the runtime host's. Runtime tuning uses jemalloc's
@@ -114,36 +130,44 @@ fits.
 
 ## Publishing
 
-`.github/workflows/image.yml` publishes to `ghcr.io` on every push to `main`, and
-on `workflow_dispatch`. Nothing is published from a feature branch: the workflow
-is `push: branches: [main]` only.
+`.github/workflows/image.yml` publishes automatically on every push to `main`.
+Only a run on `refs/heads/main` publishes: a manual `workflow_dispatch` from
+another ref builds and smokes only. A dispatch from main publishes when
+`dry_run` is false; it defaults to true, which skips the registry login, the
+per-arch pushes and the publish job.
 
-For each push it builds four images — userspace and XDP, each on amd64 and on
+For each push it builds eight images — four variants, each on amd64 and on
 arm64 — smoke-tests each one, pushes them under a temporary
 `tmp-<sha>-<variant>-<arch>` tag, and then joins each pair into a multi-arch
 manifest list:
 
 ```
-ghcr.io/<org>/doggy-dns:main          ← amd64 + arm64, userspace
-ghcr.io/<org>/doggy-dns:main-xdp      ← amd64 + arm64, XDP
-ghcr.io/<org>/doggy-dns:sha-<7>       ← same images, pinned to one commit
+ghcr.io/<org>/doggy-dns:main                  ← amd64 + arm64, userspace
+ghcr.io/<org>/doggy-dns:main-jemalloc         ← userspace + jemalloc
+ghcr.io/<org>/doggy-dns:main-xdp              ← XDP
+ghcr.io/<org>/doggy-dns:main-xdp-jemalloc     ← XDP + jemalloc
+ghcr.io/<org>/doggy-dns:sha-<7>               ← :main, pinned to one commit
+ghcr.io/<org>/doggy-dns:sha-<7>-jemalloc
 ghcr.io/<org>/doggy-dns:sha-<7>-xdp
+ghcr.io/<org>/doggy-dns:sha-<7>-xdp-jemalloc
 ```
 
 The `tmp-*` tags are not cleaned up afterwards — removing a tag needs the
 registry's package API, and the manifest list addresses the images by digest, so
-they cost nothing but a line in the package's tag list. Each push adds four.
+they cost nothing but a line in the package's tag list. Each push adds eight.
 
 Three deliberate properties:
 
 - **No `:latest`.** A node's resolver should report which build it is running, and
-  a rolling `:main` already says that.
+  a rolling tag already says that.
 - **Smoke before push.** An image that fails the smoke test never reaches a
   rolling tag, so a bad merge cannot silently spread to every node on its next
-  pull. CI runs the smoke without `--xdp`: attaching a program needs a writable
-  bpffs and an XDP-capable NIC, and a runner that happens to lack either would
-  block every publish. The `xdp` variant still gets its userspace path checked
-  there, and the kernel behaviour is covered by the root-only integration tests.
+  pull. The matrix passes the expected user and allocator, so a silent allocator
+  no-op fails too. CI runs the smoke without `--xdp`: attaching a program needs
+  a writable bpffs and an XDP-capable NIC, and a runner that happens to lack
+  either would block every publish. The `xdp` variants still get their userspace
+  path checked there, and the kernel behaviour is covered by the root-only
+  integration tests.
 - **The rolling tag is a moving target**, which is why `imagePullPolicy: Always`
   appears in the sample manifests and why `:sha-*` exists. Pin a `:sha-*` tag if
   you would rather choose the moment a node updates.
@@ -165,10 +189,12 @@ recreate it.
 
 `scripts/image_smoke.py` starts an image and checks the things a manifest cannot
 express: that the image declares the user it is meant to run as (`65532:65532`
-userspace, root with XDP), that the binary with no arguments looks for
-`/app/config/doggy-dns.toml` — the path the image bakes its default at — that the
-control plane answers, that a raw UDP **and** TCP query is answered, and — with
-`--xdp` — that the pinned `DNS_CACHE` map survives the container being replaced.
+userspace, root with XDP), that — with `--expect-allocator` — the startup event
+names the allocator the image was built with, and that the binary with no
+arguments looks for `/app/config/doggy-dns.toml` — the path the image bakes its
+default at — that the control plane answers, that a raw UDP **and** TCP query is
+answered, and — with `--xdp` — that the pinned `DNS_CACHE` map survives the
+container being replaced.
 
 The smoke mounts **its own** config over that path, so the baked default's
 *contents* are not what answers there; that file is covered instead by
@@ -178,15 +204,25 @@ variables, no volumes.
 
 ```bash
 python3 scripts/image_smoke.py --image ghcr.io/<org>/doggy-dns:main
+python3 scripts/image_smoke.py --image ghcr.io/<org>/doggy-dns:main-jemalloc \
+  --expect-allocator jemalloc
 python3 scripts/image_smoke.py --image ghcr.io/<org>/doggy-dns:main-xdp --xdp
-# CI's case: the XDP image, checked through its userspace path only
-python3 scripts/image_smoke.py --image ghcr.io/<org>/doggy-dns:main-xdp --expect-user root
+python3 scripts/image_smoke.py --image ghcr.io/<org>/doggy-dns:main-xdp-jemalloc \
+  --expect-allocator jemalloc --xdp
+# CI's case: the XDP images, checked through their userspace path only
+python3 scripts/image_smoke.py --image ghcr.io/<org>/doggy-dns:main-xdp \
+  --expect-user root --expect-allocator system --expect-xdp-compiled
 ```
 
-The expected user defaults to `65532:65532`, or to root when `--xdp` is given,
-because `--xdp` implies the root-running variant. Pass `--expect-user` when the
-two disagree — CI smokes the XDP image without `--xdp` (no bpffs on the
-runner), so it has to expect root anyway.
+The expected user defaults to `65532:65532`, or to root when `--xdp` is given.
+Pass `--expect-user` for an XDP image smoked without `--xdp`; CI passes the
+matrix's root. CI passes `--expect-allocator` from the matrix for every variant,
+including the system images. It also passes `--expect-xdp-compiled` for the XDP
+variants: that enables `[xdp]` while keeping the probe unprivileged (`--cap-drop
+ALL`, no bpffs), so the compiled-in fast path fails to attach and logs its
+fallback line, which a userspace image never logs. It proves the code is
+compiled in, not that a working fast path loads; the full `--xdp` test proves
+the latter.
 
 The script serves its own one-record forward upstream on loopback, so a run needs
 no outbound internet, and the expected answer is a fixed TEST-NET address. It also

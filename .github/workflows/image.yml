@@ -1,28 +1,37 @@
 name: Image
 
 # Rolling images from `main` only — there is no tag-triggered release flow and
-# no `:latest`. Every push to main publishes four things:
+# no `:latest`. Every push to main publishes eight tags, each multi-arch
+# (amd64 + arm64):
 #
-#   :main          userspace resolver, multi-arch (amd64 + arm64)
-#   :main-xdp      the same plus the XDP fast path, multi-arch
-#   :sha-<7>       the userspace image for that exact commit
-#   :sha-<7>-xdp   the XDP image for that exact commit
+#   :main                  userspace resolver
+#   :main-jemalloc         userspace + jemalloc
+#   :main-xdp              the same plus the XDP fast path
+#   :main-xdp-jemalloc     XDP fast path + jemalloc
+#   :sha-<7>               :main for that exact commit
+#   :sha-<7>-jemalloc      :main-jemalloc for that commit
+#   :sha-<7>-xdp           :main-xdp for that commit
+#   :sha-<7>-xdp-jemalloc  :main-xdp-jemalloc for that commit
 #
 # Each build job compiles one architecture on a native runner (no QEMU: the
 # workspace's fat-LTO release profile is slow enough without emulation), smoke
 # tests it, and pushes a per-arch tag. The publish job then joins the two
 # per-arch images into a manifest list under the rolling names, so a node pulls
-# `:main-xdp` and gets the image built for its own architecture.
+# e.g. `:main-xdp-jemalloc` and gets the image built for its own architecture.
 #
-# A separate arm64 job build-checks the opt-in jemalloc image as
-# `FEATURES=jemalloc`. Its smoke asserts the startup event names the allocator,
-# so a silent no-op fails; it also keeps the jemalloc-only path (no eBPF stage)
-# covered. It publishes nothing: the rolling tags stay userspace/xdp.
+# Only a run on refs/heads/main publishes. A workflow_dispatch from another ref
+# builds and smokes only; a dispatch from main publishes only when dry_run is
+# false (it defaults to true).
 
 on:
   push:
     branches: ["main"]
   workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Build and smoke every variant without pushing or publishing
+        type: boolean
+        default: true
 
 permissions:
   contents: read
@@ -35,7 +44,8 @@ env:
 concurrency:
   group: image-${{ github.ref }}
   # Rolling tags are overwritten by design, but a half-published set is worse
-  # than a queued run: let the previous build finish.
+  # than a queued run: let the previous build finish. Eight release builds per
+  # run mean a busy merge queue can serialise behind the 90-minute job timeout.
   cancel-in-progress: false
 
 jobs:
@@ -53,29 +63,97 @@ jobs:
             target: runtime
             features: ""
             user: "65532:65532"
+            allocator: system
           - variant: userspace
             arch: arm64
             runner: ubuntu-24.04-arm
             target: runtime
             features: ""
             user: "65532:65532"
+            allocator: system
+          - variant: jemalloc
+            arch: amd64
+            runner: ubuntu-latest
+            target: runtime
+            features: jemalloc
+            user: "65532:65532"
+            allocator: jemalloc
+          - variant: jemalloc
+            arch: arm64
+            runner: ubuntu-24.04-arm
+            target: runtime
+            features: jemalloc
+            user: "65532:65532"
+            allocator: jemalloc
           - variant: xdp
             arch: amd64
             runner: ubuntu-latest
             target: runtime-xdp
             features: xdp
             user: root
+            allocator: system
           - variant: xdp
             arch: arm64
             runner: ubuntu-24.04-arm
             target: runtime-xdp
             features: xdp
             user: root
+            allocator: system
+          - variant: xdp-jemalloc
+            arch: amd64
+            runner: ubuntu-latest
+            target: runtime-xdp
+            features: "xdp,jemalloc"
+            user: root
+            allocator: jemalloc
+          - variant: xdp-jemalloc
+            arch: arm64
+            runner: ubuntu-24.04-arm
+            target: runtime-xdp
+            features: "xdp,jemalloc"
+            user: root
+            allocator: jemalloc
 
     steps:
       - uses: actions/checkout@v4
 
+      # Derive what the smoke will assert from the variant, and fail if the
+      # other matrix cells disagree. The variant is what the tag says, so a
+      # slipped feature/target/user/allocator cell cannot publish a mislabelled
+      # image.
+      - name: Validate matrix
+        run: |
+          set -euo pipefail
+          variant="${{ matrix.variant }}"
+          features="${{ matrix.features }}"
+          target="${{ matrix.target }}"
+          case "$variant" in
+            userspace) [ -z "$features" ] ;;
+            jemalloc) [ "$features" = jemalloc ] ;;
+            xdp) [ "$features" = xdp ] ;;
+            xdp-jemalloc) [ "$features" = "xdp,jemalloc" ] ;;
+            *) echo "unknown variant: $variant"; exit 1 ;;
+          esac
+          case "$variant" in
+            *xdp*) expected_target=runtime-xdp; expected_user=root ;;
+            *) expected_target=runtime; expected_user=65532:65532 ;;
+          esac
+          if [ "$target" != "$expected_target" ]; then
+            echo "variant $variant needs target $expected_target, got $target"; exit 1
+          fi
+          if [ "${{ matrix.user }}" != "$expected_user" ]; then
+            echo "variant $variant needs user $expected_user, got ${{ matrix.user }}"; exit 1
+          fi
+          case ",$features," in
+            *jemalloc*) expected_allocator=jemalloc ;;
+            *) expected_allocator=system ;;
+          esac
+          if [ "${{ matrix.allocator }}" != "$expected_allocator" ]; then
+            echo "variant $variant needs allocator $expected_allocator, got ${{ matrix.allocator }}"; exit 1
+          fi
+
       - name: Log in to ghcr.io
+        if: github.ref == 'refs/heads/main' && github.event.inputs.dry_run != 'true'
         uses: docker/login-action@v3
         with:
           registry: ${{ env.REGISTRY }}
@@ -93,17 +171,21 @@ jobs:
 
       # The smoke serves a query through a fake upstream the script owns on an
       # unprivileged port, checks /healthz + /readyz, and asserts the declared
-      # user from the matrix. For both variants it runs the container with
-      # `--cap-drop ALL` and no bpffs — stricter than the manifests, which grant
-      # NET_BIND_SERVICE so port 53 can be bound.
+      # user and startup allocator from the matrix. XDP variants additionally
+      # pass `--expect-xdp-compiled`: that enables `[xdp]` and requires the
+      # compiled-in fast path's fallback line, which a userspace image never
+      # logs, so a matrix slip cannot publish a userspace binary as XDP. Each
+      # variant runs the container with `--cap-drop ALL` and no bpffs —
+      # stricter than the manifests, which grant NET_BIND_SERVICE so port 53
+      # can be bound.
       #
       # `--xdp` is deliberately not passed here. It would additionally mount the
       # host's bpffs and attach a program to the runner's NIC, which needs an
       # XDP-capable driver and a writable /sys/fs/bpf — neither is guaranteed on
       # a GitHub-hosted runner, and a machine that happens to lack them would
-      # block every image publish. The `xdp` build still gets its userspace path
-      # exercised below, and the pinned-map reuse behaviour is proven by the
-      # root-only integration tests:
+      # block every image publish. The `xdp` builds still get their userspace
+      # path exercised below, and the pinned-map reuse behaviour is proven by
+      # the root-only integration tests:
       #
       #   sudo env "PATH=$PATH" cargo test -p doggy-dns-xdp \
       #     --test xdp_integration_test -- --ignored
@@ -114,52 +196,50 @@ jobs:
       - name: Smoke test
         run: |
           set -euo pipefail
-          python3 scripts/image_smoke.py \
-            --image "${IMAGE}:tmp-${GITHUB_SHA}-${{ matrix.variant }}-${{ matrix.arch }}" \
-            --runtime docker \
+          args=(
+            --image "${IMAGE}:tmp-${GITHUB_SHA}-${{ matrix.variant }}-${{ matrix.arch }}"
+            --runtime docker
             --expect-user "${{ matrix.user }}"
+            --expect-allocator "${{ matrix.allocator }}"
+          )
+          case "${{ matrix.variant }}" in *xdp*) args+=(--expect-xdp-compiled) ;; esac
+          python3 scripts/image_smoke.py "${args[@]}"
 
-      # Only push what the smoke test accepted: a rolling `:main` is what every
-      # node pulls next, so a broken image must never reach it.
+      # Only push what the smoke test accepted: a rolling tag is what nodes pull
+      # next, so a broken image must never reach it.
       #
       # The `tmp-<sha>-<variant>-<arch>` tags stay in the package. Deleting them
       # would need the packages API (a DELETE per version, not expressible with
       # `docker push`), and they are harmless: a manifest list addresses them by
       # digest once created, and a re-run of the same commit overwrites them.
       - name: Push per-arch image
+        if: github.ref == 'refs/heads/main' && github.event.inputs.dry_run != 'true'
         run: |
           set -euo pipefail
           docker push "${IMAGE}:tmp-${GITHUB_SHA}-${{ matrix.variant }}-${{ matrix.arch }}"
 
-  # The allocator is opt-in and not part of the rolling images; this job exists
-  # so the documented `FEATURES=jemalloc` container path, including the arm64
-  # 64 KiB-page jemalloc build and the no-eBPF-stage path, is exercised. It
-  # publishes nothing.
-  jemalloc-build:
-    name: Build check (jemalloc, arm64)
-    runs-on: ubuntu-24.04-arm
-    timeout-minutes: 90
-    steps:
-      - uses: actions/checkout@v4
-      - name: Build
-        run: |
-          set -euo pipefail
-          docker build --build-arg FEATURES=jemalloc --target runtime \
-            -t doggy-dns:jemalloc-arm64 .
-      - name: Smoke test
-        run: |
-          set -euo pipefail
-          python3 scripts/image_smoke.py --image doggy-dns:jemalloc-arm64 --runtime docker \
-            --expect-user 65532:65532 --expect-allocator jemalloc
-
+  # Waits for every build, so a broken variant deliberately blocks the whole
+# rolling set instead of publishing a partial one.
   publish:
     name: Publish manifest (${{ matrix.variant }})
     needs: build
+    if: github.ref == 'refs/heads/main' && github.event.inputs.dry_run != 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     strategy:
+      # Per-variant manifests: a transient failure in one should not cancel the
+      # other three; the all-or-nothing gate is the build job above.
+      fail-fast: false
       matrix:
-        variant: [userspace, xdp]
+        include:
+          - variant: userspace
+            suffix: ""
+          - variant: jemalloc
+            suffix: "-jemalloc"
+          - variant: xdp
+            suffix: "-xdp"
+          - variant: xdp-jemalloc
+            suffix: "-xdp-jemalloc"
     steps:
       - name: Log in to ghcr.io
         uses: docker/login-action@v3
@@ -173,8 +253,7 @@ jobs:
           SHORT_SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
-          suffix=""
-          if [ "${{ matrix.variant }}" = "xdp" ]; then suffix="-xdp"; fi
+          suffix="${{ matrix.suffix }}"
           short="${SHORT_SHA:0:7}"
           amd64="${IMAGE}:tmp-${SHORT_SHA}-${{ matrix.variant }}-amd64"
           arm64="${IMAGE}:tmp-${SHORT_SHA}-${{ matrix.variant }}-arm64"

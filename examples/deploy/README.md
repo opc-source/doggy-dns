@@ -6,7 +6,7 @@ field that a real cluster would need to change is visible in the file.
 
 | File | What it is |
 |------|------------|
-| `container-default.toml` | The config baked into both images at `/app/config/doggy-dns.toml`. |
+| `container-default.toml` | The config baked into every image at `/app/config/doggy-dns.toml`. |
 | `configmap.yaml` | Three ConfigMaps: the userspace config, the XDP config, and the env vars. |
 | `daemonset.yaml` | The userspace resolver, one pod per node, on port 53 in the node's netns. |
 | `daemonset-xdp.yaml` | The same with the kernel fast path, plus the capabilities and bpffs mount it needs. |
@@ -38,9 +38,14 @@ needs nothing else from the host.
 `:main-xdp` is the same binary with the `xdp` feature compiled in, running as
 root with `BPF` + `PERFMON` + `NET_ADMIN` + `NET_BIND_SERVICE`, because loading a
 program and setting an interface's XDP fd are privileged, and dropping all
-capabilities takes away root's own right to bind port 53. It is the only variant
-that reads the `[xdp]` block; with `enabled = false` it behaves exactly like
-`:main`.
+capabilities takes away root's own right to bind port 53. The two `xdp` variants
+are the only ones that read the `[xdp]` block; with `enabled = false` they
+behave exactly like their userspace counterparts.
+
+`:main-jemalloc` and `:main-xdp-jemalloc` are drop-in replacements for
+`:main`/`:main-xdp` with jemalloc as the global allocator. The user and
+capabilities are unchanged, so swapping the image tag in a DaemonSet is the
+whole change; the local A/B is in `docs/benchmarks/allocator-ab.md`.
 
 ## Config
 
@@ -56,7 +61,7 @@ the one in `configmap.yaml`. Two consequences worth knowing:
 - Any `${ENV_VAR}` in the config is expanded by the server at startup, and a
   missing variable is fatal. `configmap.yaml` keeps the expansion in one place:
   the `doggy-dns-env` ConfigMap is loaded with `envFrom`, so `DOGGY_NACOS_ADDR`
-  and `DOGGY_UPSTREAM` are defined for both variants.
+  and `DOGGY_UPSTREAM` are defined for both DaemonSets.
 - A `subPath` mount is a bind of the ConfigMap's content at mount time, so
   editing the ConfigMap does **not** reach a running pod. Refresh with:
 
@@ -88,8 +93,9 @@ replaced. Three rules follow from that:
 ## Verifying an image before you deploy it
 
 `scripts/image_smoke.py` runs a built image and checks that it declares the user
-it is meant to run as (65532 for `:main`, root for `:main-xdp`), starts from its
-baked config path (its own config is mounted over that file for the run; the
+it is meant to run as (65532 for the userspace tags, root for the XDP tags),
+starts from its baked config path (its own config is mounted over that file for
+the run; the
 shipped `container-default.toml` is checked by
 `container_default_config_loads_with_no_environment` in `doggy-dns-basic`), serves
 `/healthz` and `/readyz`, answers UDP and TCP queries,
@@ -98,7 +104,11 @@ needs to run on the machine that hosts the container runtime:
 
 ```bash
 python3 scripts/image_smoke.py --image ghcr.io/<org>/doggy-dns:main
+python3 scripts/image_smoke.py --image ghcr.io/<org>/doggy-dns:main-jemalloc \
+  --expect-allocator jemalloc
 python3 scripts/image_smoke.py --image ghcr.io/<org>/doggy-dns:main-xdp --xdp
+python3 scripts/image_smoke.py --image ghcr.io/<org>/doggy-dns:main-xdp-jemalloc \
+  --expect-allocator jemalloc --xdp
 
 # macOS + podman: the container shares the VM's network namespace, not your
 # laptop's, so run the script inside the VM.
@@ -107,21 +117,25 @@ podman machine ssh --username root \
   'python3 /tmp/image_smoke.py --runtime podman --image <org>/doggy-dns:main-xdp --xdp'
 ```
 
-CI runs this script for both images but never with `--xdp`: attaching a program
-needs a writable bpffs and an XDP-capable NIC, and a GitHub runner that happens
-to lack either would block every publish. The `:main-xdp` image still gets its
-userspace path checked there, because without an `[xdp]` block in the config the
-fast path stays dormant; since that run has no `--xdp` to imply the user, CI
-passes `--expect-user root` explicitly. The kernel reuse behaviour is covered by
-the root-only `xdp_integration_test` cases.
+CI runs this script for every variant but never with `--xdp`: attaching a
+program needs a writable bpffs and an XDP-capable NIC, and a GitHub runner that
+happens to lack either would block every publish. The XDP images still get their
+userspace path checked there. CI passes `--expect-xdp-compiled`, which enables
+`[xdp]` while the probe stays unprivileged (`--cap-drop ALL`, no bpffs), so the
+compiled-in fast path logs its fallback; a userspace binary never does. Since
+that run has no `--xdp` to imply the user, CI also passes `--expect-user root`
+explicitly, plus the matrix's `--expect-allocator` for every variant. The kernel
+reuse behaviour is covered by the root-only `xdp_integration_test` cases.
 
 ## Registry
 
 Images are published by `.github/workflows/image.yml` on every push to `main`, as
 multi-arch (amd64 + arm64) manifest lists:
 
-- `:main`, `:main-xdp` — rolling, overwritten by the next merge.
-- `:sha-<7>`, `:sha-<7>-xdp` — the same images pinned to one commit.
+- `:main`, `:main-jemalloc`, `:main-xdp`, `:main-xdp-jemalloc` — rolling,
+  overwritten by the next merge.
+- `:sha-<7>`, `:sha-<7>-jemalloc`, `:sha-<7>-xdp`, `:sha-<7>-xdp-jemalloc` —
+  the same images pinned to one commit.
 
 There is deliberately no `:latest`: a node DNS resolver should say which build it
 is running. `imagePullPolicy: Always` on the rolling tags is what makes that
