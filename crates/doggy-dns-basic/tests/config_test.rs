@@ -428,7 +428,7 @@ port = 53
         Some("http://127.0.0.1:5080/api/default")
     );
     assert!(observability.logs.enabled);
-    assert_eq!(observability.logs.level, "warn");
+    assert_eq!(observability.logs.level, "info");
     assert!(observability.logs.stdout);
     assert_eq!(observability.metrics.interval_secs, 15);
     assert!((observability.traces.sample_ratio - 0.05).abs() < f64::EPSILON);

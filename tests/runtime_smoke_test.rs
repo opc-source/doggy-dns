@@ -24,10 +24,6 @@ shutdown_timeout = 2
 [middleware]
 log_format = "text"
 
-# The control-plane line this test waits for is logged at info.
-[observability.logs]
-level = "info"
-
 [control]
 enabled = true
 listen_addr = "127.0.0.1"
