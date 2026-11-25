@@ -2,6 +2,22 @@
 resolver = "2"
 members = ["doggy-dns-xdp-abi", "doggy-dns-xdp-ebpf"]
 
+# `doggy-dns-xdp-abi` is also a member of the root workspace (via a path
+# dependency). Keep these identical to the root's `[workspace.package]` and
+# `[workspace.lints]` so the crate gets the same metadata and rules whichever
+# workspace builds it.
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+
+[workspace.lints.rust]
+warnings = "deny"
+
+[workspace.lints.clippy]
+disallowed_methods = "deny"
+disallowed_types = "deny"
+
 # Profiles must live at the workspace root; the member-level copy used to be
 # silently ignored by cargo.
 [profile.dev]
