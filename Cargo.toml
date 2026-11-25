@@ -11,12 +11,30 @@ members = [
     "crates/doggy-dns-testutil",
 ]
 
-[package]
-name = "doggy-dns"
+[workspace.package]
 version = "0.1.0"
 edition = "2024"
 license = "Apache-2.0"
+
+# One place for the rules CI enforces with `-D warnings` and the entries in
+# `.clippy.toml`. Crates opt in with `[lints] workspace = true`, so a local
+# `cargo clippy` reports the same set as CI instead of discovering it there.
+[workspace.lints.rust]
+warnings = "deny"
+
+[workspace.lints.clippy]
+disallowed_methods = "deny"
+disallowed_types = "deny"
+
+[package]
+name = "doggy-dns"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
 description = "A Rust-based service discovery DNS server built on hickory-dns"
+
+[lints]
+workspace = true
 
 [features]
 xdp = ["dep:doggy-dns-xdp"]
@@ -31,7 +49,6 @@ doggy-dns-core = { path = "crates/doggy-dns-core" }
 doggy-dns-plugin = { path = "crates/doggy-dns-plugin" }
 doggy-dns-nacos = { path = "crates/doggy-dns-nacos" }
 doggy-dns-observability = { path = "crates/doggy-dns-observability" }
-doggy-dns-xdp = { path = "crates/doggy-dns-xdp", optional = true }
 doggy-dns-control = { path = "crates/doggy-dns-control" }
 hickory-server = { workspace = true }
 tokio = { workspace = true }
@@ -44,6 +61,13 @@ dashmap = { workspace = true }
 hickory-proto = { workspace = true }
 # tests/nacos_e2e_test.rs registers instances with a live Nacos server.
 nacos-sdk = { workspace = true }
+
+# The `xdp` feature only has an implementation on Linux (`src/xdp/linux.rs`);
+# elsewhere `src/xdp/stub.rs` is used and does not touch this crate. Gating the
+# dependency on the same target keeps `--all-features` from pulling in an
+# unused optional dependency on non-Linux builds.
+[target.'cfg(target_os = "linux")'.dependencies]
+doggy-dns-xdp = { path = "crates/doggy-dns-xdp", optional = true }
 
 # musl is excluded conservatively: it is not among the crate's tested targets
 # and jemalloc's background-thread support is disabled there. MSVC is upstream's

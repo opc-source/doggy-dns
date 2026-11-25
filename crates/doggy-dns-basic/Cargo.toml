@@ -1,9 +1,12 @@
 [package]
 name = "doggy-dns-basic"
-version = "0.1.0"
-edition = "2024"
-license = "Apache-2.0"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
 description = "Lightweight doggy-dns configuration types (server, plugins, observability, mcp, xdp)."
+
+[lints]
+workspace = true
 
 [dependencies]
 serde = { workspace = true }

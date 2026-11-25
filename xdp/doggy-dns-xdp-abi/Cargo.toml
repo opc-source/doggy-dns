@@ -1,7 +1,11 @@
 [package]
 name = "doggy-dns-xdp-abi"
-version = "0.1.0"
-edition = "2024"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
 
 # Only the userspace loader marks the layouts `aya::Pod` (orphan rule: the
 # impls must live with the types). Gating on the target rather than a feature

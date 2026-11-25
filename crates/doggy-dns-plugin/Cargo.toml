@@ -1,8 +1,11 @@
 [package]
 name = "doggy-dns-plugin"
-version = "0.1.0"
-edition = "2024"
-license = "Apache-2.0"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
 
 [dependencies]
 hickory-server = { workspace = true }
