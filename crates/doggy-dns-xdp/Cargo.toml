@@ -14,7 +14,6 @@ doggy-dns-basic = { path = "../doggy-dns-basic" }
 tokio = { workspace = true }
 tracing = { workspace = true }
 anyhow = { workspace = true }
-async-trait = { workspace = true }
 hickory-proto = { workspace = true }
 hickory-server = { workspace = true }
 

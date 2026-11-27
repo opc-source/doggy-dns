@@ -80,7 +80,7 @@ worker_threads = 1
 [middleware]
 logging = true
 
-# Plugins are evaluated in order; first non-Skip result wins.
+# Plugins are evaluated in order; first Break wins, Continue is a fallback.
 # If no [[plugins]] are configured, defaults to forwarding to 8.8.8.8 / 1.1.1.1.
 [[plugins]]
 kind = "native"

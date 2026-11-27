@@ -133,9 +133,9 @@ impl ZoneHandler for ForwardAuthority {
                         qtype = ?rtype,
                         "upstream returned an empty answer"
                     );
-                    LookupControlFlow::Continue(Err(LookupError::NameExists))
+                    LookupControlFlow::Break(Err(LookupError::NameExists))
                 } else {
-                    LookupControlFlow::Continue(Ok(AuthLookup::Resolved(lookup)))
+                    LookupControlFlow::Break(Ok(AuthLookup::Resolved(lookup)))
                 }
             }
             Err(e) => {
@@ -162,7 +162,14 @@ impl ZoneHandler for ForwardAuthority {
                         "upstream forward lookup failed"
                     );
                 }
-                LookupControlFlow::Continue(Err(lookup_error))
+                // A SERVFAIL is a failed backend, not a verdict: leave it
+                // provisional so a later authority can still answer. Every
+                // other upstream response code is final.
+                if response_code == ResponseCode::ServFail {
+                    LookupControlFlow::Continue(Err(lookup_error))
+                } else {
+                    LookupControlFlow::Break(Err(lookup_error))
+                }
             }
         }
     }

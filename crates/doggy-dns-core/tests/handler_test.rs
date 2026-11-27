@@ -2,7 +2,6 @@
 
 mod common;
 
-use async_trait::async_trait;
 use common::dns_request;
 use dashmap::DashMap;
 use doggy_dns_core::handler::{AnswerRotation, DoggyDnsHandler};
@@ -11,10 +10,11 @@ use doggy_dns_nacos::watcher::CachedInstance;
 use doggy_dns_plugin::authority_chain::AuthorityChain;
 use doggy_dns_plugin::{Middleware, MiddlewareAction, RequestOutcome};
 use doggy_dns_testutil::{CapturingHandler, MockZoneHandler};
-use hickory_proto::op::{Edns, Message, ResponseCode};
+use hickory_proto::op::{Edns, Message, Query, ResponseCode};
 use hickory_proto::rr::rdata::A;
 use hickory_proto::rr::{Name, RData, Record, RecordType};
 use hickory_server::net::runtime::TokioTime;
+use hickory_server::resolver::lookup::Lookup;
 use hickory_server::server::{Request, RequestHandler};
 use hickory_server::zone_handler::{
     AuthLookup, LookupControlFlow, LookupError, LookupOptions, LookupRecords, ZoneType,
@@ -36,14 +36,23 @@ fn make_edns_dns_request(domain: &str, rtype: RecordType, max_payload: u16) -> R
     dns_request(1234, domain, rtype, Some(edns))
 }
 
-/// A middleware that always short-circuits.
-struct ShortCircuitMiddleware {
+/// A middleware with a fixed action that counts `after_request` calls.
+struct CountingMiddleware {
+    short_circuit: bool,
     after_request_count: AtomicU64,
 }
 
-impl ShortCircuitMiddleware {
-    fn new() -> Self {
+impl CountingMiddleware {
+    fn short_circuit() -> Self {
         Self {
+            short_circuit: true,
+            after_request_count: AtomicU64::new(0),
+        }
+    }
+
+    fn pass_through() -> Self {
+        Self {
+            short_circuit: false,
             after_request_count: AtomicU64::new(0),
         }
     }
@@ -53,18 +62,16 @@ impl ShortCircuitMiddleware {
     }
 }
 
-#[async_trait]
-impl Middleware for ShortCircuitMiddleware {
-    async fn before_request(&self, _request: &Request) -> MiddlewareAction {
-        MiddlewareAction::ShortCircuit
+impl Middleware for CountingMiddleware {
+    fn before_request(&self, _request: &Request) -> MiddlewareAction {
+        if self.short_circuit {
+            MiddlewareAction::ShortCircuit
+        } else {
+            MiddlewareAction::Continue
+        }
     }
 
-    async fn after_request(
-        &self,
-        _request: &Request,
-        _duration_ms: u64,
-        _outcome: &RequestOutcome,
-    ) {
+    fn after_request(&self, _request: &Request, _duration_ms: u64, _outcome: &RequestOutcome) {
         self.after_request_count.fetch_add(1, Ordering::Relaxed);
     }
 }
@@ -107,13 +114,12 @@ impl OutcomeCaptureMiddleware {
     }
 }
 
-#[async_trait]
 impl Middleware for OutcomeCaptureMiddleware {
-    async fn before_request(&self, _request: &Request) -> MiddlewareAction {
+    fn before_request(&self, _request: &Request) -> MiddlewareAction {
         MiddlewareAction::Continue
     }
 
-    async fn after_request(&self, _request: &Request, _duration_ms: u64, outcome: &RequestOutcome) {
+    fn after_request(&self, _request: &Request, _duration_ms: u64, outcome: &RequestOutcome) {
         *self.outcome.lock().unwrap() = Some(outcome.clone());
     }
 }
@@ -175,7 +181,7 @@ async fn handler_authority_error_returns_servfail() {
 #[tokio::test]
 async fn handler_middleware_short_circuit_returns_refused() {
     let chain = AuthorityChain::new(vec![]);
-    let sc_mw = Arc::new(ShortCircuitMiddleware::new());
+    let sc_mw = Arc::new(CountingMiddleware::short_circuit());
     let handler = DoggyDnsHandler::new(
         vec![sc_mw.clone() as Arc<dyn Middleware>],
         Arc::new(chain),
@@ -193,11 +199,18 @@ async fn handler_middleware_short_circuit_returns_refused() {
 }
 
 #[tokio::test]
-async fn handler_after_request_called_on_short_circuit() {
+async fn after_request_skips_middlewares_that_never_ran_before_request() {
+    // The short-circuiting middleware and everything before it ran
+    // `before_request`; a later middleware did not, so its `after_request`
+    // must not fire (that is what keeps the in-flight gauge balanced).
     let chain = AuthorityChain::new(vec![]);
-    let sc_mw = Arc::new(ShortCircuitMiddleware::new());
+    let sc_mw = Arc::new(CountingMiddleware::short_circuit());
+    let later = Arc::new(CountingMiddleware::pass_through());
     let handler = DoggyDnsHandler::new(
-        vec![sc_mw.clone() as Arc<dyn Middleware>],
+        vec![
+            sc_mw.clone() as Arc<dyn Middleware>,
+            later.clone() as Arc<dyn Middleware>,
+        ],
         Arc::new(chain),
         false,
         AnswerRotation::new(false),
@@ -209,8 +222,9 @@ async fn handler_after_request_called_on_short_circuit() {
         .handle_request::<_, TokioTime>(&request, mock.clone())
         .await;
 
-    // after_request should still be called even on short-circuit
+    assert_eq!(mock.response_code(), Some(ResponseCode::Refused));
     assert_eq!(sc_mw.after_request_calls(), 1);
+    assert_eq!(later.after_request_calls(), 0);
 }
 
 #[tokio::test]
@@ -590,6 +604,14 @@ fn answer_ipv4s(message: &Message) -> Vec<Ipv4Addr> {
         .collect()
 }
 
+/// The two A records both rotation tests answer with.
+fn two_a_records(name: &Name) -> [Record; 2] {
+    [
+        Record::from_rdata(name.clone(), 60, RData::A(A(Ipv4Addr::new(203, 0, 113, 1)))),
+        Record::from_rdata(name.clone(), 60, RData::A(A(Ipv4Addr::new(203, 0, 113, 2)))),
+    ]
+}
+
 /// One A query against `handler`; the handler is shared, not rebuilt per query.
 async fn ask(handler: &DoggyDnsHandler, domain: &str) -> Message {
     let request = make_dns_request(domain, RecordType::A);
@@ -696,13 +718,12 @@ async fn rotated_answers_reach_the_xdp_cache_payload() {
 
 #[tokio::test]
 async fn rotate_answers_cycles_the_cloned_record_path() {
-    // Rotation lives at the one choke point every record path passes through, so
-    // the clone-collect path used by `native`/`forward` answers cycles too.
+    // Rotation lives at the one choke point every record path passes through.
     //
     // The fake authority keeps its records behind an `Arc` rather than an owned
-    // `Vec`: the `LookupRecords::Section` arm of `take_answer_records` does not
-    // match, so the records are collected by clone — the same arm
-    // `AuthLookup::Resolved`, which `native` and `forward` return, falls through to.
+    // `Vec`: the `LookupRecords::Section` arm of `answer_records` does not
+    // match, so the records are collected by clone. `native` and `forward`
+    // return `AuthLookup::Resolved` instead, which the next test covers.
     let chain = AuthorityChain::new(vec![(
         "external".to_string(),
         Arc::new(MockZoneHandler::new(
@@ -712,14 +733,7 @@ async fn rotate_answers_cycles_the_cloned_record_path() {
                 let answer_name = Name::from(name.clone());
                 let mut record_set =
                     hickory_proto::rr::RecordSet::new(answer_name.clone(), RecordType::A, 0);
-                record_set.set_records(vec![
-                    Record::from_rdata(
-                        answer_name.clone(),
-                        60,
-                        RData::A(A(Ipv4Addr::new(203, 0, 113, 1))),
-                    ),
-                    Record::from_rdata(answer_name, 60, RData::A(A(Ipv4Addr::new(203, 0, 113, 2)))),
-                ]);
+                record_set.set_records(two_a_records(&answer_name).to_vec());
                 LookupControlFlow::Continue(Ok(AuthLookup::answers(
                     LookupRecords::new(LookupOptions::default(), Arc::new(record_set)),
                     None,
@@ -748,5 +762,42 @@ async fn rotate_answers_cycles_the_cloned_record_path() {
             vec![Ipv4Addr::new(203, 0, 113, 1), Ipv4Addr::new(203, 0, 113, 2)],
         ],
         "the clone-collect path must rotate like the move path"
+    );
+}
+
+#[tokio::test]
+async fn rotate_answers_cycles_the_resolved_lookup_path() {
+    // `native` and `forward` answer with `AuthLookup::Resolved`. The handler
+    // now borrows the resolver's records instead of cloning them, so rotation
+    // moves the start offset across that borrowed slice.
+    let chain = AuthorityChain::new(vec![(
+        "external".to_string(),
+        Arc::new(MockZoneHandler::new(
+            ZoneType::External,
+            ".",
+            |name, _, _, _| {
+                let answer_name = Name::from(name.clone());
+                let query = Query::query(answer_name.clone(), RecordType::A);
+                let lookup = Lookup::new_with_max_ttl(query, two_a_records(&answer_name));
+                LookupControlFlow::Continue(Ok(AuthLookup::Resolved(lookup)))
+            },
+        )),
+    )]);
+    let handler = DoggyDnsHandler::new(vec![], Arc::new(chain), false, AnswerRotation::new(true));
+
+    let mut sequences = Vec::new();
+    for _ in 0..3 {
+        let message = ask(&handler, "two-a.example.org.").await;
+        sequences.push(answer_ipv4s(&message));
+    }
+
+    assert_eq!(
+        sequences,
+        [
+            vec![Ipv4Addr::new(203, 0, 113, 1), Ipv4Addr::new(203, 0, 113, 2)],
+            vec![Ipv4Addr::new(203, 0, 113, 2), Ipv4Addr::new(203, 0, 113, 1)],
+            vec![Ipv4Addr::new(203, 0, 113, 1), Ipv4Addr::new(203, 0, 113, 2)],
+        ],
+        "the borrowed resolved path must rotate like the owned path"
     );
 }

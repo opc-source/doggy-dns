@@ -83,7 +83,7 @@ impl<C: ServiceCatalog + 'static> NacosAuthority<C> {
     ) -> LookupControlFlow<AuthLookup> {
         // The service exists, but we only serve address records.
         if !matches!(rtype, RecordType::A | RecordType::AAAA) {
-            return LookupControlFlow::Continue(Err(LookupError::NameExists));
+            return LookupControlFlow::Break(Err(LookupError::NameExists));
         }
 
         // The record owner is built per record inside the builder, from the
@@ -94,10 +94,10 @@ impl<C: ServiceCatalog + 'static> NacosAuthority<C> {
 
         if records.is_empty() {
             // Service exists, but has no address of the requested family.
-            return LookupControlFlow::Continue(Err(LookupError::NameExists));
+            return LookupControlFlow::Break(Err(LookupError::NameExists));
         }
 
-        LookupControlFlow::Continue(Ok(AuthLookup::answers(
+        LookupControlFlow::Break(Ok(AuthLookup::answers(
             LookupRecords::Section(records),
             None,
         )))
@@ -107,14 +107,14 @@ impl<C: ServiceCatalog + 'static> NacosAuthority<C> {
 /// The zone exists but this name does not, so the answer is authoritative and
 /// must never fall through to a later plugin.
 fn nxdomain() -> LookupControlFlow<AuthLookup> {
-    LookupControlFlow::Continue(Err(LookupError::ResponseCode(ResponseCode::NXDomain)))
+    LookupControlFlow::Break(Err(LookupError::ResponseCode(ResponseCode::NXDomain)))
 }
 
 /// The backend behind the catalog failed, so the name's existence is unknown.
 /// SERVFAIL keeps the failure transient for the client instead of turning it
 /// into a negative answer that outlives the outage.
 fn servfail() -> LookupControlFlow<AuthLookup> {
-    LookupControlFlow::Continue(Err(LookupError::ResponseCode(ResponseCode::ServFail)))
+    LookupControlFlow::Break(Err(LookupError::ResponseCode(ResponseCode::ServFail)))
 }
 
 /// SOA for the zone apex.
@@ -162,13 +162,13 @@ impl<C: ServiceCatalog + 'static> ZoneHandler for NacosAuthority<C> {
         // Equal label count plus `zone_of` is name equality.
         if name.iter().count() == self.origin.iter().count() {
             return if rtype == RecordType::SOA {
-                LookupControlFlow::Continue(Ok(AuthLookup::answers(
+                LookupControlFlow::Break(Ok(AuthLookup::answers(
                     LookupRecords::Section(vec![self.apex_soa.clone()]),
                     None,
                 )))
             } else {
                 // The zone exists, so every other apex type is NODATA.
-                LookupControlFlow::Continue(Err(LookupError::NameExists))
+                LookupControlFlow::Break(Err(LookupError::NameExists))
             };
         }
 

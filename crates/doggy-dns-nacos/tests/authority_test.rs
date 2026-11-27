@@ -45,11 +45,11 @@ async fn resolves_known_service() {
         .await;
 
     match result {
-        LookupControlFlow::Continue(Ok(lookup)) => {
+        LookupControlFlow::Break(Ok(lookup)) => {
             let records: Vec<_> = lookup.iter().collect();
             assert_eq!(records.len(), 2);
         }
-        _ => panic!("Expected Continue(Ok), got unexpected result"),
+        _ => panic!("Expected Break(Ok), got unexpected result"),
     }
 }
 
@@ -74,10 +74,10 @@ async fn resolves_dotted_service_name() {
         .await;
 
     match result {
-        LookupControlFlow::Continue(Ok(lookup)) => {
+        LookupControlFlow::Break(Ok(lookup)) => {
             assert_eq!(lookup.iter().count(), 1);
         }
-        _ => panic!("Expected Continue(Ok), got unexpected result"),
+        _ => panic!("Expected Break(Ok), got unexpected result"),
     }
 }
 
@@ -96,7 +96,7 @@ async fn unknown_service_in_zone_returns_authoritative_nxdomain() {
     assert!(
         matches!(
             result,
-            LookupControlFlow::Continue(Err(LookupError::ResponseCode(ResponseCode::NXDomain)))
+            LookupControlFlow::Break(Err(LookupError::ResponseCode(ResponseCode::NXDomain)))
         ),
         "unknown service inside the zone must be authoritative NXDOMAIN"
     );
@@ -115,7 +115,7 @@ async fn malformed_name_in_zone_returns_nxdomain() {
 
     assert!(matches!(
         result,
-        LookupControlFlow::Continue(Err(LookupError::ResponseCode(ResponseCode::NXDomain)))
+        LookupControlFlow::Break(Err(LookupError::ResponseCode(ResponseCode::NXDomain)))
     ));
 }
 
@@ -132,7 +132,7 @@ async fn zone_apex_returns_nodata() {
 
     assert!(matches!(
         result,
-        LookupControlFlow::Continue(Err(LookupError::NameExists))
+        LookupControlFlow::Break(Err(LookupError::NameExists))
     ));
 }
 
@@ -147,7 +147,7 @@ async fn zone_apex_soa_query_returns_soa_record() {
         .await;
 
     match result {
-        LookupControlFlow::Continue(Ok(lookup)) => {
+        LookupControlFlow::Break(Ok(lookup)) => {
             let records: Vec<_> = lookup.iter().collect();
             assert_eq!(records.len(), 1);
             let record = records[0];
@@ -159,7 +159,7 @@ async fn zone_apex_soa_query_returns_soa_record() {
             assert_eq!(soa.minimum, 6);
             assert_eq!(&soa.mname, &Name::from_str("nacos.local.").unwrap());
         }
-        _ => panic!("Expected Continue(Ok) with an SOA record"),
+        _ => panic!("Expected Break(Ok) with an SOA record"),
     }
 }
 
@@ -178,7 +178,7 @@ async fn family_without_records_returns_nodata() {
     assert!(
         matches!(
             result,
-            LookupControlFlow::Continue(Err(LookupError::NameExists))
+            LookupControlFlow::Break(Err(LookupError::NameExists))
         ),
         "A-only service queried for AAAA must be NODATA, not NXDOMAIN"
     );
@@ -211,12 +211,12 @@ async fn a_query_returns_only_a_records() {
         .await;
 
     match result {
-        LookupControlFlow::Continue(Ok(lookup)) => {
+        LookupControlFlow::Break(Ok(lookup)) => {
             let records: Vec<_> = lookup.iter().collect();
             assert_eq!(records.len(), 1);
             assert_eq!(records[0].record_type(), RecordType::A);
         }
-        _ => panic!("Expected Continue(Ok), got unexpected result"),
+        _ => panic!("Expected Break(Ok), got unexpected result"),
     }
 }
 
@@ -247,12 +247,12 @@ async fn aaaa_query_returns_only_aaaa_records() {
         .await;
 
     match result {
-        LookupControlFlow::Continue(Ok(lookup)) => {
+        LookupControlFlow::Break(Ok(lookup)) => {
             let records: Vec<_> = lookup.iter().collect();
             assert_eq!(records.len(), 1);
             assert_eq!(records[0].record_type(), RecordType::AAAA);
         }
-        _ => panic!("Expected Continue(Ok), got unexpected result"),
+        _ => panic!("Expected Break(Ok), got unexpected result"),
     }
 }
 
@@ -270,7 +270,7 @@ async fn unsupported_query_type_on_known_service_returns_nodata() {
 
     assert!(matches!(
         result,
-        LookupControlFlow::Continue(Err(LookupError::NameExists))
+        LookupControlFlow::Break(Err(LookupError::NameExists))
     ));
 }
 
@@ -319,7 +319,7 @@ async fn apex_soa_is_identical_across_lookups() {
             .lookup(&apex, RecordType::SOA, None, LookupOptions::default())
             .await
         {
-            LookupControlFlow::Continue(Ok(lookup)) => {
+            LookupControlFlow::Break(Ok(lookup)) => {
                 soas.push(
                     lookup
                         .iter()
@@ -328,7 +328,7 @@ async fn apex_soa_is_identical_across_lookups() {
                         .clone(),
                 );
             }
-            other => panic!("expected Continue(Ok) for an apex SOA query, got {other}"),
+            other => panic!("expected Break(Ok) for an apex SOA query, got {other}"),
         }
     }
 
@@ -358,7 +358,7 @@ async fn apex_soa_matches_the_record_a_negative_answer_carries() {
         .lookup(&apex, RecordType::SOA, None, LookupOptions::default())
         .await
     {
-        LookupControlFlow::Continue(Ok(lookup)) => lookup.iter().next().cloned(),
+        LookupControlFlow::Break(Ok(lookup)) => lookup.iter().next().cloned(),
         other => panic!("expected an apex SOA, got {other}"),
     };
 
@@ -441,7 +441,7 @@ async fn every_in_zone_address_query_is_answered_from_the_catalog() {
             .await;
 
         match result {
-            LookupControlFlow::Continue(Ok(lookup)) => {
+            LookupControlFlow::Break(Ok(lookup)) => {
                 let records: Vec<_> = lookup.iter().collect();
                 assert_eq!(records.len(), 1);
                 assert_eq!(records[0].data.to_string(), "10.9.9.9");
@@ -476,7 +476,7 @@ async fn a_name_outside_the_configured_group_is_nxdomain_without_reading_the_cat
     assert!(
         matches!(
             result,
-            LookupControlFlow::Continue(Err(LookupError::ResponseCode(ResponseCode::NXDomain)))
+            LookupControlFlow::Break(Err(LookupError::ResponseCode(ResponseCode::NXDomain)))
         ),
         "a name in another group must stay authoritative NXDOMAIN, got {result}"
     );
@@ -503,7 +503,7 @@ async fn a_name_outside_the_configured_namespace_is_nxdomain_without_reading_the
     assert!(
         matches!(
             result,
-            LookupControlFlow::Continue(Err(LookupError::ResponseCode(ResponseCode::NXDomain)))
+            LookupControlFlow::Break(Err(LookupError::ResponseCode(ResponseCode::NXDomain)))
         ),
         "a name in another namespace must stay authoritative NXDOMAIN, got {result}"
     );
@@ -531,7 +531,7 @@ async fn the_configured_group_matches_a_case_folded_label() {
         .await;
 
     match result {
-        LookupControlFlow::Continue(Ok(lookup)) => {
+        LookupControlFlow::Break(Ok(lookup)) => {
             assert_eq!(lookup.iter().count(), 1, "the instance must answer");
         }
         other => panic!("expected the configured group to resolve, got {other}"),
@@ -555,7 +555,7 @@ async fn a_catalog_without_the_service_answers_nxdomain() {
     assert!(
         matches!(
             result,
-            LookupControlFlow::Continue(Err(LookupError::ResponseCode(ResponseCode::NXDomain)))
+            LookupControlFlow::Break(Err(LookupError::ResponseCode(ResponseCode::NXDomain)))
         ),
         "a name the catalog does not know must stay authoritative NXDOMAIN, got {result}"
     );
@@ -581,7 +581,7 @@ async fn a_catalog_backend_failure_answers_servfail() {
     assert!(
         matches!(
             result,
-            LookupControlFlow::Continue(Err(LookupError::ResponseCode(ResponseCode::ServFail)))
+            LookupControlFlow::Break(Err(LookupError::ResponseCode(ResponseCode::ServFail)))
         ),
         "a catalog that cannot answer must not turn an outage into NXDOMAIN, got {result}"
     );
@@ -606,7 +606,7 @@ async fn a_catalog_answer_with_no_usable_instance_is_nodata() {
     assert!(
         matches!(
             result,
-            LookupControlFlow::Continue(Err(LookupError::NameExists))
+            LookupControlFlow::Break(Err(LookupError::NameExists))
         ),
         "an existing service with no usable instance is NODATA, got {result}"
     );
@@ -630,7 +630,7 @@ async fn non_address_queries_consult_the_catalog_and_answer_nodata() {
 
     assert!(matches!(
         result,
-        LookupControlFlow::Continue(Err(LookupError::NameExists))
+        LookupControlFlow::Break(Err(LookupError::NameExists))
     ));
     assert_eq!(catalog.asked().len(), 1);
 }
@@ -652,7 +652,7 @@ async fn non_address_queries_without_a_catalog_answer_are_nxdomain() {
         assert!(
             matches!(
                 result,
-                LookupControlFlow::Continue(Err(LookupError::ResponseCode(ResponseCode::NXDomain)))
+                LookupControlFlow::Break(Err(LookupError::ResponseCode(ResponseCode::NXDomain)))
             ),
             "{rtype} on an unknown name stays NXDOMAIN, got {result}"
         );
@@ -694,7 +694,7 @@ async fn the_zone_apex_never_consults_the_catalog() {
         )
         .await;
 
-    assert!(matches!(result, LookupControlFlow::Continue(Ok(_))));
+    assert!(matches!(result, LookupControlFlow::Break(Ok(_))));
     assert!(catalog.asked().is_empty(), "{:?}", catalog.asked());
 }
 
@@ -713,7 +713,7 @@ async fn a_name_without_group_and_namespace_labels_never_consults_the_catalog() 
 
     assert!(matches!(
         result,
-        LookupControlFlow::Continue(Err(LookupError::ResponseCode(ResponseCode::NXDomain)))
+        LookupControlFlow::Break(Err(LookupError::ResponseCode(ResponseCode::NXDomain)))
     ));
     assert!(catalog.asked().is_empty(), "{:?}", catalog.asked());
 }
@@ -733,7 +733,7 @@ async fn uppercase_wire_name_resolves_from_the_lowercase_cache() {
         .await;
 
     match result {
-        LookupControlFlow::Continue(Ok(lookup)) => {
+        LookupControlFlow::Break(Ok(lookup)) => {
             assert_eq!(lookup.iter().count(), 2, "both seeded instances answer");
         }
         other => panic!("uppercase QNAME must still resolve, got {other}"),

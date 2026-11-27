@@ -5,7 +5,6 @@
 
 use crate::cache::{DnsCacheMap, now_ktime_ns};
 use crate::middleware::compute_cache_entry;
-use async_trait::async_trait;
 use doggy_dns_basic::XdpConfig;
 use doggy_dns_plugin::{Middleware, MiddlewareAction, RequestOutcome};
 use hickory_proto::op::ResponseCode;
@@ -62,13 +61,12 @@ impl XdpCacheMiddleware {
     }
 }
 
-#[async_trait]
 impl Middleware for XdpCacheMiddleware {
-    async fn before_request(&self, _request: &Request) -> MiddlewareAction {
+    fn before_request(&self, _request: &Request) -> MiddlewareAction {
         MiddlewareAction::Continue
     }
 
-    async fn after_request(&self, request: &Request, _duration_ms: u64, outcome: &RequestOutcome) {
+    fn after_request(&self, request: &Request, _duration_ms: u64, outcome: &RequestOutcome) {
         // Only cache successful and NXDomain responses
         if outcome.response_code != ResponseCode::NoError
             && outcome.response_code != ResponseCode::NXDomain

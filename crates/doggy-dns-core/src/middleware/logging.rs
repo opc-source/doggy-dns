@@ -1,12 +1,10 @@
-use async_trait::async_trait;
 use doggy_dns_plugin::{Middleware, MiddlewareAction, RequestOutcome};
 use hickory_server::server::Request;
 
 pub struct LoggingMiddleware;
 
-#[async_trait]
 impl Middleware for LoggingMiddleware {
-    async fn before_request(&self, request: &Request) -> MiddlewareAction {
+    fn before_request(&self, request: &Request) -> MiddlewareAction {
         let request_id = request.metadata.id;
         if let Ok(info) = request.request_info() {
             tracing::info!(
@@ -21,7 +19,7 @@ impl Middleware for LoggingMiddleware {
         MiddlewareAction::Continue
     }
 
-    async fn after_request(&self, request: &Request, duration_ms: u64, outcome: &RequestOutcome) {
+    fn after_request(&self, request: &Request, duration_ms: u64, outcome: &RequestOutcome) {
         let request_id = request.metadata.id;
         if let Ok(info) = request.request_info() {
             tracing::info!(

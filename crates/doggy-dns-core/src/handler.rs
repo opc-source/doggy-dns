@@ -6,6 +6,7 @@ use hickory_proto::op::{Header, HeaderCounts, MessageType, Metadata, OpCode, Res
 use hickory_proto::rr::{LowerName, Record, RecordType};
 use hickory_proto::serialize::binary::BinEncoder;
 use hickory_server::net::xfer::Protocol;
+use hickory_server::resolver::lookup::Lookup;
 use hickory_server::server::{Request, RequestHandler, RequestInfo, ResponseHandler, ResponseInfo};
 use hickory_server::zone_handler::{
     AuthLookup, LookupControlFlow, LookupError, LookupRecords, MessageResponseBuilder,
@@ -26,8 +27,8 @@ use tracing::Instrument;
 /// table that grows with the names seen and an eviction policy to go with it.
 /// Traffic on other names only makes a given name's step jump further ahead,
 /// which spreads no worse.
-/// Rotation moves records inside the already-owned `Vec`, so it costs no
-/// allocation.
+/// Rotation returns an offset into the answer slice, so the emit path replays
+/// the records from there without moving or cloning them.
 #[derive(Debug)]
 pub struct AnswerRotation {
     enabled: bool,
@@ -42,16 +43,15 @@ impl AnswerRotation {
         }
     }
 
-    /// Advances the cursor and rotates `records` so its first entry walks the
-    /// instance list. Single-record and empty answers are left alone, which is
-    /// the common case: one instance, or a negative answer.
-    pub fn apply(&self, records: &mut [Record]) {
-        let len = records.len();
+    /// Advances the cursor and returns the offset the answer should start at,
+    /// so its first entry walks the instance list. Single-record and empty
+    /// answers are left alone, which is the common case: one instance, or a
+    /// negative answer.
+    pub fn offset(&self, len: usize) -> usize {
         if !self.enabled || len < 2 {
-            return;
+            return 0;
         }
-        let offset = self.cursor.fetch_add(1, Ordering::Relaxed) % len;
-        records.rotate_left(offset);
+        self.cursor.fetch_add(1, Ordering::Relaxed) % len
     }
 }
 
@@ -101,19 +101,21 @@ impl DoggyDnsHandler {
         }
     }
 
-    async fn finish(
+    /// Report the outcome to the middlewares whose `before_request` ran, which
+    /// is the first `started` entries: a short-circuit never unbalances a
+    /// counter that `before_request` incremented.
+    fn finish(
         &self,
         request: &Request,
         start: Instant,
         span: &tracing::Span,
         outcome: &RequestOutcome,
+        started: usize,
     ) {
         let duration_ms = start.elapsed().as_millis() as u64;
         record_outcome(span, outcome, duration_ms);
-        for middleware in &self.middlewares {
-            middleware
-                .after_request(request, duration_ms, outcome)
-                .await;
+        for middleware in &self.middlewares[..started] {
+            middleware.after_request(request, duration_ms, outcome);
         }
     }
 
@@ -127,9 +129,10 @@ impl DoggyDnsHandler {
         lookup: AuthLookup,
         ctx: &QueryContext<'_>,
     ) -> (ResponseInfo, RequestOutcome) {
-        let mut records = take_answer_records(lookup);
-        self.rotation.apply(&mut records);
-        let answer_count = records.len();
+        let records = answer_records(lookup);
+        let answers = records.as_slice();
+        let offset = self.rotation.offset(answers.len());
+        let answer_count = answers.len();
 
         // AA marks data the server owns; RA only when the answer
         // came from a recursive backend (forward/native).
@@ -138,7 +141,7 @@ impl DoggyDnsHandler {
         let resp_bytes = if self.xdp_enabled {
             serialize_for_xdp(request, |probe| {
                 let b = MessageResponseBuilder::from_message_request(request);
-                b.build(metadata, records.iter(), &[], &[], &[])
+                b.build(metadata, rotated(answers, offset), &[], &[], &[])
                     .destructive_emit(probe)
                     .is_ok()
             })
@@ -147,13 +150,13 @@ impl DoggyDnsHandler {
         };
 
         let min_ttl = if self.xdp_enabled {
-            min_ttl_from_records(&records)
+            min_ttl_from_records(answers)
         } else {
             None
         };
 
         let send_builder = MessageResponseBuilder::from_message_request(request);
-        let response = send_builder.build(metadata, records.iter(), &[], &[], &[]);
+        let response = send_builder.build(metadata, rotated(answers, offset), &[], &[], &[]);
 
         match response_handle.send_response(response).await {
             Ok(info) => {
@@ -322,11 +325,13 @@ impl RequestHandler for DoggyDnsHandler {
         let span_for_body = span.clone();
 
         async move {
+            let middleware_count = self.middlewares.len();
+
             // Run before_request on all middlewares
-            for middleware in &self.middlewares {
-                if let MiddlewareAction::ShortCircuit = middleware.before_request(request).await {
+            for (index, middleware) in self.middlewares.iter().enumerate() {
+                if let MiddlewareAction::ShortCircuit = middleware.before_request(request) {
                     let outcome = RequestOutcome::error(ResponseCode::Refused);
-                    self.finish(request, start, &span_for_body, &outcome).await;
+                    self.finish(request, start, &span_for_body, &outcome, index + 1);
                     tracing::warn!(
                         request_id = request_id,
                         duration_ms = start.elapsed().as_millis() as u64,
@@ -349,7 +354,7 @@ impl RequestHandler for DoggyDnsHandler {
                 Ok(info) => info,
                 Err(e) => {
                     let outcome = RequestOutcome::error(ResponseCode::FormErr);
-                    self.finish(request, start, &span_for_body, &outcome).await;
+                    self.finish(request, start, &span_for_body, &outcome, middleware_count);
                     tracing::warn!(
                         request_id = request_id,
                         error = %e,
@@ -420,7 +425,7 @@ impl RequestHandler for DoggyDnsHandler {
             };
 
             resolve_span.record("dns.answers", tracing::field::display(outcome.answers));
-            self.finish(request, start, &span_for_body, &outcome).await;
+            self.finish(request, start, &span_for_body, &outcome, middleware_count);
 
             response_info
         }
@@ -580,25 +585,46 @@ fn xdp_error_payload(
     })
 }
 
-/// Move the answer records out of a zone lookup instead of cloning them.
+/// Answer records borrowed from the lookup they belong to, or moved out of it
+/// when the lookup owns a contiguous `Vec`.
 ///
 /// The authorities we own build answers as `LookupRecords::Section`, an owned
-/// `Vec`, so handing it over is a free transfer of records that used to be
-/// rebuilt by `iter().cloned()`: one `Vec` allocation plus a `Name` clone per
-/// record, and that clone allocates as soon as the name outgrows `Name`'s
-/// inline buffer. `forward` and `native` return `AuthLookup::Resolved`, whose
-/// records live behind an `Arc`, so those keep the clone path. Order is
-/// preserved: `Section` iterates forward, the same direction the clone walked,
-/// and `AuthLookup::iter` already ignored `additionals`, so the `..` binding
-/// drops nothing the response carried.
-fn take_answer_records(lookup: AuthLookup) -> Vec<Record> {
+/// `Vec`, so handing it over is a free transfer. `forward` and `native` return
+/// `AuthLookup::Resolved`, whose records live inside the resolver's `Lookup`
+/// behind an `Arc`; keeping the `Lookup` alive and borrowing its slice avoids
+/// the per-record clone that used to allocate a new `Name` whenever it outgrew
+/// `Name`'s inline buffer. The remaining record-set shapes are not contiguous,
+/// so those still collect by clone. Order is preserved: `Section` iterates
+/// forward, and `AuthLookup::iter` already ignored `additionals`, so the `..`
+/// binding drops nothing the response carried.
+enum AnswerRecords {
+    Owned(Vec<Record>),
+    Resolved(Lookup),
+}
+
+impl AnswerRecords {
+    fn as_slice(&self) -> &[Record] {
+        match self {
+            Self::Owned(records) => records,
+            Self::Resolved(lookup) => lookup.answers(),
+        }
+    }
+}
+
+fn answer_records(lookup: AuthLookup) -> AnswerRecords {
     match lookup {
         AuthLookup::Records {
             answers: LookupRecords::Section(records),
             ..
-        } => records,
-        lookup => lookup.iter().cloned().collect(),
+        } => AnswerRecords::Owned(records),
+        AuthLookup::Resolved(lookup) => AnswerRecords::Resolved(lookup),
+        lookup => AnswerRecords::Owned(lookup.iter().cloned().collect()),
     }
+}
+
+/// The answer records in rotated order, starting at `offset`.
+fn rotated(records: &[Record], offset: usize) -> impl Iterator<Item = &Record> {
+    records[offset..].iter().chain(records[..offset].iter())
 }
 
 /// Extract the minimum TTL from a slice of DNS records.

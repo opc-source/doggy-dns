@@ -1,12 +1,13 @@
 use crate::builtin::wire_query_name;
 use anyhow::Result;
 use async_trait::async_trait;
+use hickory_proto::op::ResponseCode;
 use hickory_proto::rr::{LowerName, Name, RecordType, TSigResponseContext};
 use hickory_resolver::Resolver;
 use hickory_resolver::net::runtime::TokioRuntimeProvider;
 use hickory_server::server::{Request, RequestInfo};
 use hickory_server::zone_handler::{
-    AuthLookup, AxfrPolicy, LookupControlFlow, LookupOptions, ZoneHandler, ZoneType,
+    AuthLookup, AxfrPolicy, LookupControlFlow, LookupError, LookupOptions, ZoneHandler, ZoneType,
 };
 use std::time::Duration;
 
@@ -24,8 +25,16 @@ impl NativeAuthority {
         opts.positive_max_ttl = Some(max_ttl);
         let resolver = builder.build()?;
 
+        Ok(Self::from_resolver(resolver))
+    }
+
+    /// Build from a caller-supplied resolver.
+    ///
+    /// `new` reads the operating system's resolver configuration; this is the
+    /// seam for tests that need to point the authority at a specific server.
+    pub fn from_resolver(resolver: Resolver<TokioRuntimeProvider>) -> Self {
         let origin = LowerName::from(Name::root());
-        Ok(Self { resolver, origin })
+        Self { resolver, origin }
     }
 }
 
@@ -64,7 +73,7 @@ impl ZoneHandler for NativeAuthority {
                     );
                     LookupControlFlow::Skip
                 } else {
-                    LookupControlFlow::Continue(Ok(AuthLookup::Resolved(lookup)))
+                    LookupControlFlow::Break(Ok(AuthLookup::Resolved(lookup)))
                 }
             }
             Err(e) if e.is_nx_domain() || e.is_no_records_found() => {
@@ -81,9 +90,9 @@ impl ZoneHandler for NativeAuthority {
                     query = %name,
                     qtype = ?rtype,
                     error = %e,
-                    "system resolver lookup failed, falling through"
+                    "system resolver lookup failed, answering SERVFAIL"
                 );
-                LookupControlFlow::Skip
+                LookupControlFlow::Continue(Err(LookupError::ResponseCode(ResponseCode::ServFail)))
             }
         }
     }

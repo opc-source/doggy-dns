@@ -16,7 +16,7 @@ async fn logging_before_request_returns_continue() {
     use doggy_dns_core::middleware::logging::LoggingMiddleware;
     let mw = LoggingMiddleware;
     let request = make_dns_request("example.com.", RecordType::A);
-    let action = mw.before_request(&request).await;
+    let action = mw.before_request(&request);
     assert!(matches!(action, MiddlewareAction::Continue));
 }
 
@@ -26,5 +26,5 @@ async fn logging_after_request_completes_without_panic() {
     let mw = LoggingMiddleware;
     let request = make_dns_request("example.com.", RecordType::A);
     let outcome = RequestOutcome::success("native".into(), 1, None, None);
-    mw.after_request(&request, 42, &outcome).await;
+    mw.after_request(&request, 42, &outcome);
 }

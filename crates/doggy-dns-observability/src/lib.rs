@@ -229,7 +229,7 @@ fn install_subscriber(
     logger_provider: Option<&SdkLoggerProvider>,
     tracer_provider: Option<&SdkTracerProvider>,
 ) -> Result<LogLevelHandle> {
-    let stdout = !config.enabled || config.logs.stdout;
+    let stdout = config.logs.stdout;
     let json = stdout && log_format.is_some_and(|format| format.eq_ignore_ascii_case("json"));
 
     let stdout_inner: log_control::BoxedLayer<Registry> = if json {

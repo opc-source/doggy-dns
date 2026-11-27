@@ -26,7 +26,7 @@ async fn forward_resolves_known_domain() {
         .await;
 
     match result {
-        LookupControlFlow::Continue(Ok(_)) | LookupControlFlow::Break(Ok(_)) => {
+        LookupControlFlow::Break(Ok(_)) => {
             // Success: resolved
         }
         _ => panic!("Expected successful lookup, got non-success result"),
@@ -103,7 +103,7 @@ async fn forward_uses_configured_upstream_port() {
         .await;
 
     match result {
-        LookupControlFlow::Continue(Ok(lookup)) | LookupControlFlow::Break(Ok(lookup)) => {
+        LookupControlFlow::Break(Ok(lookup)) => {
             assert_eq!(lookup.iter().count(), 1);
         }
         _ => panic!("Expected successful lookup through the configured port"),
@@ -130,7 +130,7 @@ async fn forward_maps_upstream_nxdomain() {
     assert!(
         matches!(
             result,
-            LookupControlFlow::Continue(Err(LookupError::ResponseCode(ResponseCode::NXDomain)))
+            LookupControlFlow::Break(Err(LookupError::ResponseCode(ResponseCode::NXDomain)))
         ),
         "upstream NXDOMAIN must stay NXDOMAIN, not become SERVFAIL"
     );
@@ -149,7 +149,7 @@ async fn forward_maps_upstream_nodata() {
     assert!(
         matches!(
             result,
-            LookupControlFlow::Continue(Err(LookupError::NameExists))
+            LookupControlFlow::Break(Err(LookupError::NameExists))
         ),
         "upstream NOERROR/empty must be NODATA"
     );
@@ -199,9 +199,7 @@ async fn forward_forwards_names_with_underscore_labels() {
         .await;
 
     let answers = match result {
-        LookupControlFlow::Continue(Ok(lookup)) | LookupControlFlow::Break(Ok(lookup)) => {
-            lookup.iter().count()
-        }
+        LookupControlFlow::Break(Ok(lookup)) => lookup.iter().count(),
         _ => 0,
     };
     assert_eq!(

@@ -19,11 +19,16 @@ Part of [README](../README.md).
 1. **Middleware chain** runs `before_request()` on each middleware in order. If any returns `ShortCircuit`, the request is refused immediately.
 2. **Authority chain** iterates handlers sequentially. Each handler returns one of:
    - `Skip` -- does not handle this query, try the next handler
-   - `Continue(Ok(records))` -- resolved, return records
-   - `Continue(Err(e))` / `Break(Err(e))` -- authoritative failure; the lookup
-     error maps to `NXDOMAIN` (`ResponseCode::NXDomain`), `NODATA`
-     (`NameExists`), or `SERVFAIL` for anything else
-3. If all handlers skip, the response is `NXDOMAIN`.
+   - `Break(Ok(records))` -- final answer, return it
+   - `Break(Err(e))` -- final failure; the lookup error maps to `NXDOMAIN`
+     (`ResponseCode::NXDomain`), `NODATA` (`NameExists`), or `SERVFAIL` for
+     anything else
+   - `Continue` -- provisional: the first one is kept as a fallback while later
+     handlers are tried, and returned only if none breaks. External backends use
+     `Continue(SERVFAIL)` for a failed lookup, so native → forward fallback
+     works without turning an outage into `NXDOMAIN`.
+3. If all handlers skip and no provisional result exists, the response is
+   `NXDOMAIN`.
 4. **Response flags and negative caching**: answers from a zone-owning handler
    (`ZoneType::Primary`) set `AA`, clear `RA`, and carry the zone apex `SOA`
    in negative responses so downstream resolvers can cache them (RFC 2308).
@@ -33,7 +38,9 @@ Part of [README](../README.md).
    response, so clients that use the first record spread across instances. It
    runs in the handler, after the authority chain and before both the response
    and the XDP cache payload are built, so every authority gets it and
-   single-record and negative answers are untouched.
+   single-record and negative answers are untouched. It supplies a start
+   offset that the emit path reads as two borrowed slices: resolver-owned
+   answers are never cloned or moved.
 6. Middleware chain runs `after_request()` with elapsed time and the final outcome (response code, authority, answer count).
 
 ## Plugin axes
@@ -51,13 +58,15 @@ Part of [README](../README.md).
 | `native` | Resolves using the OS system resolver (`/etc/resolv.conf`) |
 | `forward` | Resolves using explicit upstream DNS servers. Accepts `IP` or `IP:port` (port defaults to 53) and uses the configured port for both UDP and TCP |
 
-Plugins are evaluated in the order defined in the `[[plugins]]` config array. The first handler that returns a non-Skip result wins.
+Plugins are evaluated in the order defined in the `[[plugins]]` config array. The first handler that returns `Break` wins; a `Continue` is kept as a fallback in case no later handler breaks.
 
 `ForwardAuthority` keeps upstream semantics: `NXDOMAIN` and `NODATA` responses
-are returned as authoritative negatives, upstream `SERVFAIL`/`REFUSED` keep
-their code, and transport failures (timeout, I/O) become `SERVFAIL` rather than
-silently falling through or turning into `NXDOMAIN`. `NativeAuthority` falls
-through on lookup failure so a later `forward` plugin can still answer.
+are final negatives and every other upstream response code keeps its value, so
+neither silently falls through nor turns into `NXDOMAIN`. An upstream `SERVFAIL`
+or a transport failure (timeout, I/O) is provisional (`Continue(SERVFAIL)`): a
+later plugin may still answer, and the `SERVFAIL` is used only if none does.
+`NativeAuthority` skips `NXDOMAIN`/`NODATA` so a later `forward` can answer, and
+answers `Continue(SERVFAIL)` when the resolver itself fails.
 
 ## Nacos integration
 

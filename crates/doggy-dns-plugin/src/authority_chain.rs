@@ -49,7 +49,10 @@ struct NamedHandler {
 }
 
 /// Iterates through a chain of ZoneHandlers.
-/// Stops at the first handler that returns Continue or Break (not Skip).
+///
+/// Stops at the first `Break`. A `Continue` is provisional: the first one is
+/// remembered while later handlers are tried, and returned only if none of
+/// them breaks. That lets a failed `native` lookup fall back to `forward`.
 pub struct AuthorityChain {
     handlers: Vec<NamedHandler>,
 }
@@ -72,7 +75,9 @@ impl AuthorityChain {
     /// Takes the already-lowercased name the server parsed: `ZoneHandler::lookup`
     /// wants a `&LowerName` anyway, so cloning and re-lowercasing here cost four
     /// allocations per request for nothing.
-    /// Returns the first non-Skip result with the handler name, or Skip if all handlers skip.
+    /// Returns the first `Break` with the handler name. If no handler breaks,
+    /// returns the first `Continue` as a fallback; if every handler skips,
+    /// returns `Skip`.
     pub async fn resolve(
         &self,
         name: &LowerName,
@@ -80,46 +85,22 @@ impl AuthorityChain {
         request_info: Option<&RequestInfo<'_>>,
     ) -> ResolveResult {
         let lookup_options = LookupOptions::default();
+        let mut deferred: Option<ResolveResult> = None;
 
         for entry in &self.handlers {
             let result = entry
                 .handler
                 .lookup(name, record_type, request_info, lookup_options)
                 .await;
+            let authoritative = matches!(
+                entry.handler.zone_type(),
+                ZoneType::Primary | ZoneType::Secondary
+            );
 
-            match &result {
+            match result {
                 LookupControlFlow::Skip => continue,
-                LookupControlFlow::Continue(_) | LookupControlFlow::Break(_) => {
-                    let authoritative = matches!(
-                        entry.handler.zone_type(),
-                        ZoneType::Primary | ZoneType::Secondary
-                    );
-                    let soa = if authoritative
-                        && matches!(
-                            result,
-                            LookupControlFlow::Continue(Err(_)) | LookupControlFlow::Break(Err(_))
-                        ) {
-                        match entry.apex_soa.get() {
-                            Some(cached) => cached.clone(),
-                            None => {
-                                let fetched = apex_soa(entry.handler.as_ref(), request_info).await;
-                                // Only a hit is cached. A `None` can be a
-                                // transient failure of the handler's own SOA
-                                // lookup, and pinning it would drop the SOA
-                                // from every later negative for the rest of
-                                // the process; a miss retries, as the
-                                // uncached code did.
-                                fetched.map(|record| {
-                                    let record = Arc::new(record);
-                                    let _ = entry.apex_soa.set(Some(Arc::clone(&record)));
-                                    record
-                                })
-                            }
-                        }
-                    } else {
-                        None
-                    };
-
+                result @ LookupControlFlow::Break(_) => {
+                    let soa = negative_soa(entry, &result, request_info).await;
                     return ResolveResult {
                         outcome: result,
                         handler_name: Some(Arc::clone(&entry.name)),
@@ -127,19 +108,65 @@ impl AuthorityChain {
                         soa,
                     };
                 }
+                // A provisional answer is a fallback, not a verdict: keep the
+                // first one and let a later handler break with a final answer.
+                result @ LookupControlFlow::Continue(_) => {
+                    if deferred.is_none() {
+                        let soa = negative_soa(entry, &result, request_info).await;
+                        deferred = Some(ResolveResult {
+                            outcome: result,
+                            handler_name: Some(Arc::clone(&entry.name)),
+                            authoritative,
+                            soa,
+                        });
+                    }
+                }
             }
         }
 
-        ResolveResult {
+        deferred.unwrap_or(ResolveResult {
             outcome: LookupControlFlow::Skip,
             handler_name: None,
             authoritative: false,
             soa: None,
-        }
+        })
     }
 
     pub fn is_empty(&self) -> bool {
         self.handlers.is_empty()
+    }
+}
+
+/// The apex SOA to attach to an authoritative negative answer.
+async fn negative_soa(
+    entry: &NamedHandler,
+    result: &LookupControlFlow<AuthLookup>,
+    request_info: Option<&RequestInfo<'_>>,
+) -> Option<Arc<Record>> {
+    if !matches!(
+        entry.handler.zone_type(),
+        ZoneType::Primary | ZoneType::Secondary
+    ) || !matches!(
+        result,
+        LookupControlFlow::Continue(Err(_)) | LookupControlFlow::Break(Err(_))
+    ) {
+        return None;
+    }
+
+    match entry.apex_soa.get() {
+        Some(cached) => cached.clone(),
+        None => {
+            let fetched = apex_soa(entry.handler.as_ref(), request_info).await;
+            // Only a hit is cached. A `None` can be a transient failure of the
+            // handler's own SOA lookup, and pinning it would drop the SOA from
+            // every later negative for the rest of the process; a miss retries,
+            // as the uncached code did.
+            fetched.map(|record| {
+                let record = Arc::new(record);
+                let _ = entry.apex_soa.set(Some(Arc::clone(&record)));
+                record
+            })
+        }
     }
 }
 

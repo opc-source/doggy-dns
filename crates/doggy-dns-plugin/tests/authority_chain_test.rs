@@ -3,11 +3,12 @@
 use doggy_dns_plugin::authority_chain::AuthorityChain;
 use doggy_dns_testutil::MockZoneHandler;
 use hickory_proto::op::ResponseCode;
-use hickory_proto::rr::rdata::SOA;
+use hickory_proto::rr::rdata::{A, SOA};
 use hickory_proto::rr::{LowerName, Name, RData, Record, RecordType};
 use hickory_server::zone_handler::{
     AuthLookup, LookupControlFlow, LookupError, LookupRecords, ZoneType,
 };
+use std::net::Ipv4Addr;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -25,7 +26,39 @@ fn break_handler() -> MockZoneHandler {
 /// A handler that always fails the lookup with SERVFAIL.
 fn error_handler() -> MockZoneHandler {
     MockZoneHandler::new(ZoneType::Primary, "error.local.", |_, _, _, _| {
+        LookupControlFlow::Break(Err(LookupError::ResponseCode(ResponseCode::ServFail)))
+    })
+}
+
+fn external_servfail() -> MockZoneHandler {
+    MockZoneHandler::new(ZoneType::External, ".", |_, _, _, _| {
         LookupControlFlow::Continue(Err(LookupError::ResponseCode(ResponseCode::ServFail)))
+    })
+}
+
+fn external_nxdomain() -> MockZoneHandler {
+    MockZoneHandler::new(ZoneType::External, ".", |_, _, _, _| {
+        LookupControlFlow::Break(Err(LookupError::ResponseCode(ResponseCode::NXDomain)))
+    })
+}
+
+fn external_skip() -> MockZoneHandler {
+    MockZoneHandler::new(ZoneType::External, ".", |_, _, _, _| {
+        LookupControlFlow::Skip
+    })
+}
+
+fn external_answer() -> MockZoneHandler {
+    MockZoneHandler::new(ZoneType::External, ".", |name, _, _, _| {
+        let record = Record::from_rdata(
+            Name::from(name.clone()),
+            60,
+            RData::A(A(Ipv4Addr::new(203, 0, 113, 1))),
+        );
+        LookupControlFlow::Break(Ok(AuthLookup::answers(
+            LookupRecords::Section(vec![record]),
+            None,
+        )))
     })
 }
 
@@ -39,7 +72,7 @@ async fn empty_chain_returns_skip() {
 }
 
 #[tokio::test]
-async fn single_handler_hit_returns_continue() {
+async fn single_handler_hit_returns_break() {
     use dashmap::DashMap;
     use doggy_dns_nacos::authority::NacosAuthority;
     use doggy_dns_nacos::watcher::CachedInstance;
@@ -60,7 +93,7 @@ async fn single_handler_hit_returns_continue() {
 
     let name = LowerName::from(Name::from_str("my-svc.DEFAULT_GROUP.public.nacos.local.").unwrap());
     let result = chain.resolve(&name, RecordType::A, None).await;
-    assert!(matches!(result.outcome, LookupControlFlow::Continue(Ok(_))));
+    assert!(matches!(result.outcome, LookupControlFlow::Break(Ok(_))));
     assert_eq!(result.handler_name.as_deref(), Some("nacos"));
 }
 
@@ -77,10 +110,7 @@ async fn single_handler_miss_is_authoritative_nxdomain() {
     let name =
         LowerName::from(Name::from_str("unknown.DEFAULT_GROUP.public.nacos.local.").unwrap());
     let result = chain.resolve(&name, RecordType::A, None).await;
-    assert!(matches!(
-        result.outcome,
-        LookupControlFlow::Continue(Err(_))
-    ));
+    assert!(matches!(result.outcome, LookupControlFlow::Break(Err(_))));
     assert_eq!(result.handler_name.as_deref(), Some("nacos"));
 }
 
@@ -121,7 +151,7 @@ async fn first_skips_second_resolves() {
     // Query matches zone-b, not zone-a → first skips, second resolves
     let name = LowerName::from(Name::from_str("web.DEFAULT_GROUP.public.zone-b.local.").unwrap());
     let result = chain.resolve(&name, RecordType::A, None).await;
-    assert!(matches!(result.outcome, LookupControlFlow::Continue(Ok(_))));
+    assert!(matches!(result.outcome, LookupControlFlow::Break(Ok(_))));
     assert_eq!(result.handler_name.as_deref(), Some("zone-b"));
 }
 
@@ -175,7 +205,7 @@ async fn break_result_stops_chain_and_returns_handler_name() {
 }
 
 #[tokio::test]
-async fn continue_error_propagated_with_handler_name() {
+async fn break_error_propagated_with_handler_name() {
     let chain = AuthorityChain::new(vec![(
         "error-handler".to_string(),
         Arc::new(error_handler()),
@@ -184,10 +214,7 @@ async fn continue_error_propagated_with_handler_name() {
     let name = LowerName::from(Name::from_str("anything.example.com.").unwrap());
     let result = chain.resolve(&name, RecordType::A, None).await;
 
-    assert!(matches!(
-        result.outcome,
-        LookupControlFlow::Continue(Err(_))
-    ));
+    assert!(matches!(result.outcome, LookupControlFlow::Break(Err(_))));
     assert_eq!(result.handler_name.as_deref(), Some("error-handler"));
 }
 
@@ -218,13 +245,61 @@ async fn authoritative_negative_carries_apex_soa() {
 }
 
 #[tokio::test]
+async fn external_servfail_falls_through_to_a_later_answer() {
+    let chain = AuthorityChain::new(vec![
+        ("native".to_string(), Arc::new(external_servfail())),
+        ("forward".to_string(), Arc::new(external_answer())),
+    ]);
+    let name = LowerName::from(Name::from_str("example.com.").unwrap());
+
+    let result = chain.resolve(&name, RecordType::A, None).await;
+
+    assert!(matches!(result.outcome, LookupControlFlow::Break(Ok(_))));
+    assert_eq!(result.handler_name.as_deref(), Some("forward"));
+}
+
+#[tokio::test]
+async fn external_servfail_is_returned_when_nothing_else_answers() {
+    let chain = AuthorityChain::new(vec![
+        ("native".to_string(), Arc::new(external_servfail())),
+        ("forward".to_string(), Arc::new(external_skip())),
+    ]);
+    let name = LowerName::from(Name::from_str("example.com.").unwrap());
+
+    let result = chain.resolve(&name, RecordType::A, None).await;
+
+    assert!(matches!(
+        result.outcome,
+        LookupControlFlow::Continue(Err(LookupError::ResponseCode(ResponseCode::ServFail)))
+    ));
+    assert_eq!(result.handler_name.as_deref(), Some("native"));
+}
+
+#[tokio::test]
+async fn external_nxdomain_does_not_fall_through() {
+    let chain = AuthorityChain::new(vec![
+        ("forward".to_string(), Arc::new(external_nxdomain())),
+        ("native".to_string(), Arc::new(external_answer())),
+    ]);
+    let name = LowerName::from(Name::from_str("missing.example.com.").unwrap());
+
+    let result = chain.resolve(&name, RecordType::A, None).await;
+
+    assert!(matches!(
+        result.outcome,
+        LookupControlFlow::Break(Err(LookupError::ResponseCode(ResponseCode::NXDomain)))
+    ));
+    assert_eq!(result.handler_name.as_deref(), Some("forward"));
+}
+
+#[tokio::test]
 async fn external_negative_is_not_authoritative_and_has_no_soa() {
     let chain = AuthorityChain::new(vec![(
         "external".to_string(),
         Arc::new(MockZoneHandler::new(
             ZoneType::External,
             ".",
-            |_, _, _, _| LookupControlFlow::Continue(Err(LookupError::NameExists)),
+            |_, _, _, _| LookupControlFlow::Break(Err(LookupError::NameExists)),
         )),
     )]);
 
@@ -258,12 +333,12 @@ async fn negative_answers_fetch_the_apex_soa_only_once() {
                     30,
                 )),
             );
-            return LookupControlFlow::Continue(Ok(AuthLookup::answers(
+            return LookupControlFlow::Break(Ok(AuthLookup::answers(
                 LookupRecords::Section(vec![soa]),
                 None,
             )));
         }
-        LookupControlFlow::Continue(Err(LookupError::ResponseCode(ResponseCode::NXDomain)))
+        LookupControlFlow::Break(Err(LookupError::ResponseCode(ResponseCode::NXDomain)))
     });
     let chain = AuthorityChain::new(vec![("counting".to_string(), Arc::new(handler))]);
 
