@@ -48,6 +48,17 @@ struct NamedHandler {
     apex_soa: OnceLock<Option<Arc<Record>>>,
 }
 
+impl NamedHandler {
+    /// Whether this handler owns its zone, which sets the `AA` flag and makes
+    /// a negative answer carry the apex SOA.
+    fn is_authoritative(&self) -> bool {
+        matches!(
+            self.handler.zone_type(),
+            ZoneType::Primary | ZoneType::Secondary
+        )
+    }
+}
+
 /// Iterates through a chain of ZoneHandlers.
 ///
 /// Stops at the first `Break`. A `Continue` is provisional: the first one is
@@ -85,22 +96,20 @@ impl AuthorityChain {
         request_info: Option<&RequestInfo<'_>>,
     ) -> ResolveResult {
         let lookup_options = LookupOptions::default();
-        let mut deferred: Option<ResolveResult> = None;
+        // The first provisional result, kept only in case no handler breaks.
+        let mut deferred: Option<(&NamedHandler, LookupControlFlow<AuthLookup>)> = None;
 
         for entry in &self.handlers {
             let result = entry
                 .handler
                 .lookup(name, record_type, request_info, lookup_options)
                 .await;
-            let authoritative = matches!(
-                entry.handler.zone_type(),
-                ZoneType::Primary | ZoneType::Secondary
-            );
 
             match result {
                 LookupControlFlow::Skip => continue,
                 result @ LookupControlFlow::Break(_) => {
-                    let soa = negative_soa(entry, &result, request_info).await;
+                    let authoritative = entry.is_authoritative();
+                    let soa = negative_soa(entry, authoritative, &result, request_info).await;
                     return ResolveResult {
                         outcome: result,
                         handler_name: Some(Arc::clone(&entry.name)),
@@ -112,24 +121,30 @@ impl AuthorityChain {
                 // first one and let a later handler break with a final answer.
                 result @ LookupControlFlow::Continue(_) => {
                     if deferred.is_none() {
-                        let soa = negative_soa(entry, &result, request_info).await;
-                        deferred = Some(ResolveResult {
-                            outcome: result,
-                            handler_name: Some(Arc::clone(&entry.name)),
-                            authoritative,
-                            soa,
-                        });
+                        deferred = Some((entry, result));
                     }
                 }
             }
         }
 
-        deferred.unwrap_or(ResolveResult {
-            outcome: LookupControlFlow::Skip,
-            handler_name: None,
-            authoritative: false,
-            soa: None,
-        })
+        let Some((entry, outcome)) = deferred else {
+            return ResolveResult {
+                outcome: LookupControlFlow::Skip,
+                handler_name: None,
+                authoritative: false,
+                soa: None,
+            };
+        };
+        // Materialize the SOA only for the result that is actually returned, so
+        // a fallback overwritten by a later `Break` costs no extra lookup.
+        let authoritative = entry.is_authoritative();
+        let soa = negative_soa(entry, authoritative, &outcome, request_info).await;
+        ResolveResult {
+            outcome,
+            handler_name: Some(Arc::clone(&entry.name)),
+            authoritative,
+            soa,
+        }
     }
 
     pub fn is_empty(&self) -> bool {
@@ -140,16 +155,16 @@ impl AuthorityChain {
 /// The apex SOA to attach to an authoritative negative answer.
 async fn negative_soa(
     entry: &NamedHandler,
+    authoritative: bool,
     result: &LookupControlFlow<AuthLookup>,
     request_info: Option<&RequestInfo<'_>>,
 ) -> Option<Arc<Record>> {
-    if !matches!(
-        entry.handler.zone_type(),
-        ZoneType::Primary | ZoneType::Secondary
-    ) || !matches!(
-        result,
-        LookupControlFlow::Continue(Err(_)) | LookupControlFlow::Break(Err(_))
-    ) {
+    if !authoritative
+        || !matches!(
+            result,
+            LookupControlFlow::Continue(Err(_)) | LookupControlFlow::Break(Err(_))
+        )
+    {
         return None;
     }
 

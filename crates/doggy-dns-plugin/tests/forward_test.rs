@@ -3,8 +3,11 @@
 use doggy_dns_plugin::builtin::forward::ForwardAuthority;
 use hickory_proto::op::{Message, MessageType, OpCode, ResponseCode};
 use hickory_proto::rr::{LowerName, Name, RData, Record, RecordType, rdata::A};
+use hickory_resolver::Resolver;
+use hickory_resolver::config::{NameServerConfig, ResolverConfig};
+use hickory_resolver::net::runtime::TokioRuntimeProvider;
 use hickory_server::zone_handler::{LookupControlFlow, LookupError, LookupOptions, ZoneHandler};
-use std::net::{Ipv4Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::str::FromStr;
 use std::time::Duration;
 use tokio::net::UdpSocket;
@@ -171,6 +174,51 @@ async fn forward_maps_upstream_servfail() {
             LookupControlFlow::Continue(Err(LookupError::ResponseCode(ResponseCode::ServFail)))
         ),
         "upstream SERVFAIL must stay SERVFAIL"
+    );
+}
+
+#[tokio::test]
+async fn forward_transport_failure_is_a_provisional_servfail() {
+    // A port that was briefly bound and released is closed, so the datagram is
+    // refused. The short timeout keeps the test quick; the assertion pins that
+    // a transport failure behaves like an upstream SERVFAIL: provisional, so a
+    // later authority may still answer.
+    let probe = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))
+        .await
+        .expect("failed to bind probe socket");
+    let closed_port = probe
+        .local_addr()
+        .expect("failed to read probe addr")
+        .port();
+    drop(probe);
+
+    let mut server = NameServerConfig::udp(IpAddr::V4(Ipv4Addr::LOCALHOST));
+    server
+        .connections
+        .first_mut()
+        .expect("udp nameserver has a connection")
+        .port = closed_port;
+    let mut builder = Resolver::builder_with_config(
+        ResolverConfig::from_name_servers(vec![server]),
+        TokioRuntimeProvider::default(),
+    );
+    let options = builder.options_mut();
+    options.timeout = Duration::from_millis(250);
+    options.attempts = 1;
+    let authority =
+        ForwardAuthority::from_resolver(builder.build().expect("failed to build test resolver"), 1);
+
+    let name = LowerName::from(Name::from_str("unreachable.test.").unwrap());
+    let result = authority
+        .lookup(&name, RecordType::A, None, LookupOptions::default())
+        .await;
+
+    assert!(
+        matches!(
+            result,
+            LookupControlFlow::Continue(Err(LookupError::ResponseCode(ResponseCode::ServFail)))
+        ),
+        "a transport failure must be provisional SERVFAIL, got {result}"
     );
 }
 

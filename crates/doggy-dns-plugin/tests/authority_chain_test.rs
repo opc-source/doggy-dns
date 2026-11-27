@@ -62,6 +62,20 @@ fn external_answer() -> MockZoneHandler {
     })
 }
 
+fn external_continue_answer() -> MockZoneHandler {
+    MockZoneHandler::new(ZoneType::External, ".", |name, _, _, _| {
+        let record = Record::from_rdata(
+            Name::from(name.clone()),
+            60,
+            RData::A(A(Ipv4Addr::new(203, 0, 113, 1))),
+        );
+        LookupControlFlow::Continue(Ok(AuthLookup::answers(
+            LookupRecords::Section(vec![record]),
+            None,
+        )))
+    })
+}
+
 #[tokio::test]
 async fn empty_chain_returns_skip() {
     let chain = AuthorityChain::new(vec![]);
@@ -273,6 +287,45 @@ async fn external_servfail_is_returned_when_nothing_else_answers() {
         LookupControlFlow::Continue(Err(LookupError::ResponseCode(ResponseCode::ServFail)))
     ));
     assert_eq!(result.handler_name.as_deref(), Some("native"));
+}
+
+#[tokio::test]
+async fn first_continue_is_kept_when_later_handlers_continue_too() {
+    let later = MockZoneHandler::new(ZoneType::External, ".", |_, _, _, _| {
+        LookupControlFlow::Continue(Err(LookupError::NameExists))
+    });
+    let chain = AuthorityChain::new(vec![
+        ("native".to_string(), Arc::new(external_servfail())),
+        ("later".to_string(), Arc::new(later)),
+    ]);
+    let name = LowerName::from(Name::from_str("example.com.").unwrap());
+
+    let result = chain.resolve(&name, RecordType::A, None).await;
+
+    assert!(matches!(
+        result.outcome,
+        LookupControlFlow::Continue(Err(LookupError::ResponseCode(ResponseCode::ServFail)))
+    ));
+    assert_eq!(result.handler_name.as_deref(), Some("native"));
+}
+
+#[tokio::test]
+async fn continue_ok_is_returned_as_a_fallback() {
+    let chain = AuthorityChain::new(vec![
+        ("external".to_string(), Arc::new(external_continue_answer())),
+        ("later".to_string(), Arc::new(external_skip())),
+    ]);
+    let name = LowerName::from(Name::from_str("example.com.").unwrap());
+
+    let result = chain.resolve(&name, RecordType::A, None).await;
+
+    match result.outcome {
+        LookupControlFlow::Continue(Ok(lookup)) => {
+            assert_eq!(lookup.iter().count(), 1, "the provisional answer survives");
+        }
+        other => panic!("expected Continue(Ok) fallback, got {other}"),
+    }
+    assert_eq!(result.handler_name.as_deref(), Some("external"));
 }
 
 #[tokio::test]

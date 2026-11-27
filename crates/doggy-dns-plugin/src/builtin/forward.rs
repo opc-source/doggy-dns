@@ -55,12 +55,19 @@ impl ForwardAuthority {
             .with_options(opts)
             .build()?;
 
-        let origin = LowerName::from(Name::root());
-        Ok(Self {
+        Ok(Self::from_resolver(resolver, upstream_count))
+    }
+
+    /// Build from a caller-supplied resolver.
+    ///
+    /// `new` builds one around the configured upstreams; this is the seam for
+    /// tests that need specific resolver options such as a short timeout.
+    pub fn from_resolver(resolver: Resolver<TokioRuntimeProvider>, upstream_count: usize) -> Self {
+        Self {
             resolver,
-            origin,
+            origin: LowerName::from(Name::root()),
             upstream_count,
-        })
+        }
     }
 }
 

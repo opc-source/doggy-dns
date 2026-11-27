@@ -10,6 +10,7 @@ use hickory_server::zone_handler::{LookupControlFlow, LookupError, LookupOptions
 use std::net::{IpAddr, Ipv4Addr};
 use std::str::FromStr;
 use std::time::Duration;
+use tokio::net::UdpSocket;
 
 #[tokio::test]
 async fn native_resolves_known_domain() {
@@ -32,15 +33,24 @@ async fn native_resolves_known_domain() {
 
 #[tokio::test]
 async fn native_transport_failure_answers_servfail_instead_of_skipping() {
-    // A closed UDP port on loopback fails fast. Before the fix this path
-    // returned `Skip`, so an all-skipped chain turned a resolver outage into
-    // an authoritative NXDOMAIN.
+    // A port that was briefly bound and released is closed, so the datagram is
+    // refused. Before the fix this path returned `Skip`, so an all-skipped
+    // chain turned a resolver outage into an authoritative NXDOMAIN.
+    let probe = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))
+        .await
+        .expect("failed to bind probe socket");
+    let closed_port = probe
+        .local_addr()
+        .expect("failed to read probe addr")
+        .port();
+    drop(probe);
+
     let mut server = NameServerConfig::udp(IpAddr::V4(Ipv4Addr::LOCALHOST));
     server
         .connections
         .first_mut()
         .expect("udp nameserver has a connection")
-        .port = 9;
+        .port = closed_port;
 
     let mut builder = Resolver::builder_with_config(
         ResolverConfig::from_name_servers(vec![server]),
