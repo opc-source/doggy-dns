@@ -167,8 +167,8 @@ fn bench_handler_pipeline_nacos_hit_xdp_oversize(c: &mut Criterion) {
     );
 }
 
-/// Rotation on a multi-record answer: the atomic cursor plus `rotate_left`
-/// that single-record groups never reach.
+/// Rotation on a multi-record answer: the atomic cursor plus the pair of
+/// borrowed slices the emit path reads, which single-record groups never reach.
 fn bench_handler_pipeline_nacos_hit_rotation(c: &mut Criterion) {
     bench_pipeline(
         c,
@@ -221,10 +221,10 @@ fn bench_handler_pipeline_nacos_servfail(c: &mut Criterion) {
     );
 }
 
-/// The clone fallback in `take_answer_records`: `native`/`forward` answer with
-/// `AuthLookup::Resolved`, whose records live behind the resolver's own
-/// storage. A warm resolver cache hands out a cloned `Lookup` per query, which
-/// is what this fake reproduces without a network.
+/// The borrowed `AuthLookup::Resolved` path: `native`/`forward` answer with a
+/// `Lookup` whose records the handler reads in place. A warm resolver cache
+/// hands out a cloned `Lookup` per query, which is what this fake reproduces
+/// without a network.
 fn resolved_handler(domain: &str, instance_count: u8) -> MockZoneHandler {
     let name = Name::from_str(domain).unwrap();
     let mut query = Query::new();

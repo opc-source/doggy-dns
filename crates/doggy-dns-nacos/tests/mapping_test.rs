@@ -179,7 +179,7 @@ fn to_dns_records_filters_aaaa_records_for_aaaa_query() {
     assert_eq!(records[0].record_type(), RecordType::AAAA);
 }
 
-/// Answer order is the cache order; the record move in `take_answer_records`
+/// Answer order is the cache order; the record move in `answer_records`
 /// depends on it, so pin it down before anything can reorder.
 #[test]
 fn to_dns_records_preserves_instance_order() {

@@ -1,7 +1,6 @@
 use crate::endpoint::{self, Signal};
 use crate::exporter::configured_http;
 use anyhow::{Context, Result};
-use async_trait::async_trait;
 use doggy_dns_basic::{MetricsTemporality, ObservabilityConfig};
 use doggy_dns_plugin::naming::{protocol_name, record_type_name, response_code_name};
 use doggy_dns_plugin::{Middleware, MiddlewareAction, RequestOutcome};
@@ -191,14 +190,13 @@ struct DnsMetricsMiddleware {
     metrics: Arc<DnsMetrics>,
 }
 
-#[async_trait]
 impl Middleware for DnsMetricsMiddleware {
-    async fn before_request(&self, _request: &Request) -> MiddlewareAction {
+    fn before_request(&self, _request: &Request) -> MiddlewareAction {
         self.metrics.in_flight.add(1, &[]);
         MiddlewareAction::Continue
     }
 
-    async fn after_request(&self, request: &Request, duration_ms: u64, outcome: &RequestOutcome) {
+    fn after_request(&self, request: &Request, duration_ms: u64, outcome: &RequestOutcome) {
         self.metrics.in_flight.add(-1, &[]);
         self.metrics.record(request, duration_ms, outcome);
     }

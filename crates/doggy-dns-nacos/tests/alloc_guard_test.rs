@@ -77,8 +77,8 @@ fn measure(
     let result = runtime.block_on(authority.lookup(&lower, rtype, None, LookupOptions::default()));
     let count = ALLOCS.load(Ordering::Relaxed);
     assert!(
-        matches!(result, LookupControlFlow::Continue(_)),
-        "{query}: expected a Continue result inside the zone"
+        matches!(result, LookupControlFlow::Break(_)),
+        "{query}: expected a Break result inside the zone"
     );
     count
 }

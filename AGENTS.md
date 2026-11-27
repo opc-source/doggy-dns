@@ -67,7 +67,7 @@ xdp/
 
 DNS query → **Middleware chain** (before_request) → **AuthorityChain** (sequential lookup) → **Middleware chain** (after_request) → DNS response.
 
-**AuthorityChain** iterates `Vec<(String, Arc<dyn ZoneHandler>)>` in order. Each handler returns `Skip` (try next), `Continue(Ok/Err)`, or `Break(Ok/Err)` (stop). Returns a `ResolveResult` with `outcome` + `handler_name`. The handler maps outcomes to DNS response codes: `NoError`, `NXDomain` (lookup error), or `ServFail`; all-skipped queries return `NXDomain`.
+**AuthorityChain** iterates `Vec<(String, Arc<dyn ZoneHandler>)>` in order. Each handler returns `Skip` (try next), `Continue` (provisional), or `Break` (final, stop). The first `Break` wins; if none breaks, the first `Continue` is the fallback; an all-`Skip` chain returns `NXDomain`. Authorities use `Break` for definitive answers — including authoritative NXDOMAIN/NODATA and a forwarder's upstream verdict. Only a failed external backend returns `Continue(SERVFAIL)`, so `native` can fall back to `forward` while an outage still answers `SERVFAIL` when nothing else does. Returns a `ResolveResult` with `outcome` + `handler_name`; the handler maps outcomes to `NoError`, `NXDomain`, or `ServFail`.
 
 **Middleware** trait (`plugin.rs`): `before_request()` returns `Continue` or `ShortCircuit`; `after_request()` receives elapsed time plus the final outcome (response code, authority, answer count).
 
@@ -79,7 +79,7 @@ DNS query → **Middleware chain** (before_request) → **AuthorityChain** (sequ
 | `native` | `NativeAuthority` | doggy-dns-plugin | Forwards to OS system resolver (/etc/resolv.conf) |
 | `forward` | `ForwardAuthority` | doggy-dns-plugin | Forwards to explicit upstream servers (e.g., 8.8.8.8) |
 
-All implement hickory's `ZoneHandler` trait. Plugins are evaluated in `[[plugins]]` config order; first non-Skip wins.
+All implement hickory's `ZoneHandler` trait. Plugins are evaluated in `[[plugins]]` config order; the first `Break` wins, while a `Continue` is kept only as a fallback.
 
 ### Nacos Integration Flow
 
@@ -191,21 +191,22 @@ cycles the answer records of any response with more than one record, one step
 per rotated response on one process-wide cursor — not one per name, so no table
 grows with the names seen. The cursor is shared by every name and query type and
 advances only when rotation actually happens. It is applied in `DoggyDnsHandler`
-right after `take_answer_records`, before the response and the XDP cache payload
+right after `answer_records`, before the response and the XDP cache payload
 are built, so all three authorities share one behaviour and single-record or
-negative answers are untouched. Rotation is an in-place `rotate_left` on the Vec
-the handler already owns, so it adds no allocation; `doggy-dns-nacos`'s
+negative answers are untouched. Rotation returns a start offset that the emit
+path replays as two borrowed slices, so it moves and clones nothing — an
+`AuthLookup::Resolved` answer (native/forward) is read in place. `doggy-dns-nacos`'s
 `alloc_guard_test` budgets one `authority.lookup` call, which runs upstream of
 rotation and so cannot move. Every other handler test builds its handler with
 `AnswerRotation::new(false)`, so order-sensitive assertions — including the
 `wire_golden_test` bytes — stay pinned to the authority's own order; if a
 rotation change moves those bytes, it changed the response, not the expectation.
 The rotation itself is proven by tests that share one handler across several
-queries and assert the whole answer sequence: on (the `nacos` move path and the
-clone-collect path `native`/`forward` reach), off, and reaching the XDP cache
-payload rather than only the sent response. With XDP enabled a cache hit replays
-the order captured when the entry was written until its TTL expires (rotation
-then only spreads misses).
+queries and assert the whole answer sequence: on (the `nacos` move path, the
+record-set clone path, and the borrowed `AuthLookup::Resolved` path), off, and
+reaching the XDP cache payload rather than only the sent response. With XDP
+enabled a cache hit replays the order captured when the entry was written until
+its TTL expires (rotation then only spreads misses).
 
 ### Server (`core/server.rs`)
 

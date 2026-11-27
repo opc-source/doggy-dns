@@ -54,7 +54,7 @@ async fn chain_nacos_hit() {
         LowerName::from(Name::from_str("web-app.DEFAULT_GROUP.public.nacos.local.").unwrap());
     let result = chain.resolve(&name, RecordType::A, None).await;
 
-    assert!(matches!(result.outcome, LookupControlFlow::Continue(Ok(_))));
+    assert!(matches!(result.outcome, LookupControlFlow::Break(Ok(_))));
     assert_eq!(result.handler_name.as_deref(), Some("nacos"));
 }
 
@@ -87,10 +87,7 @@ async fn chain_outside_nacos_zone_falls_to_forward() {
     let name = LowerName::from(Name::from_str("www.google.com.").unwrap());
     let result = chain.resolve(&name, RecordType::A, None).await;
 
-    assert!(matches!(
-        result.outcome,
-        LookupControlFlow::Continue(Ok(_)) | LookupControlFlow::Break(Ok(_))
-    ));
+    assert!(matches!(result.outcome, LookupControlFlow::Break(Ok(_))));
     assert_eq!(result.handler_name.as_deref(), Some("forward"));
 }
 
@@ -124,9 +121,6 @@ async fn chain_unknown_service_in_nacos_zone_does_not_fall_to_forward() {
         LowerName::from(Name::from_str("missing.DEFAULT_GROUP.public.nacos.local.").unwrap());
     let result = chain.resolve(&name, RecordType::A, None).await;
 
-    assert!(matches!(
-        result.outcome,
-        LookupControlFlow::Continue(Err(_))
-    ));
+    assert!(matches!(result.outcome, LookupControlFlow::Break(Err(_))));
     assert_eq!(result.handler_name.as_deref(), Some("nacos"));
 }

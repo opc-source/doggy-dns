@@ -55,12 +55,19 @@ impl ForwardAuthority {
             .with_options(opts)
             .build()?;
 
-        let origin = LowerName::from(Name::root());
-        Ok(Self {
+        Ok(Self::from_resolver(resolver, upstream_count))
+    }
+
+    /// Build from a caller-supplied resolver.
+    ///
+    /// `new` builds one around the configured upstreams; this is the seam for
+    /// tests that need specific resolver options such as a short timeout.
+    pub fn from_resolver(resolver: Resolver<TokioRuntimeProvider>, upstream_count: usize) -> Self {
+        Self {
             resolver,
-            origin,
+            origin: LowerName::from(Name::root()),
             upstream_count,
-        })
+        }
     }
 }
 
@@ -133,9 +140,9 @@ impl ZoneHandler for ForwardAuthority {
                         qtype = ?rtype,
                         "upstream returned an empty answer"
                     );
-                    LookupControlFlow::Continue(Err(LookupError::NameExists))
+                    LookupControlFlow::Break(Err(LookupError::NameExists))
                 } else {
-                    LookupControlFlow::Continue(Ok(AuthLookup::Resolved(lookup)))
+                    LookupControlFlow::Break(Ok(AuthLookup::Resolved(lookup)))
                 }
             }
             Err(e) => {
@@ -162,7 +169,14 @@ impl ZoneHandler for ForwardAuthority {
                         "upstream forward lookup failed"
                     );
                 }
-                LookupControlFlow::Continue(Err(lookup_error))
+                // A SERVFAIL is a failed backend, not a verdict: leave it
+                // provisional so a later authority can still answer. Every
+                // other upstream response code is final.
+                if response_code == ResponseCode::ServFail {
+                    LookupControlFlow::Continue(Err(lookup_error))
+                } else {
+                    LookupControlFlow::Break(Err(lookup_error))
+                }
             }
         }
     }

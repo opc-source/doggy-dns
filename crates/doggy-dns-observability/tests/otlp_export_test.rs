@@ -69,14 +69,12 @@ async fn exports_logs_metrics_and_traces_with_openobserve_headers() {
     let metrics = telemetry
         .metrics_middleware()
         .expect("metrics middleware should exist");
-    metrics.before_request(&request).await;
-    metrics
-        .after_request(
-            &request,
-            3,
-            &RequestOutcome::success("native".into(), 1, None, None),
-        )
-        .await;
+    metrics.before_request(&request);
+    metrics.after_request(
+        &request,
+        3,
+        &RequestOutcome::success("native".into(), 1, None, None),
+    );
 
     telemetry.force_flush().expect("flush should succeed");
 

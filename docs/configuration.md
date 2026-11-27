@@ -63,7 +63,7 @@ sample_ratio = 0.05   # normal traffic; tracing::error! spans are always capture
 [observability.profiles]
 enabled = false       # CPU only, Linux/macOS, OTLP Profiles Alpha
 
-# Plugins are evaluated in order. First non-Skip result wins.
+# Plugins are evaluated in order. First Break wins; Continue is a fallback.
 [[plugins]]
 kind = "nacos"
 enabled = false

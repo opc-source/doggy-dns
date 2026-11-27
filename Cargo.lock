@@ -821,7 +821,6 @@ name = "doggy-dns-observability"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "async-trait",
  "base64 0.23.1",
  "doggy-dns-basic",
  "doggy-dns-plugin",
@@ -873,7 +872,6 @@ name = "doggy-dns-xdp"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "async-trait",
  "aya",
  "aya-log",
  "criterion",

@@ -22,7 +22,6 @@ tracing-opentelemetry = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 anyhow = { workspace = true }
-async-trait = { workspace = true }
 tokio = { workspace = true }
 reqwest = { workspace = true }
 prost = { workspace = true }
